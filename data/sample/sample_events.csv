@@ -1,0 +1,9 @@
+case_id,activity,timestamp_start,timestamp_end,user,app_name,url,memo
+CASE-001,メール確認,2026-06-01T09:00:00+09:00,2026-06-01T09:05:00+09:00,user_a,Outlook,,顧客問い合わせ確認
+CASE-001,基幹システム検索,2026-06-01T09:05:00+09:00,2026-06-01T09:12:00+09:00,user_a,Chrome,https://core.example.local/search,契約情報検索
+CASE-001,Excel転記,2026-06-01T09:12:00+09:00,2026-06-01T09:20:00+09:00,user_a,Microsoft Excel,,管理表更新
+CASE-001,返信作成,2026-06-01T09:20:00+09:00,2026-06-01T09:28:00+09:00,user_a,Outlook,,顧客返信
+CASE-002,申請受付,2026-06-01T10:00:00+09:00,2026-06-01T10:08:00+09:00,user_a,Chrome,https://workflow.example.local,申請確認
+CASE-002,不備確認,2026-06-01T10:08:00+09:00,2026-06-01T10:18:00+09:00,user_a,Microsoft Excel,,過去台帳確認
+CASE-002,社内確認,2026-06-01T10:18:00+09:00,2026-06-01T10:30:00+09:00,user_a,Slack,,担当部署へ確認
+

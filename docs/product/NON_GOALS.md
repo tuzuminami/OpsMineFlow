@@ -1,0 +1,39 @@
+# Non-Goals
+
+## LLM Integration
+
+LLM integration is not part of the MVP and is not part of the near-term roadmap.
+
+OpsMineFlow will not implement:
+
+- External LLM API integrations.
+- Local LLM integrations.
+- OpenAI, Anthropic, Google Gemini, Azure OpenAI, or Ollama integrations.
+- AI-generated labels.
+- AI-generated reports.
+- AI-generated improvement suggestions.
+- AI-generated interview questions.
+
+## Monitoring and Surveillance
+
+OpsMineFlow will not implement:
+
+- Keystroke logging.
+- Password capture.
+- Input body capture.
+- Continuous clipboard capture.
+- Screenshots.
+- Screen recording.
+- Microphone recording.
+- Camera access.
+- Hidden background telemetry.
+- Employee scoring or performance evaluation features.
+
+## MVP Exclusions
+
+- BPMN generation.
+- Native macOS agent collection.
+- Browser extension collection.
+- Advanced swimlanes.
+- SaaS deployment.
+
