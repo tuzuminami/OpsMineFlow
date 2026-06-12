@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-export PYTHONPATH="$ROOT_DIR/services/mining-core/src:$ROOT_DIR/services/local-api/src:${PYTHONPATH:-}"
+export PYTHONPATH="$ROOT_DIR/services/mining-core/src:$ROOT_DIR/services/local-api/src:$ROOT_DIR/packages/drawio-exporter/src:${PYTHONPATH:-}"
 
 if command -v pytest >/dev/null 2>&1; then
   pytest services/mining-core/tests services/local-api/tests packages/drawio-exporter/tests
@@ -26,4 +26,3 @@ fi
 if [[ -f packages/drawio-exporter/package.json && -d packages/drawio-exporter/node_modules ]]; then
   npm --prefix packages/drawio-exporter test
 fi
-

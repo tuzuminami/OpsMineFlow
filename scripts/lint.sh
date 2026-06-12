@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 echo "Compiling Python files..."
-python3 -m compileall -q services
+python3 -m compileall -q services packages/drawio-exporter/src
 
 echo "Checking shell syntax..."
 while IFS= read -r script; do
@@ -17,4 +17,3 @@ if [[ -f apps/desktop/package.json && -d apps/desktop/node_modules ]]; then
 fi
 
 echo "Lint checks passed."
-
