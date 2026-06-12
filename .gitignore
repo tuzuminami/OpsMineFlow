@@ -9,6 +9,7 @@ node_modules/
 dist/
 build/
 .turbo/
+.serena/
 coverage/
 *.log
 *.sqlite
@@ -16,4 +17,3 @@ coverage/
 local-data/
 exports/
 apps/desktop/src-tauri/target/
-
