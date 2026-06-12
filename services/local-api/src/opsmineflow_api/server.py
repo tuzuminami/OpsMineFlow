@@ -11,6 +11,11 @@ PORT = 8765
 
 
 class LocalApiHandler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self) -> None:
+        self.send_response(204)
+        self._send_cors_headers()
+        self.end_headers()
+
     def do_GET(self) -> None:
         snapshot = create_api_snapshot()
         routes: dict[str, Any] = {
@@ -33,10 +38,16 @@ class LocalApiHandler(BaseHTTPRequestHandler):
     def _send_json(self, payload: Any, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        self._send_cors_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_cors_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5173")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "content-type")
 
 
 def main() -> None:
