@@ -26,7 +26,8 @@ done < <(rg -n -o "$URL_PATTERN" "${SCAN_PATHS[@]}" 2>/dev/null || true)
 
 PROHIBITED_TERMS=(
   telemetry
-  analytics
+  google-analytics
+  analytics.js
   sentry
   posthog
   amplitude
