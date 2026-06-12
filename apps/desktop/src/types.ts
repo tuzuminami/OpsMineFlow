@@ -1,0 +1,68 @@
+export type Health = {
+  status: string;
+  bind: string;
+  local_only: boolean;
+  llm_supported: boolean;
+};
+
+export type EventRecord = {
+  event_id: string;
+  case_id: string;
+  user_hash: string;
+  app_name: string;
+  window_title_masked: string;
+  url_masked: string;
+  domain: string;
+  activity_raw: string;
+  timestamp_start: string;
+  timestamp_end: string;
+  duration_seconds: number;
+  confidential_flag: boolean;
+};
+
+export type Summary = {
+  total_events: number;
+  total_active_seconds: number;
+  period_start: string;
+  period_end: string;
+  app_usage_seconds: Record<string, number>;
+  label_usage_seconds: Record<string, number>;
+  user_usage_seconds: Record<string, number>;
+  average_event_duration_seconds: number;
+};
+
+export type ProcessNode = {
+  activity: string;
+  frequency: number;
+  average_duration_seconds: number;
+  bottleneck: boolean;
+  automation_candidate: boolean;
+};
+
+export type ProcessEdge = {
+  source: string;
+  target: string;
+  frequency: number;
+  average_transition_seconds: number;
+};
+
+export type ProcessMap = {
+  nodes: ProcessNode[];
+  edges: ProcessEdge[];
+  start_activities: Record<string, number>;
+  end_activities: Record<string, number>;
+};
+
+export type AutomationCandidate = {
+  activity: string;
+  automation_score: number;
+  frequency: number;
+  classification: string;
+  reasons: string[];
+};
+
+export type AppSwitching = {
+  transition_ranking: Array<{ source_app: string; target_app: string; count: number }>;
+  round_trips: Array<{ pattern: string; count: number }>;
+};
+

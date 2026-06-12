@@ -35,7 +35,7 @@ while IFS= read -r manifest; do
       FAILED=1
     fi
   done
-done < <(find . -type f '(' -name 'package.json' -o -name 'pyproject.toml' -o -name 'requirements*.txt' ')' \
+done < <(find . -type f '(' -name 'package.json' -o -name 'pyproject.toml' -o -name 'requirements*.txt' -o -name 'Cargo.toml' ')' \
   -not -path './node_modules/*' \
   -not -path './.venv/*' \
   -not -path './venv/*' \
