@@ -13,5 +13,4 @@ OpsMineFlow uses a standard event record as the common contract between importer
 
 ## Storage
 
-The MVP uses in-memory processing and local files. Production storage remains an open question and should stay local-only.
-
+The product local workflow uses SQLite in the user's application data directory by default. Tests and explicit callers can still use an in-memory `EventStore`. Storage remains local-only and can be redirected with `OPSMINEFLOW_DATA_DIR`.

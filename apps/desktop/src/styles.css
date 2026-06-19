@@ -21,6 +21,11 @@ button {
   font: inherit;
 }
 
+input,
+select {
+  font: inherit;
+}
+
 .app-shell {
   min-height: 100vh;
   padding: 20px;
@@ -107,12 +112,141 @@ button {
 }
 
 .api-warning,
-.loading {
+.loading,
+.action-message {
   background: #fff2cc;
   border: 1px solid #d6b656;
   border-radius: 8px;
   margin: 10px 0;
   padding: 12px;
+}
+
+.action-message {
+  background: #e8f5ef;
+  border-color: #7ab7a5;
+  color: #16483d;
+}
+
+.home-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(320px, 1.3fr) repeat(2, minmax(260px, 1fr));
+}
+
+.operation-panel {
+  background: #ffffff;
+  border: 1px solid #dce3e3;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.primary-panel {
+  grid-row: span 2;
+}
+
+.panel-heading {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.panel-heading h2 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.panel-heading span {
+  color: #68757d;
+  font-size: 12px;
+}
+
+.inline-fields {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 92px minmax(0, 1fr) 96px;
+}
+
+.operation-panel input,
+.operation-panel select {
+  background: #fbfcfc;
+  border: 1px solid #c8d2d2;
+  border-radius: 8px;
+  color: #172026;
+  min-height: 40px;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.operation-panel button {
+  background: #163235;
+  border: 1px solid #163235;
+  border-radius: 8px;
+  color: #ffffff;
+  cursor: pointer;
+  min-height: 40px;
+  padding: 8px 12px;
+}
+
+.operation-panel button:disabled {
+  background: #d8dfdf;
+  border-color: #d8dfdf;
+  color: #6c777d;
+  cursor: not-allowed;
+}
+
+.button-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.check-row,
+.number-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-height: 36px;
+}
+
+.check-row input {
+  min-height: auto;
+  width: 18px;
+}
+
+.number-row {
+  justify-content: space-between;
+}
+
+.number-row input {
+  max-width: 110px;
+}
+
+.diagnostic-list {
+  display: grid;
+  gap: 8px;
+}
+
+.diagnostic-list .setting-row {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #edf1f1;
+  border-radius: 0;
+  grid-template-columns: 140px minmax(0, 1fr);
+  padding: 6px 0;
+}
+
+.danger-row {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.operation-panel .danger-button {
+  background: #8a2432;
+  border-color: #8a2432;
 }
 
 .view-grid {
@@ -351,6 +485,7 @@ th {
   }
 
   .view-grid,
+  .home-grid,
   .split-view,
   .settings-grid {
     grid-template-columns: 1fr;
@@ -367,5 +502,9 @@ th {
   .candidate-card span {
     justify-self: start;
   }
-}
 
+  .inline-fields,
+  .danger-row {
+    grid-template-columns: 1fr;
+  }
+}

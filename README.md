@@ -38,9 +38,9 @@ The project is licensed under Apache-2.0. Direct dependencies must be commercial
 - Automation candidate scoring
 - Markdown, JSON, CSV, Mermaid, SVG, and draw.io-oriented exports
 
-## MVP Scope
+## Local Product Scope
 
-The MVP prioritizes import, local analysis, export, and a minimal desktop dashboard. Native macOS logging, browser extension logging, and advanced swimlanes are planned after the import-first workflow is stable.
+OpsMineFlow now targets a product-ready local workflow: one-command installation, one-command local startup, browser-based control, persistent local storage, diagnostics, import, analysis, and export. Native macOS logging, browser extension logging, and advanced swimlanes remain roadmap items.
 
 ## macOS Installation
 
@@ -51,10 +51,16 @@ Requirements:
 - Node.js 20 or newer
 - npm
 
-Setup:
+Install:
 
 ```bash
-./scripts/setup_mac.sh
+./scripts/install_mac.sh
+```
+
+Run:
+
+```bash
+./scripts/run_local.sh
 ```
 
 ## Development Setup
@@ -78,11 +84,11 @@ Run the local API and desktop UI during development:
 
 1. Explain the collection scope to participants.
 2. Obtain consent.
-3. Import CSV or JSON exports.
-4. Review masked events.
-5. Apply rule-based labels or manual labels.
-6. Generate process maps and automation candidates.
-7. Export Mermaid, SVG, draw.io, Markdown, CSV, or JSON artifacts.
+3. Start OpsMineFlow with `./scripts/run_local.sh`.
+4. Import CSV, JSON, or explicitly enabled ActivityWatch localhost data from the WebUI.
+5. Review events, diagnostics, process maps, app switching, and automation candidates.
+6. Adjust local privacy settings if needed.
+7. Export Mermaid, draw.io, Markdown, CSV, or JSON artifacts.
 
 ## Import CSV/JSON
 
@@ -103,6 +109,10 @@ JSON imports normalize generic arrays and ActivityWatch-style exports into the O
 
 Process maps can be exported as Mermaid and draw.io-compatible mxfile XML. SVG export is planned as a local rendering step with no external CDN.
 
+## Local Storage
+
+Runtime data is stored in a local SQLite database under the user's application data directory by default. Set `OPSMINEFLOW_DATA_DIR` to use a different local directory.
+
 ## Privacy and Security
 
 OpsMineFlow does not collect passwords, keystrokes, input text, screenshots, video, audio, or camera data. The standard workflow uses imported event logs and masking before analysis. Exports include a privacy warning and should be reviewed before sharing with clients.
@@ -110,4 +120,3 @@ OpsMineFlow does not collect passwords, keystrokes, input text, screenshots, vid
 ## Disclaimer
 
 OpsMineFlow provides local analysis support for consulting and operational improvement. It does not replace legal, HR, security, or compliance review.
-

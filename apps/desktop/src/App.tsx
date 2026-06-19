@@ -1,18 +1,29 @@
 import { useEffect, useMemo, useState } from "react";
-import { loadDashboardData } from "./api";
+import {
+  deleteLocalData,
+  exportArtifact,
+  importActivityWatchLocal,
+  importEvents,
+  loadDashboardData,
+  saveSettings
+} from "./api";
 import type {
   AppSwitching,
+  AppSettings,
   AutomationCandidate,
+  Diagnostics,
   EventRecord,
   Health,
   ProcessMap,
   Summary
 } from "./types";
 
-type Tab = "dashboard" | "events" | "process" | "switching" | "candidates" | "reports" | "settings";
+type Tab = "home" | "dashboard" | "events" | "process" | "switching" | "candidates" | "reports" | "settings";
 
 type DashboardData = {
   health: Health;
+  diagnostics: Diagnostics;
+  settings: AppSettings;
   events: EventRecord[];
   summary: Summary;
   processMap: ProcessMap;
@@ -21,7 +32,17 @@ type DashboardData = {
   markdown: string;
 };
 
+type AppActions = {
+  refresh: () => Promise<void>;
+  importEvents: (format: "csv" | "json", path: string) => Promise<void>;
+  importActivityWatch: () => Promise<void>;
+  exportArtifact: (format: "markdown" | "json" | "csv" | "mermaid" | "drawio") => Promise<void>;
+  saveSettings: (settings: Partial<AppSettings>) => Promise<void>;
+  deleteData: () => Promise<void>;
+};
+
 const tabs: Array<{ id: Tab; label: string }> = [
+  { id: "home", label: "Home" },
   { id: "dashboard", label: "Dashboard" },
   { id: "events", label: "Event Explorer" },
   { id: "process", label: "Process Map" },
@@ -32,10 +53,12 @@ const tabs: Array<{ id: Tab; label: string }> = [
 ];
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<Tab>("dashboard");
+  const [activeTab, setActiveTab] = useState<Tab>("home");
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string>("");
+  const [actionMessage, setActionMessage] = useState<string>("");
   const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState(false);
 
   async function refresh() {
     setLoading(true);
@@ -52,6 +75,50 @@ export function App() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  async function runAction(task: () => Promise<string>) {
+    setWorking(true);
+    setError("");
+    setActionMessage("");
+    try {
+      const message = await task();
+      setActionMessage(message);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Action failed");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  const actions: AppActions = {
+    refresh,
+    importEvents: (format, path) =>
+      runAction(async () => {
+        const result = await importEvents(format, path);
+        return `${result.imported_events} events imported from ${result.source || format}.`;
+      }),
+    importActivityWatch: () =>
+      runAction(async () => {
+        const result = await importActivityWatchLocal(true);
+        return result.message || `${result.imported_events} ActivityWatch events imported.`;
+      }),
+    exportArtifact: (format) =>
+      runAction(async () => {
+        const filename = downloadExport(format, await exportArtifact(format));
+        return `${filename} downloaded.`;
+      }),
+    saveSettings: (settings) =>
+      runAction(async () => {
+        await saveSettings(settings);
+        return "Settings saved.";
+      }),
+    deleteData: () =>
+      runAction(async () => {
+        await deleteLocalData();
+        return "Local analysis data deleted.";
+      })
+  };
 
   return (
     <main className="app-shell">
@@ -82,14 +149,26 @@ export function App() {
       </nav>
 
       {error ? <div className="api-warning">Local API is not available: {error}</div> : null}
+      {actionMessage ? <div className="action-message">{actionMessage}</div> : null}
       {loading && !data ? <div className="loading">Loading local analysis...</div> : null}
 
-      {data ? <View tab={activeTab} data={data} /> : null}
+      {data ? <View tab={activeTab} data={data} actions={actions} working={working || loading} /> : null}
     </main>
   );
 }
 
-function View({ tab, data }: { tab: Tab; data: DashboardData }) {
+function View({
+  tab,
+  data,
+  actions,
+  working
+}: {
+  tab: Tab;
+  data: DashboardData;
+  actions: AppActions;
+  working: boolean;
+}) {
+  if (tab === "home") return <HomeView data={data} actions={actions} working={working} />;
   if (tab === "events") return <EventsView events={data.events} />;
   if (tab === "process") return <ProcessView processMap={data.processMap} />;
   if (tab === "switching") return <SwitchingView switching={data.appSwitching} />;
@@ -97,6 +176,193 @@ function View({ tab, data }: { tab: Tab; data: DashboardData }) {
   if (tab === "reports") return <ReportsView markdown={data.markdown} />;
   if (tab === "settings") return <SettingsView health={data.health} />;
   return <DashboardView data={data} />;
+}
+
+function downloadExport(
+  format: "markdown" | "json" | "csv" | "mermaid" | "drawio",
+  payload: unknown
+): string {
+  const typed = payload as {
+    markdown?: string;
+    snapshot?: unknown;
+    events?: EventRecord[];
+    mermaid?: string;
+    drawio?: string;
+  };
+  const filename = `opsmineflow-export.${format === "markdown" ? "md" : format === "drawio" ? "drawio" : format}`;
+  let content = "";
+  let mime = "text/plain;charset=utf-8";
+
+  if (format === "markdown") {
+    content = typed.markdown || "";
+    mime = "text/markdown;charset=utf-8";
+  } else if (format === "json") {
+    content = JSON.stringify(typed.snapshot, null, 2);
+    mime = "application/json;charset=utf-8";
+  } else if (format === "csv") {
+    content = eventsToCsv(typed.events || []);
+    mime = "text/csv;charset=utf-8";
+  } else if (format === "mermaid") {
+    content = typed.mermaid || "";
+  } else {
+    content = typed.drawio || "";
+    mime = "application/xml;charset=utf-8";
+  }
+
+  const url = URL.createObjectURL(new Blob([content], { type: mime }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  return filename;
+}
+
+function eventsToCsv(events: EventRecord[]): string {
+  const columns: Array<keyof EventRecord> = [
+    "event_id",
+    "case_id",
+    "user_hash",
+    "app_name",
+    "window_title_masked",
+    "url_masked",
+    "domain",
+    "activity_raw",
+    "timestamp_start",
+    "timestamp_end",
+    "duration_seconds",
+    "confidential_flag"
+  ];
+  const rows = events.map((event) => columns.map((column) => csvCell(String(event[column]))).join(","));
+  return [columns.join(","), ...rows].join("\n");
+}
+
+function csvCell(value: string): string {
+  if (!/[",\n]/.test(value)) return value;
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function HomeView({ data, actions, working }: { data: DashboardData; actions: AppActions; working: boolean }) {
+  const [format, setFormat] = useState<"csv" | "json">("csv");
+  const [path, setPath] = useState("data/sample/sample_events.csv");
+  const [activityWatchEnabled, setActivityWatchEnabled] = useState(false);
+  const [settingsDraft, setSettingsDraft] = useState<AppSettings>(data.settings);
+
+  useEffect(() => {
+    setSettingsDraft(data.settings);
+  }, [data.settings]);
+
+  return (
+    <section className="home-grid">
+      <section className="operation-panel primary-panel">
+        <div className="panel-heading">
+          <h2>Import</h2>
+          <span>{data.events.length} events loaded</span>
+        </div>
+        <div className="inline-fields">
+          <select value={format} onChange={(event) => setFormat(event.target.value as "csv" | "json")} disabled={working}>
+            <option value="csv">CSV</option>
+            <option value="json">JSON</option>
+          </select>
+          <input value={path} onChange={(event) => setPath(event.target.value)} disabled={working} />
+          <button onClick={() => void actions.importEvents(format, path)} disabled={working || path.trim() === ""}>
+            Import
+          </button>
+        </div>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={activityWatchEnabled}
+            onChange={(event) => setActivityWatchEnabled(event.target.checked)}
+            disabled={working}
+          />
+          <span>ActivityWatch localhost import</span>
+        </label>
+        <button onClick={() => void actions.importActivityWatch()} disabled={working || !activityWatchEnabled}>
+          Import ActivityWatch
+        </button>
+      </section>
+
+      <section className="operation-panel">
+        <div className="panel-heading">
+          <h2>Exports</h2>
+          <span>Local files only</span>
+        </div>
+        <div className="button-grid">
+          {(["markdown", "json", "csv", "mermaid", "drawio"] as const).map((formatName) => (
+            <button key={formatName} onClick={() => void actions.exportArtifact(formatName)} disabled={working}>
+              {formatName}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="operation-panel">
+        <div className="panel-heading">
+          <h2>Settings</h2>
+          <span>{settingsDraft.retention_days} days</span>
+        </div>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={settingsDraft.mask_url_paths}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_url_paths: event.target.checked })}
+          />
+          <span>Mask URL paths</span>
+        </label>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={settingsDraft.mask_window_titles}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_window_titles: event.target.checked })}
+          />
+          <span>Mask window titles</span>
+        </label>
+        <label className="number-row">
+          <span>Retention days</span>
+          <input
+            type="number"
+            min="1"
+            max="365"
+            value={settingsDraft.retention_days}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, retention_days: Number(event.target.value) })}
+          />
+        </label>
+        <button onClick={() => void actions.saveSettings(settingsDraft)} disabled={working}>
+          Save Settings
+        </button>
+      </section>
+
+      <section className="operation-panel">
+        <div className="panel-heading">
+          <h2>Diagnostics</h2>
+          <span>{data.diagnostics.storage.storage_mode}</span>
+        </div>
+        <div className="diagnostic-list">
+          <Setting label="API bind" value={data.diagnostics.api.bind} />
+          <Setting label="Storage" value={data.diagnostics.storage.storage_mode} />
+          <Setting label="Events" value={data.diagnostics.storage.event_count.toString()} />
+          <Setting label="External network" value={data.diagnostics.runtime_policy.external_network} />
+        </div>
+        <div className="danger-row">
+          <button onClick={() => void actions.refresh()} disabled={working}>
+            Refresh
+          </button>
+          <button
+            className="danger-button"
+            onClick={() => {
+              if (window.confirm("Delete all local analysis data?")) void actions.deleteData();
+            }}
+            disabled={working}
+          >
+            Delete Data
+          </button>
+        </div>
+      </section>
+    </section>
+  );
 }
 
 function DashboardView({ data }: { data: DashboardData }) {
@@ -242,7 +508,8 @@ function SettingsView({ health }: { health: Health }) {
       <Setting label="API bind" value={health.bind} />
       <Setting label="External network" value={health.local_only ? "Blocked by policy" : "Unknown"} />
       <Setting label="LLM integration" value={health.llm_supported ? "Enabled" : "Not supported"} />
-      <Setting label="Data storage" value="Local files and local memory for MVP" />
+      <Setting label="Data storage" value={health.storage_mode} />
+      <Setting label="Events loaded" value={health.event_count.toString()} />
       <Setting label="ActivityWatch" value="Optional localhost import only" />
       <Setting label="Sensitive capture" value="No keystrokes, screenshots, audio, or camera" />
     </section>
@@ -312,4 +579,3 @@ function Setting({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
-

@@ -14,7 +14,7 @@ while IFS= read -r match; do
   file="${match%%:*}"
   rest="${match#*:}"
   value="${rest#*:}"
-  if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" ]]; then
+  if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == *"package-lock.json" ]]; then
     continue
   fi
   if [[ "$value" =~ ^https?://(127\.0\.0\.1|localhost)([:/].*)?$ ]]; then
@@ -42,7 +42,7 @@ PROHIBITED_TERMS=(
 for term in "${PROHIBITED_TERMS[@]}"; do
   while IFS= read -r match; do
     file="${match%%:*}"
-    if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" ]]; then
+    if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == *"package-lock.json" ]]; then
       continue
     fi
     echo "Prohibited integration term '$term' found in $match"

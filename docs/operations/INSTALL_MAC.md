@@ -7,11 +7,18 @@
 - Node.js 20 or newer.
 - npm.
 
-## Setup
+## Install
 
 ```bash
-./scripts/setup_mac.sh
+./scripts/install_mac.sh
 ```
 
-The MVP can run import and mining tests without Docker.
+The installer creates `.venv`, installs Python packages, installs desktop dependencies, and runs smoke checks.
 
+## Run
+
+```bash
+./scripts/run_local.sh
+```
+
+The app runs on localhost only. Docker is not required.
