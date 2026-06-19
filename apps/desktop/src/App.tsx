@@ -7,6 +7,7 @@ import {
   loadDashboardData,
   previewImport,
   previewExport,
+  saveAutomationReview,
   saveExport,
   saveSettings
 } from "./api";
@@ -14,6 +15,7 @@ import type {
   AppSwitching,
   AppSettings,
   AutomationCandidate,
+  AutomationReviewStatus,
   Diagnostics,
   EventRecord,
   ExportFormat,
@@ -49,6 +51,7 @@ type AppActions = {
   exportArtifact: (format: ExportFormat) => Promise<void>;
   saveExport: (format: ExportFormat, path: string) => Promise<void>;
   saveSettings: (settings: Partial<AppSettings>) => Promise<void>;
+  saveAutomationReview: (activity: string, status: AutomationReviewStatus) => Promise<void>;
   deleteData: () => Promise<void>;
 };
 
@@ -161,6 +164,11 @@ export function App() {
         await saveSettings(settings);
         return "Settings saved.";
       }),
+    saveAutomationReview: (activity, status) =>
+      runAction(async () => {
+        const result = await saveAutomationReview(activity, status);
+        return `Review saved for ${result.activity}.`;
+      }),
     deleteData: () =>
       runAction(async () => {
         await deleteLocalData();
@@ -220,7 +228,7 @@ function View({
   if (tab === "events") return <EventsView events={data.events} />;
   if (tab === "process") return <ProcessView processMap={data.processMap} events={data.events} />;
   if (tab === "switching") return <SwitchingView switching={data.appSwitching} />;
-  if (tab === "candidates") return <CandidatesView candidates={data.candidates} />;
+  if (tab === "candidates") return <CandidatesView candidates={data.candidates} actions={actions} working={working} />;
   if (tab === "reports") return <ReportsView markdown={data.markdown} />;
   if (tab === "settings") return <SettingsView data={data} actions={actions} working={working} />;
   return <DashboardView data={data} />;
@@ -663,19 +671,74 @@ function SwitchingView({ switching }: { switching: AppSwitching }) {
   );
 }
 
-function CandidatesView({ candidates }: { candidates: AutomationCandidate[] }) {
+type CandidateSortKey = "score" | "frequency" | "classification" | "reason" | "status";
+
+const reviewOptions: Array<{ label: string; value: AutomationReviewStatus }> = [
+  { label: "Unreviewed", value: "unreviewed" },
+  { label: "Adopt", value: "adopted" },
+  { label: "Hold", value: "on_hold" },
+  { label: "Reject", value: "rejected" }
+];
+
+function CandidatesView({ candidates, actions, working }: { candidates: AutomationCandidate[]; actions: AppActions; working: boolean }) {
+  const [sortKey, setSortKey] = useState<CandidateSortKey>("score");
+  const sortedCandidates = useMemo(() => {
+    const valueFor = (candidate: AutomationCandidate) => {
+      if (sortKey === "score") return candidate.automation_score;
+      if (sortKey === "frequency") return candidate.frequency;
+      if (sortKey === "classification") return candidate.classification;
+      if (sortKey === "reason") return candidate.reasons.join(", ");
+      return candidate.review_status || "unreviewed";
+    };
+    return [...candidates].sort((a, b) => {
+      const first = valueFor(a);
+      const second = valueFor(b);
+      if (typeof first === "number" && typeof second === "number") return second - first;
+      return String(first).localeCompare(String(second));
+    });
+  }, [candidates, sortKey]);
+
   return (
-    <section className="candidate-list">
-      {candidates.map((candidate) => (
-        <article className="candidate-card" key={candidate.activity}>
-          <div>
-            <h2>{candidate.activity}</h2>
-            <p>{candidate.reasons.join(", ")}</p>
-          </div>
-          <b>{Math.round(candidate.automation_score * 100)}</b>
-          <span>{candidate.classification}</span>
-        </article>
-      ))}
+    <section className="candidate-workspace">
+      <div className="candidate-toolbar">
+        <select value={sortKey} onChange={(event) => setSortKey(event.target.value as CandidateSortKey)}>
+          <option value="score">Score</option>
+          <option value="frequency">Frequency</option>
+          <option value="classification">Classification</option>
+          <option value="reason">Reason</option>
+          <option value="status">Review status</option>
+        </select>
+      </div>
+      <section className="candidate-list">
+        {sortedCandidates.map((candidate) => {
+          const status = candidate.review_status || "unreviewed";
+          return (
+            <article className="candidate-card" key={candidate.activity}>
+              <div>
+                <h2>{candidate.activity}</h2>
+                <p>{candidate.reasons.join(", ")}</p>
+              </div>
+              <div className="candidate-metrics">
+                <b>{Math.round(candidate.automation_score * 100)}</b>
+                <span>{candidate.frequency}x</span>
+              </div>
+              <span>{candidate.classification}</span>
+              <div className="review-controls">
+                {reviewOptions.map((option) => (
+                  <button
+                    key={option.value}
+                    className={option.value === status ? "is-active" : ""}
+                    onClick={() => void actions.saveAutomationReview(candidate.activity, option.value)}
+                    disabled={working || option.value === status}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </article>
+          );
+        })}
+      </section>
     </section>
   );
 }

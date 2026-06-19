@@ -62,6 +62,11 @@ class SettingsRequest(BaseModel):  # type: ignore[misc, valid-type]
     excluded_domains: list[str] | None = None
 
 
+class AutomationReviewRequest(BaseModel):  # type: ignore[misc, valid-type]
+    activity: str
+    status: str
+
+
 class ExportPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
     format: str
 
@@ -78,6 +83,7 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     metrics = calculate_duration_metrics(events)
     process_map = build_directly_follows_graph(events)
     store_diagnostics = active_store.diagnostics()
+    automation_candidates = apply_automation_reviews(score_automation_candidates(events), active_store)
     return {
         "health": {
             "status": "ok",
@@ -90,14 +96,36 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
         "events": [event_to_api_dict(event, settings) for event in events],
         "summary": metrics_to_dict(metrics),
         "app_switching": detect_app_switches(events),
-        "automation_candidates": score_automation_candidates(events),
+        "automation_candidates": automation_candidates,
         "process_map": process_map,
         "variants": analyze_variants(events),
         "bottlenecks": detect_bottlenecks(events),
-        "markdown_report": export_markdown_report(events),
+        "markdown_report": append_automation_review_section(export_markdown_report(events), automation_candidates),
         "mermaid": export_mermaid(events),
         "drawio": build_drawio_xml(process_map),
     }
+
+
+def apply_automation_reviews(candidates: list[dict[str, object]], store: EventStore) -> list[dict[str, object]]:
+    reviewed: list[dict[str, object]] = []
+    for candidate in candidates:
+        item = dict(candidate)
+        activity = str(item.get("activity", ""))
+        item["review_status"] = store.automation_reviews.get(activity, "unreviewed")
+        reviewed.append(item)
+    return reviewed
+
+
+def append_automation_review_section(markdown: str, candidates: list[dict[str, object]]) -> str:
+    lines = [markdown.rstrip(), "", "## Automation Review Status"]
+    if not candidates:
+        lines.append("- No automation candidates found.")
+    for item in candidates[:10]:
+        lines.append(
+            f'- {item["activity"]}: review {item["review_status"]}, '
+            f'score {float(item["automation_score"]):.2f}, frequency {item["frequency"]}'
+        )
+    return "\n".join(lines) + "\n"
 
 
 def event_to_api_dict(event: Any, settings: dict[str, object]) -> dict[str, object]:
@@ -354,6 +382,13 @@ if app is not None:
     @app.get("/analytics/automation-candidates")
     def analytics_automation_candidates() -> list[dict[str, Any]]:
         return create_api_snapshot()["automation_candidates"]
+
+    @app.post("/automation/review")
+    def automation_review(request: AutomationReviewRequest) -> dict[str, str]:
+        try:
+            return default_store().set_automation_review(request.activity, request.status)
+        except ValueError as exc:
+            raise _bad_request(str(exc))
 
     @app.get("/analytics/process-map")
     def analytics_process_map() -> dict[str, Any]:

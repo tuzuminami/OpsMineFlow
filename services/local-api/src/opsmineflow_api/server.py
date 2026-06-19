@@ -79,6 +79,14 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             if path == "/settings":
                 self._send_json(default_store().update_settings(payload))
                 return
+            if path == "/automation/review":
+                self._send_json(
+                    default_store().set_automation_review(
+                        str(payload.get("activity") or ""),
+                        str(payload.get("status") or ""),
+                    )
+                )
+                return
             if path == "/data/delete":
                 default_store().clear()
                 self._send_json({"deleted": True})

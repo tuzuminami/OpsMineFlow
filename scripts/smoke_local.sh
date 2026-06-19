@@ -96,6 +96,15 @@ settings = request("/settings", {"retention_days": 21})
 assert isinstance(settings, dict)
 assert settings["retention_days"] == 21
 
+review = request("/automation/review", {"activity": "社内確認", "status": "adopted"})
+assert isinstance(review, dict)
+assert review["review_status"] == "adopted"
+
+candidates = request("/analytics/automation-candidates")
+assert isinstance(candidates, list)
+reviewed = next(item for item in candidates if item["activity"] == "社内確認")
+assert reviewed["review_status"] == "adopted"
+
 drawio = request("/export/drawio", {})
 assert isinstance(drawio, dict)
 assert "<mxfile" in drawio["drawio"]
