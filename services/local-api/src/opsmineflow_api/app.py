@@ -46,17 +46,29 @@ class ActivityWatchImportRequest(BaseModel):  # type: ignore[misc, valid-type]
     base_url: str = "http://127.0.0.1:5600"
 
 
+class SettingsRequest(BaseModel):  # type: ignore[misc, valid-type]
+    mask_url_paths: bool | None = None
+    mask_window_titles: bool | None = None
+    retention_days: int | None = None
+    activitywatch_enabled: bool | None = None
+    excluded_apps: list[str] | None = None
+    excluded_domains: list[str] | None = None
+
+
 def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
     events = active_store.events
     metrics = calculate_duration_metrics(events)
     process_map = build_directly_follows_graph(events)
+    store_diagnostics = active_store.diagnostics()
     return {
         "health": {
             "status": "ok",
             "bind": "127.0.0.1",
             "local_only": True,
             "llm_supported": False,
+            "storage_mode": store_diagnostics["storage_mode"],
+            "event_count": store_diagnostics["event_count"],
         },
         "events": [event.to_dict() for event in events],
         "summary": metrics_to_dict(metrics),
@@ -68,6 +80,25 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
         "markdown_report": export_markdown_report(events),
         "mermaid": export_mermaid(events),
         "drawio": build_drawio_xml(process_map),
+    }
+
+
+def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
+    active_store = store or default_store()
+    diagnostics = active_store.diagnostics()
+    return {
+        "api": {
+            "status": "ok",
+            "bind": "127.0.0.1",
+            "cors": ["http://127.0.0.1:5173", "http://localhost:5173", "tauri://localhost"],
+        },
+        "storage": diagnostics,
+        "runtime_policy": {
+            "local_only": True,
+            "external_network": "blocked_by_policy",
+            "llm_supported": False,
+            "remote_reporting": False,
+        },
     }
 
 
@@ -95,6 +126,18 @@ if app is not None:
     @app.get("/health")
     def health() -> dict[str, Any]:
         return create_api_snapshot()["health"]
+
+    @app.get("/diagnostics")
+    def diagnostics() -> dict[str, Any]:
+        return create_diagnostics()
+
+    @app.get("/settings")
+    def settings() -> dict[str, object]:
+        return default_store().get_settings()
+
+    @app.post("/settings")
+    def update_settings(request: SettingsRequest) -> dict[str, object]:
+        return default_store().update_settings(request.model_dump(exclude_none=True))
 
     @app.post("/import/csv")
     def import_csv(request: PathImportRequest) -> dict[str, Any]:
@@ -128,8 +171,16 @@ if app is not None:
 
     @app.post("/events/label")
     def label_event(request: LabelRequest) -> dict[str, Any]:
-        default_store().manual_labels[request.event_id] = request.label
+        try:
+            default_store().set_label(request.event_id, request.label)
+        except KeyError:
+            raise _not_found("Event was not found")
         return {"event_id": request.event_id, "label": request.label}
+
+    @app.post("/data/delete")
+    def delete_data() -> dict[str, Any]:
+        default_store().clear()
+        return {"deleted": True}
 
     @app.get("/analytics/summary")
     def analytics_summary() -> dict[str, Any]:
@@ -170,4 +221,3 @@ if app is not None:
     @app.post("/export/json")
     def export_json_endpoint() -> dict[str, Any]:
         return {"snapshot": create_api_snapshot()}
-

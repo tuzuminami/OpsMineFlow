@@ -1,6 +1,8 @@
 import type {
   AppSwitching,
+  AppSettings,
   AutomationCandidate,
+  Diagnostics,
   EventRecord,
   Health,
   ProcessMap,
@@ -17,9 +19,30 @@ async function getJson<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function postJson<T>(path: string, payload: unknown = {}): Promise<T> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    let message = `Local API returned ${response.status}`;
+    try {
+      const errorPayload = (await response.json()) as { error?: string; detail?: string };
+      message = errorPayload.error || errorPayload.detail || message;
+    } catch {
+      // Keep the status-based message.
+    }
+    throw new Error(message);
+  }
+  return response.json() as Promise<T>;
+}
+
 export async function loadDashboardData() {
-  const [health, events, summary, processMap, candidates, appSwitching, report] = await Promise.all([
+  const [health, diagnostics, settings, events, summary, processMap, candidates, appSwitching, report] = await Promise.all([
     getJson<Health>("/health"),
+    getJson<Diagnostics>("/diagnostics"),
+    getJson<AppSettings>("/settings"),
     getJson<EventRecord[]>("/events"),
     getJson<Summary>("/analytics/summary"),
     getJson<ProcessMap>("/analytics/process-map"),
@@ -30,6 +53,8 @@ export async function loadDashboardData() {
 
   return {
     health,
+    diagnostics,
+    settings,
     events,
     summary,
     processMap,
@@ -39,3 +64,32 @@ export async function loadDashboardData() {
   };
 }
 
+export type ImportResult = {
+  imported_events: number;
+  source?: string;
+  message?: string;
+};
+
+export async function importEvents(format: "csv" | "json", path: string) {
+  return postJson<ImportResult>(`/import/${format}`, { path });
+}
+
+export async function importActivityWatchLocal(enabled: boolean) {
+  return postJson<ImportResult>("/import/activitywatch-local", { enabled, base_url: "http://127.0.0.1:5600" });
+}
+
+export async function saveSettings(settings: Partial<AppSettings>) {
+  return postJson<AppSettings>("/settings", settings);
+}
+
+export async function deleteLocalData() {
+  return postJson<{ deleted: boolean }>("/data/delete");
+}
+
+export async function exportArtifact(format: "markdown" | "json" | "csv" | "mermaid" | "drawio") {
+  if (format === "markdown") return getJson<{ markdown: string }>("/reports/markdown");
+  if (format === "json") return postJson<{ snapshot: unknown }>("/export/json");
+  if (format === "csv") return postJson<{ events: EventRecord[] }>("/export/csv");
+  if (format === "mermaid") return postJson<{ mermaid: string }>("/export/mermaid");
+  return postJson<{ drawio: string }>("/export/drawio");
+}

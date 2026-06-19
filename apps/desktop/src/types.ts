@@ -3,6 +3,8 @@ export type Health = {
   bind: string;
   local_only: boolean;
   llm_supported: boolean;
+  storage_mode: string;
+  event_count: number;
 };
 
 export type EventRecord = {
@@ -66,3 +68,31 @@ export type AppSwitching = {
   round_trips: Array<{ pattern: string; count: number }>;
 };
 
+export type Diagnostics = {
+  api: {
+    status: string;
+    bind: string;
+    cors: string[];
+  };
+  storage: {
+    storage_mode: string;
+    storage_path: string;
+    event_count: number;
+    manual_label_count: number;
+  };
+  runtime_policy: {
+    local_only: boolean;
+    external_network: string;
+    llm_supported: boolean;
+    remote_reporting: boolean;
+  };
+};
+
+export type AppSettings = {
+  mask_url_paths: boolean;
+  mask_window_titles: boolean;
+  retention_days: number;
+  activitywatch_enabled: boolean;
+  excluded_apps: string[];
+  excluded_domains: string[];
+};

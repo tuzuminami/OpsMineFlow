@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
-from .app import create_api_snapshot
+from opsmineflow_mining import load_events_from_csv, load_events_from_json
 
-HOST = "127.0.0.1"
-PORT = 8765
+from .activitywatch import import_activitywatch_local
+from .app import create_api_snapshot, create_diagnostics
+from .storage import default_store
+
+HOST = os.environ.get("OPSMINEFLOW_API_HOST", "127.0.0.1")
+PORT = int(os.environ.get("OPSMINEFLOW_API_PORT", "8765"))
 
 
 class LocalApiHandler(BaseHTTPRequestHandler):
@@ -17,9 +24,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
+        path = urlparse(self.path).path
         snapshot = create_api_snapshot()
         routes: dict[str, Any] = {
             "/health": snapshot["health"],
+            "/diagnostics": create_diagnostics(),
+            "/settings": default_store().get_settings(),
             "/events": snapshot["events"],
             "/analytics/summary": snapshot["summary"],
             "/analytics/app-switching": snapshot["app_switching"],
@@ -27,10 +37,71 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             "/analytics/process-map": snapshot["process_map"],
             "/reports/markdown": {"markdown": snapshot["markdown_report"]},
         }
-        if self.path not in routes:
+        if path not in routes:
             self._send_json({"error": "not found"}, status=404)
             return
-        self._send_json(routes[self.path])
+        self._send_json(routes[path])
+
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        try:
+            payload = self._read_json()
+            if path == "/import/csv":
+                file_path = Path(str(payload.get("path") or ""))
+                if not file_path.exists():
+                    self._send_json({"error": "CSV file was not found"}, status=404)
+                    return
+                events = load_events_from_csv(file_path)
+                default_store().replace(events)
+                self._send_json({"imported_events": len(events), "source": "csv"})
+                return
+            if path == "/import/json":
+                file_path = Path(str(payload.get("path") or ""))
+                if not file_path.exists():
+                    self._send_json({"error": "JSON file was not found"}, status=404)
+                    return
+                events = load_events_from_json(file_path)
+                default_store().replace(events)
+                self._send_json({"imported_events": len(events), "source": "json"})
+                return
+            if path == "/import/activitywatch-local":
+                if not payload.get("enabled"):
+                    self._send_json({"imported_events": 0, "message": "ActivityWatch import is disabled until explicitly enabled."})
+                    return
+                events = import_activitywatch_local(str(payload.get("base_url") or "http://127.0.0.1:5600"))
+                default_store().replace(events)
+                self._send_json({"imported_events": len(events), "source": "activitywatch_local"})
+                return
+            if path == "/events/label":
+                try:
+                    default_store().set_label(str(payload.get("event_id") or ""), str(payload.get("label") or ""))
+                except KeyError:
+                    self._send_json({"error": "Event was not found"}, status=404)
+                    return
+                self._send_json({"event_id": payload.get("event_id"), "label": payload.get("label")})
+                return
+            if path == "/settings":
+                self._send_json(default_store().update_settings(payload))
+                return
+            if path == "/data/delete":
+                default_store().clear()
+                self._send_json({"deleted": True})
+                return
+            snapshot = create_api_snapshot()
+            export_routes: dict[str, Any] = {
+                "/export/mermaid": {"mermaid": snapshot["mermaid"]},
+                "/export/drawio": {"drawio": snapshot["drawio"]},
+                "/export/svg": {"status": "planned", "message": "SVG export will use a local renderer."},
+                "/export/csv": {"events": snapshot["events"]},
+                "/export/json": {"snapshot": snapshot},
+            }
+            if path in export_routes:
+                self._send_json(export_routes[path])
+                return
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=500)
+            return
+        self._send_json({"error": "not found"}, status=404)
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -43,6 +114,13 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _read_json(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length == 0:
+            return {}
+        body = self.rfile.read(length).decode("utf-8")
+        return json.loads(body)
 
     def _send_cors_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5173")

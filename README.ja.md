@@ -41,9 +41,9 @@ OpenAI、Anthropic、Google、Azure、Ollama、ローカルLLMを含むLLM連携
 - 自動化候補スコアリング
 - Markdown/HTML/CSV/JSON/Mermaid/SVG/draw.io系エクスポート
 
-## MVPスコープ
+## ローカル製品版スコープ
 
-MVPではCSV/JSON取り込み、標準化、分析、draw.io出力、Markdown報告書、ローカルAPI、最小デスクトップUIを優先する。macOS常駐ログ収集とブラウザ拡張は第2段階。
+OpsMineFlow は、1コマンド導入、1コマンド起動、WebUI操作、ローカル永続保存、診断、取り込み、分析、出力までをローカルアプリとして扱える水準を目指す。macOS常駐ログ収集とブラウザ拡張はロードマップ項目。
 
 ## macOSインストール
 
@@ -55,7 +55,13 @@ MVPではCSV/JSON取り込み、標準化、分析、draw.io出力、Markdown報
 - npm
 
 ```bash
-./scripts/setup_mac.sh
+./scripts/install_mac.sh
+```
+
+起動:
+
+```bash
+./scripts/run_local.sh
 ```
 
 ## 開発環境セットアップ
@@ -77,11 +83,11 @@ MVPではCSV/JSON取り込み、標準化、分析、draw.io出力、Markdown報
 
 1. 対象者へ収集範囲を説明
 2. 同意取得
-3. CSV/JSONを取り込み
-4. マスキング済みイベントを確認
-5. 業務ラベルを付与
-6. プロセスマップと自動化候補を生成
-7. Mermaid、SVG、draw.io、Markdown、CSV、JSONで出力
+3. `./scripts/run_local.sh` で起動
+4. WebUIからCSV、JSON、または明示ONのActivityWatch localhostデータを取り込み
+5. イベント、診断、プロセスマップ、アプリ往復、自動化候補を確認
+6. 必要に応じてローカルのプライバシー設定を調整
+7. Mermaid、draw.io、Markdown、CSV、JSONで出力
 
 ## CSV/JSON取り込み
 
@@ -90,6 +96,10 @@ CSVは `case_id`、`activity`、`timestamp_start`、`timestamp_end`、`user`、`
 ## Mermaid/SVG/draw.io出力
 
 Directly-Follows GraphをMermaid形式とdraw.io互換mxfile XMLとして出力する。SVGはローカルレンダリングで対応する予定。
+
+## ローカル保存
+
+実行データはデフォルトでユーザーのアプリデータ配下にあるSQLiteへ保存する。保存先を変える場合は `OPSMINEFLOW_DATA_DIR` を指定する。
 
 ## プライバシーとセキュリティ
 
@@ -102,4 +112,3 @@ Apache-2.0。
 ## 注意事項
 
 OpsMineFlowはコンサルティングと業務改善の補助ツール。法務、人事、セキュリティ、コンプライアンス判断はクライアント側の正式レビューと併用してね。
-
