@@ -195,7 +195,7 @@ function View({
   if (tab === "switching") return <SwitchingView switching={data.appSwitching} />;
   if (tab === "candidates") return <CandidatesView candidates={data.candidates} />;
   if (tab === "reports") return <ReportsView markdown={data.markdown} />;
-  if (tab === "settings") return <SettingsView health={data.health} />;
+  if (tab === "settings") return <SettingsView data={data} actions={actions} working={working} />;
   return <DashboardView data={data} />;
 }
 
@@ -389,6 +389,20 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
             onChange={(event) => setSettingsDraft({ ...settingsDraft, retention_days: Number(event.target.value) })}
           />
         </label>
+        <label className="text-row">
+          <span>Excluded apps</span>
+          <textarea
+            value={listToText(settingsDraft.excluded_apps)}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, excluded_apps: textToList(event.target.value) })}
+          />
+        </label>
+        <label className="text-row">
+          <span>Excluded domains</span>
+          <textarea
+            value={listToText(settingsDraft.excluded_domains)}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, excluded_domains: textToList(event.target.value) })}
+          />
+        </label>
         <button onClick={() => void actions.saveSettings(settingsDraft)} disabled={working}>
           Save Settings
         </button>
@@ -561,18 +575,97 @@ function ReportsView({ markdown }: { markdown: string }) {
   return <pre className="report-preview">{markdown}</pre>;
 }
 
-function SettingsView({ health }: { health: Health }) {
+function SettingsView({ data, actions, working }: { data: DashboardData; actions: AppActions; working: boolean }) {
+  const [settingsDraft, setSettingsDraft] = useState<AppSettings>(data.settings);
+
+  useEffect(() => {
+    setSettingsDraft(data.settings);
+  }, [data.settings]);
+
   return (
-    <section className="settings-grid">
-      <Setting label="API bind" value={health.bind} />
-      <Setting label="External network" value={health.local_only ? "Blocked by policy" : "Unknown"} />
-      <Setting label="LLM integration" value={health.llm_supported ? "Enabled" : "Not supported"} />
-      <Setting label="Data storage" value={health.storage_mode} />
-      <Setting label="Events loaded" value={health.event_count.toString()} />
-      <Setting label="ActivityWatch" value="Optional localhost import only" />
-      <Setting label="Sensitive capture" value="No keystrokes, screenshots, audio, or camera" />
+    <section className="settings-workspace">
+      <section className="operation-panel">
+        <div className="panel-heading">
+          <h2>Privacy Controls</h2>
+          <span>{settingsDraft.retention_days} days</span>
+        </div>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={settingsDraft.mask_url_paths}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_url_paths: event.target.checked })}
+          />
+          <span>Mask URL paths</span>
+        </label>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={settingsDraft.mask_window_titles}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_window_titles: event.target.checked })}
+          />
+          <span>Mask window titles</span>
+        </label>
+        <label className="number-row">
+          <span>Retention days</span>
+          <input
+            type="number"
+            min="1"
+            max="365"
+            value={settingsDraft.retention_days}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, retention_days: Number(event.target.value) })}
+          />
+        </label>
+        <label className="text-row">
+          <span>Excluded apps</span>
+          <textarea
+            value={listToText(settingsDraft.excluded_apps)}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, excluded_apps: textToList(event.target.value) })}
+          />
+        </label>
+        <label className="text-row">
+          <span>Excluded domains</span>
+          <textarea
+            value={listToText(settingsDraft.excluded_domains)}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, excluded_domains: textToList(event.target.value) })}
+          />
+        </label>
+        <div className="danger-row">
+          <button onClick={() => void actions.saveSettings(settingsDraft)} disabled={working}>
+            Save Settings
+          </button>
+          <button
+            className="danger-button"
+            onClick={() => {
+              if (window.confirm("Delete all local analysis data?")) void actions.deleteData();
+            }}
+            disabled={working}
+          >
+            Delete Data
+          </button>
+        </div>
+      </section>
+      <section className="settings-grid">
+        <Setting label="API bind" value={data.health.bind} />
+        <Setting label="External network" value={data.health.local_only ? "Blocked by policy" : "Unknown"} />
+        <Setting label="LLM integration" value={data.health.llm_supported ? "Enabled" : "Not supported"} />
+        <Setting label="Data storage" value={data.health.storage_mode} />
+        <Setting label="Events loaded" value={data.health.event_count.toString()} />
+        <Setting label="ActivityWatch" value="Optional localhost import only" />
+        <Setting label="Sensitive capture" value="No keystrokes, screenshots, audio, or camera" />
+      </section>
     </section>
   );
+}
+
+function listToText(items: string[]): string {
+  return items.join("\n");
+}
+
+function textToList(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

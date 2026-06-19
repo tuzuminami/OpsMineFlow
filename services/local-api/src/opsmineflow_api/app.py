@@ -63,6 +63,7 @@ class SettingsRequest(BaseModel):  # type: ignore[misc, valid-type]
 def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
     events = active_store.events
+    settings = active_store.get_settings()
     metrics = calculate_duration_metrics(events)
     process_map = build_directly_follows_graph(events)
     store_diagnostics = active_store.diagnostics()
@@ -75,7 +76,7 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
             "storage_mode": store_diagnostics["storage_mode"],
             "event_count": store_diagnostics["event_count"],
         },
-        "events": [event.to_dict() for event in events],
+        "events": [event_to_api_dict(event, settings) for event in events],
         "summary": metrics_to_dict(metrics),
         "app_switching": detect_app_switches(events),
         "automation_candidates": score_automation_candidates(events),
@@ -86,6 +87,15 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
         "mermaid": export_mermaid(events),
         "drawio": build_drawio_xml(process_map),
     }
+
+
+def event_to_api_dict(event: Any, settings: dict[str, object]) -> dict[str, object]:
+    payload = event.to_dict()
+    if not settings.get("mask_window_titles", True):
+        payload["window_title_masked"] = payload["window_title"]
+    if not settings.get("mask_url_paths", True):
+        payload["url_masked"] = payload["url"]
+    return payload
 
 
 def load_events_for_import(format_name: str, path: Path) -> list[Any]:

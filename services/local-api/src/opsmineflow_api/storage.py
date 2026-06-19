@@ -51,7 +51,7 @@ class EventStore:
             self._load()
 
     def replace(self, events: list[StandardEvent], import_source: str = "", import_path: str = "") -> None:
-        self.events = list(events)
+        self.events = self._filter_events(list(events))
         self.manual_labels = {}
         if self.db_path is None:
             if import_source:
@@ -102,9 +102,15 @@ class EventStore:
         allowed = set(DEFAULT_SETTINGS)
         for key, value in updates.items():
             if key in allowed:
-                self.settings[key] = value
+                self.settings[key] = _normalize_setting(key, value)
+        self.events = self._filter_events(self.events)
         if self.db_path is not None:
             with self._connect() as conn:
+                conn.execute("DELETE FROM events")
+                conn.executemany(
+                    "INSERT INTO events(event_id, payload_json) VALUES(?, ?)",
+                    [(event.event_id, json.dumps(event.to_dict(), ensure_ascii=False)) for event in self.events],
+                )
                 conn.executemany(
                     "INSERT OR REPLACE INTO settings(key, value_json) VALUES(?, ?)",
                     [(key, json.dumps(value, ensure_ascii=False)) for key, value in self.settings.items()],
@@ -135,6 +141,26 @@ class EventStore:
 
     def is_initialized(self) -> bool:
         return self.metadata.get("initialized") == "true"
+
+    def _filter_events(self, events: list[StandardEvent]) -> list[StandardEvent]:
+        excluded_apps = {str(app).strip().casefold() for app in self.settings.get("excluded_apps", []) if str(app).strip()}
+        excluded_domains = {
+            str(domain).strip().casefold()
+            for domain in self.settings.get("excluded_domains", [])
+            if str(domain).strip()
+        }
+        if not excluded_apps and not excluded_domains:
+            return events
+        filtered: list[StandardEvent] = []
+        for event in events:
+            app_name = event.app_name.casefold()
+            domain = event.domain.casefold()
+            if app_name in excluded_apps:
+                continue
+            if any(domain == excluded or domain.endswith(f".{excluded}") for excluded in excluded_domains):
+                continue
+            filtered.append(event)
+        return filtered
 
     def diagnostics(self) -> dict[str, object]:
         return {
@@ -236,3 +262,31 @@ def default_store() -> EventStore:
             sample_path = Path(__file__).resolve().parents[4] / "data/sample/sample_events.csv"
             _STORE.replace(load_events_from_csv(sample_path))
     return _STORE
+
+
+def _normalize_setting(key: str, value: object) -> object:
+    if key in {"mask_url_paths", "mask_window_titles", "activitywatch_enabled"}:
+        return bool(value)
+    if key == "retention_days":
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return DEFAULT_SETTINGS[key]
+        return min(max(number, 1), 365)
+    if key in {"excluded_apps", "excluded_domains"}:
+        if isinstance(value, str):
+            items = value.replace("\n", ",").split(",")
+        elif isinstance(value, list):
+            items = [str(item) for item in value]
+        else:
+            items = []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            cleaned = item.strip()
+            key_value = cleaned.casefold()
+            if cleaned and key_value not in seen:
+                normalized.append(cleaned)
+                seen.add(key_value)
+        return normalized
+    return value

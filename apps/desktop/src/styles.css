@@ -22,7 +22,8 @@ button {
 }
 
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -170,7 +171,8 @@ select {
 }
 
 .operation-panel input,
-.operation-panel select {
+.operation-panel select,
+.operation-panel textarea {
   background: #fbfcfc;
   border: 1px solid #c8d2d2;
   border-radius: 8px;
@@ -178,6 +180,11 @@ select {
   min-height: 40px;
   min-width: 0;
   padding: 8px 10px;
+}
+
+.operation-panel textarea {
+  min-height: 82px;
+  resize: vertical;
 }
 
 .operation-panel button {
@@ -257,7 +264,8 @@ select {
 }
 
 .check-row,
-.number-row {
+.number-row,
+.text-row {
   align-items: center;
   display: flex;
   gap: 10px;
@@ -275,6 +283,16 @@ select {
 
 .number-row input {
   max-width: 110px;
+}
+
+.text-row {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.text-row span {
+  color: #68757d;
+  font-size: 12px;
 }
 
 .diagnostic-list {
@@ -471,6 +489,7 @@ th {
 }
 
 .split-view,
+.settings-workspace,
 .settings-grid {
   display: grid;
   gap: 12px;
@@ -540,6 +559,7 @@ th {
   .view-grid,
   .home-grid,
   .split-view,
+  .settings-workspace,
   .settings-grid {
     grid-template-columns: 1fr;
   }
