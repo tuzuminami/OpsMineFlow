@@ -3,14 +3,11 @@ from __future__ import annotations
 import json
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from opsmineflow_mining import load_events_from_csv, load_events_from_json
-
 from .activitywatch import import_activitywatch_local
-from .app import create_api_snapshot, create_diagnostics
+from .app import create_api_snapshot, create_diagnostics, create_import_preview, import_path_into_store
 from .storage import default_store
 
 HOST = os.environ.get("OPSMINEFLOW_API_HOST", "127.0.0.1")
@@ -30,6 +27,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             "/health": snapshot["health"],
             "/diagnostics": create_diagnostics(),
             "/settings": default_store().get_settings(),
+            "/import/history": default_store().list_import_history(),
             "/events": snapshot["events"],
             "/analytics/summary": snapshot["summary"],
             "/analytics/app-switching": snapshot["app_switching"],
@@ -46,30 +44,21 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self._read_json()
+            if path == "/import/preview":
+                self._send_json(create_import_preview(str(payload.get("format") or ""), str(payload.get("path") or "")))
+                return
             if path == "/import/csv":
-                file_path = Path(str(payload.get("path") or ""))
-                if not file_path.exists():
-                    self._send_json({"error": "CSV file was not found"}, status=404)
-                    return
-                events = load_events_from_csv(file_path)
-                default_store().replace(events)
-                self._send_json({"imported_events": len(events), "source": "csv"})
+                self._send_json(import_path_into_store("csv", str(payload.get("path") or "")))
                 return
             if path == "/import/json":
-                file_path = Path(str(payload.get("path") or ""))
-                if not file_path.exists():
-                    self._send_json({"error": "JSON file was not found"}, status=404)
-                    return
-                events = load_events_from_json(file_path)
-                default_store().replace(events)
-                self._send_json({"imported_events": len(events), "source": "json"})
+                self._send_json(import_path_into_store("json", str(payload.get("path") or "")))
                 return
             if path == "/import/activitywatch-local":
                 if not payload.get("enabled"):
                     self._send_json({"imported_events": 0, "message": "ActivityWatch import is disabled until explicitly enabled."})
                     return
                 events = import_activitywatch_local(str(payload.get("base_url") or "http://127.0.0.1:5600"))
-                default_store().replace(events)
+                default_store().replace(events, import_source="activitywatch_local", import_path=str(payload.get("base_url") or "http://127.0.0.1:5600"))
                 self._send_json({"imported_events": len(events), "source": "activitywatch_local"})
                 return
             if path == "/events/label":
@@ -98,6 +87,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             if path in export_routes:
                 self._send_json(export_routes[path])
                 return
+        except FileNotFoundError as exc:
+            self._send_json({"error": str(exc)}, status=404)
+            return
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
             return

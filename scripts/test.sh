@@ -26,3 +26,5 @@ fi
 if [[ -f packages/drawio-exporter/package.json && -d packages/drawio-exporter/node_modules ]]; then
   npm --prefix packages/drawio-exporter test
 fi
+
+./scripts/smoke_local.sh

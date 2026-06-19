@@ -57,6 +57,12 @@ Install:
 ./scripts/install_mac.sh
 ```
 
+One-line bootstrap from a fresh Mac terminal:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuzuminami/OpsMineFlow/main/scripts/bootstrap_mac.sh)"
+```
+
 Run:
 
 ```bash
@@ -72,6 +78,7 @@ Run all checks:
 ./scripts/lint.sh
 ./scripts/check_licenses.sh
 ./scripts/check_no_external_network.sh
+./scripts/smoke_local.sh
 ```
 
 Run the local API and desktop UI during development:
@@ -85,10 +92,10 @@ Run the local API and desktop UI during development:
 1. Explain the collection scope to participants.
 2. Obtain consent.
 3. Start OpsMineFlow with `./scripts/run_local.sh`.
-4. Import CSV, JSON, or explicitly enabled ActivityWatch localhost data from the WebUI.
-5. Review events, diagnostics, process maps, app switching, and automation candidates.
+4. Preview and import CSV, JSON, or explicitly enabled ActivityWatch localhost data from the WebUI.
+5. Review events, diagnostics, process maps, app switching, import history, and automation candidates.
 6. Adjust local privacy settings if needed.
-7. Export Mermaid, draw.io, Markdown, CSV, or JSON artifacts.
+7. Export Mermaid, draw.io, Markdown, CSV, or JSON artifacts after confirming the export warning.
 
 ## Import CSV/JSON
 
