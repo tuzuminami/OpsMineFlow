@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,15 @@ class SettingsRequest(BaseModel):  # type: ignore[misc, valid-type]
     activitywatch_enabled: bool | None = None
     excluded_apps: list[str] | None = None
     excluded_domains: list[str] | None = None
+
+
+class ExportPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
+    format: str
+
+
+class ExportSaveRequest(BaseModel):  # type: ignore[misc, valid-type]
+    format: str
+    path: str
 
 
 def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
@@ -135,6 +146,87 @@ def import_path_into_store(format_name: str, path_value: str, store: EventStore 
     active_store = store or default_store()
     active_store.replace(events, import_source=format_name, import_path=str(path))
     return {"imported_events": len(events), "source": format_name}
+
+
+def create_export_artifact(format_name: str, store: EventStore | None = None) -> dict[str, Any]:
+    active_store = store or default_store()
+    snapshot = create_api_snapshot(active_store)
+    if format_name == "markdown":
+        content = str(snapshot["markdown_report"])
+        extension = "md"
+    elif format_name == "json":
+        content = json_dumps({"snapshot": snapshot})
+        extension = "json"
+    elif format_name == "csv":
+        content = events_to_csv(snapshot["events"])
+        extension = "csv"
+    elif format_name == "mermaid":
+        content = str(snapshot["mermaid"])
+        extension = "mmd"
+    elif format_name == "drawio":
+        content = str(snapshot["drawio"])
+        extension = "drawio"
+    else:
+        raise ValueError("Export format must be markdown, json, csv, mermaid, or drawio.")
+
+    return {
+        "format": format_name,
+        "extension": extension,
+        "filename": f"opsmineflow-export.{extension}",
+        "content": content,
+        "byte_size": len(content.encode("utf-8")),
+        "preview": content[:2000],
+        "confidential_count": sum(1 for event in active_store.events if event.confidential_flag),
+        "warning": "Review masked fields and confidential flags before sharing this export.",
+    }
+
+
+def save_export_artifact(format_name: str, path_value: str, store: EventStore | None = None) -> dict[str, Any]:
+    if not path_value.strip():
+        raise ValueError("Export path is required.")
+    artifact = create_export_artifact(format_name, store=store)
+    path = Path(path_value).expanduser()
+    if path.exists() and path.is_dir():
+        path = path / str(artifact["filename"])
+    elif not path.suffix:
+        path = path.with_suffix(f".{artifact['extension']}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(artifact["content"]), encoding="utf-8")
+    return {
+        "saved": True,
+        "format": artifact["format"],
+        "path": str(path),
+        "byte_size": artifact["byte_size"],
+        "warning": artifact["warning"],
+    }
+
+
+def events_to_csv(events: list[dict[str, object]]) -> str:
+    columns = [
+        "event_id",
+        "case_id",
+        "user_hash",
+        "app_name",
+        "window_title_masked",
+        "url_masked",
+        "domain",
+        "activity_raw",
+        "timestamp_start",
+        "timestamp_end",
+        "duration_seconds",
+        "confidential_flag",
+    ]
+    buffer = StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(events)
+    return buffer.getvalue()
+
+
+def json_dumps(payload: object) -> str:
+    import json
+
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
@@ -273,20 +365,35 @@ if app is not None:
 
     @app.post("/export/mermaid")
     def export_mermaid_endpoint() -> dict[str, str]:
-        return {"mermaid": create_api_snapshot()["mermaid"]}
+        return {"mermaid": str(create_export_artifact("mermaid")["content"])}
 
     @app.post("/export/drawio")
     def export_drawio_endpoint() -> dict[str, str]:
-        return {"drawio": create_api_snapshot()["drawio"]}
+        return {"drawio": str(create_export_artifact("drawio")["content"])}
 
     @app.post("/export/svg")
     def export_svg_endpoint() -> dict[str, str]:
         return {"status": "planned", "message": "SVG export will use a local renderer."}
 
     @app.post("/export/csv")
-    def export_csv_endpoint() -> dict[str, list[dict[str, Any]]]:
-        return {"events": create_api_snapshot()["events"]}
+    def export_csv_endpoint() -> dict[str, Any]:
+        return {"csv": str(create_export_artifact("csv")["content"]), "events": create_api_snapshot()["events"]}
 
     @app.post("/export/json")
     def export_json_endpoint() -> dict[str, Any]:
-        return {"snapshot": create_api_snapshot()}
+        return {"json": str(create_export_artifact("json")["content"]), "snapshot": create_api_snapshot()}
+
+    @app.post("/export/preview")
+    def export_preview_endpoint(request: ExportPreviewRequest) -> dict[str, Any]:
+        try:
+            artifact = create_export_artifact(request.format)
+        except ValueError as exc:
+            raise _bad_request(str(exc))
+        return {key: artifact[key] for key in ("format", "filename", "byte_size", "preview", "confidential_count", "warning")}
+
+    @app.post("/export/save")
+    def export_save_endpoint(request: ExportSaveRequest) -> dict[str, Any]:
+        try:
+            return save_export_artifact(request.format, request.path)
+        except ValueError as exc:
+            raise _bad_request(str(exc))

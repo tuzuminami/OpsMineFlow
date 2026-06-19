@@ -37,13 +37,14 @@ trap cleanup EXIT INT TERM
 "$PYTHON_BIN" -m opsmineflow_api >"$DATA_DIR/api.log" 2>&1 &
 API_PID=$!
 
-"$PYTHON_BIN" - "$API_PORT" <<'PY'
+"$PYTHON_BIN" - "$API_PORT" "$DATA_DIR" <<'PY'
 import json
 import sys
 import time
 import urllib.request
 
 port = sys.argv[1]
+base_dir = sys.argv[2]
 base = f"http://127.0.0.1:{port}"
 
 
@@ -98,6 +99,15 @@ assert settings["retention_days"] == 21
 drawio = request("/export/drawio", {})
 assert isinstance(drawio, dict)
 assert "<mxfile" in drawio["drawio"]
+
+export_preview = request("/export/preview", {"format": "markdown"})
+assert isinstance(export_preview, dict)
+assert export_preview["byte_size"] > 0
+
+saved_export = request("/export/save", {"format": "drawio", "path": f"{base_dir}/smoke-map"})
+assert isinstance(saved_export, dict)
+assert saved_export["saved"] is True
+assert saved_export["path"].endswith(".drawio")
 
 deleted = request("/data/delete", {})
 assert isinstance(deleted, dict)

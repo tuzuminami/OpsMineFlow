@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from opsmineflow_api.app import create_api_snapshot, create_diagnostics, create_import_preview, import_path_into_store
+from opsmineflow_api.app import (
+    create_api_snapshot,
+    create_diagnostics,
+    create_export_artifact,
+    create_import_preview,
+    import_path_into_store,
+    save_export_artifact,
+)
 from opsmineflow_api.storage import EventStore
 from opsmineflow_mining import load_events_from_csv
 
@@ -91,6 +98,20 @@ class ApiLogicTests(unittest.TestCase):
         unmasked_chrome = next(event for event in unmasked_snapshot["events"] if event["app_name"] == "Chrome")
         self.assertNotIn("/search", str(masked_chrome["url_masked"]))
         self.assertIn("/search", str(unmasked_chrome["url_masked"]))
+
+    def test_export_preview_and_save_artifact(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        store = EventStore(events=events)
+        artifact = create_export_artifact("markdown", store=store)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = save_export_artifact("drawio", str(Path(temp_dir) / "map"), store=store)
+            saved_path = Path(str(result["path"]))
+
+        self.assertEqual(artifact["format"], "markdown")
+        self.assertIn("Review masked fields", artifact["warning"])
+        self.assertTrue(saved_path.name.endswith(".drawio"))
+        self.assertGreater(result["byte_size"], 0)
 
 
 if __name__ == "__main__":

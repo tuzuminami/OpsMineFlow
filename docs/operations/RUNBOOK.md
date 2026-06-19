@@ -35,6 +35,8 @@ Before sending output to a client, review masked fields, confidential flags, and
 
 The WebUI shows a warning before downloading an export. Treat that warning as the final manual checkpoint before client sharing.
 
+Exports can be downloaded by the browser or saved by the local API to a user-provided local path.
+
 ## Local Data
 
 OpsMineFlow stores runtime data in a local SQLite database by default. Set `OPSMINEFLOW_DATA_DIR` when a separate local workspace is required.
