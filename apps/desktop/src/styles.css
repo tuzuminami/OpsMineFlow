@@ -463,20 +463,46 @@ th {
   top: 0;
 }
 
+.process-workspace {
+  display: grid;
+  gap: 12px;
+}
+
+.process-toolbar {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 220px;
+}
+
+.process-toolbar input,
+.process-toolbar select {
+  background: #ffffff;
+  border: 1px solid #c8d2d2;
+  border-radius: 8px;
+  color: #172026;
+  min-height: 40px;
+  padding: 8px 10px;
+}
+
 .process-canvas {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  max-height: 420px;
+  overflow: auto;
 }
 
 .process-node {
   background: #dae8fc;
   border: 1px solid #6c8ebf;
   border-radius: 8px;
+  color: #172026;
+  cursor: pointer;
   display: grid;
   gap: 4px;
   min-height: 106px;
   padding: 12px;
+  text-align: left;
 }
 
 .process-node.is-bottleneck {
@@ -488,6 +514,50 @@ th {
   box-shadow: inset 4px 0 0 #0f766e;
 }
 
+.process-node.is-selected {
+  outline: 3px solid #163235;
+  outline-offset: 2px;
+}
+
+.process-detail {
+  background: #ffffff;
+  border: 1px solid #dce3e3;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.process-detail h2 {
+  font-size: 15px;
+  margin: 0 0 4px;
+}
+
+.process-detail p {
+  color: #68757d;
+  margin: 0;
+}
+
+.process-detail-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.detail-stat {
+  border-bottom: 1px solid #edf1f1;
+  display: grid;
+  gap: 4px;
+  min-height: 42px;
+  padding-bottom: 8px;
+}
+
+.detail-stat span {
+  color: #68757d;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
 .edge-list {
   background: #ffffff;
   border: 1px solid #dce3e3;
@@ -497,7 +567,13 @@ th {
 }
 
 .edge-row {
-  grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr) 40px;
+  grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr) 52px 60px;
+}
+
+.edge-row.is-linked {
+  background: #eef7f6;
+  border-radius: 6px;
+  padding: 6px;
 }
 
 .split-view,
@@ -591,7 +667,9 @@ th {
   .inline-fields,
   .danger-row,
   .preview-row,
-  .history-row {
+  .history-row,
+  .process-toolbar,
+  .process-detail-grid {
     grid-template-columns: 1fr;
   }
 }
