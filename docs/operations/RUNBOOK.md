@@ -20,6 +20,8 @@ The command starts the local API and WebUI on localhost.
 ./scripts/test.sh
 ```
 
+`./scripts/test.sh` includes unit tests, desktop type checks when dependencies are installed, and local API smoke checks.
+
 ## Policy Checks
 
 ```bash
@@ -30,6 +32,8 @@ The command starts the local API and WebUI on localhost.
 ## Export Review
 
 Before sending output to a client, review masked fields, confidential flags, and the export preview.
+
+The WebUI shows a warning before downloading an export. Treat that warning as the final manual checkpoint before client sharing.
 
 ## Local Data
 

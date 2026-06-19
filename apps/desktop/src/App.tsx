@@ -5,6 +5,7 @@ import {
   importActivityWatchLocal,
   importEvents,
   loadDashboardData,
+  previewImport,
   saveSettings
 } from "./api";
 import type {
@@ -14,6 +15,8 @@ import type {
   Diagnostics,
   EventRecord,
   Health,
+  ImportHistoryEntry,
+  ImportPreview,
   ProcessMap,
   Summary
 } from "./types";
@@ -24,6 +27,7 @@ type DashboardData = {
   health: Health;
   diagnostics: Diagnostics;
   settings: AppSettings;
+  importHistory: ImportHistoryEntry[];
   events: EventRecord[];
   summary: Summary;
   processMap: ProcessMap;
@@ -34,6 +38,7 @@ type DashboardData = {
 
 type AppActions = {
   refresh: () => Promise<void>;
+  previewImport: (format: "csv" | "json", path: string) => Promise<ImportPreview>;
   importEvents: (format: "csv" | "json", path: string) => Promise<void>;
   importActivityWatch: () => Promise<void>;
   exportArtifact: (format: "markdown" | "json" | "csv" | "mermaid" | "drawio") => Promise<void>;
@@ -93,6 +98,19 @@ export function App() {
 
   const actions: AppActions = {
     refresh,
+    previewImport: async (format, path) => {
+      setWorking(true);
+      setError("");
+      setActionMessage("");
+      try {
+        return await previewImport(format, path);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Preview failed");
+        throw err;
+      } finally {
+        setWorking(false);
+      }
+    },
     importEvents: (format, path) =>
       runAction(async () => {
         const result = await importEvents(format, path);
@@ -105,6 +123,9 @@ export function App() {
       }),
     exportArtifact: (format) =>
       runAction(async () => {
+        if (!window.confirm("Review masked fields and confidential flags before sharing this export. Continue?")) {
+          return "Export cancelled.";
+        }
         const filename = downloadExport(format, await exportArtifact(format));
         return `${filename} downloaded.`;
       }),
@@ -249,6 +270,7 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
   const [path, setPath] = useState("data/sample/sample_events.csv");
   const [activityWatchEnabled, setActivityWatchEnabled] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(data.settings);
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
 
   useEffect(() => {
     setSettingsDraft(data.settings);
@@ -267,10 +289,36 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
             <option value="json">JSON</option>
           </select>
           <input value={path} onChange={(event) => setPath(event.target.value)} disabled={working} />
-          <button onClick={() => void actions.importEvents(format, path)} disabled={working || path.trim() === ""}>
-            Import
+          <button
+            onClick={() => {
+              void actions.previewImport(format, path).then(setPreview);
+            }}
+            disabled={working || path.trim() === ""}
+          >
+            Preview
           </button>
         </div>
+        {preview ? (
+          <div className="preview-panel">
+            <div className="preview-summary">
+              <b>{preview.event_count} events</b>
+              <span>{preview.confidential_count} confidential flags</span>
+            </div>
+            <div className="preview-list">
+              {preview.sample_events.map((event, index) => (
+                <div className="preview-row" key={`${event.case_id}-${event.activity}-${index}`}>
+                  <span>{event.case_id}</span>
+                  <b>{event.activity}</b>
+                  <span>{event.app_name || "Unknown"}</span>
+                  <span>{Math.round(event.duration_seconds)}s</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        <button onClick={() => void actions.importEvents(format, path)} disabled={working || path.trim() === ""}>
+          Import Previewed File
+        </button>
         <label className="check-row">
           <input
             type="checkbox"
@@ -283,6 +331,17 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
         <button onClick={() => void actions.importActivityWatch()} disabled={working || !activityWatchEnabled}>
           Import ActivityWatch
         </button>
+        {data.importHistory.length > 0 ? (
+          <div className="history-list">
+            {data.importHistory.slice(0, 4).map((item) => (
+              <div className="history-row" key={`${item.imported_at}-${item.path}`}>
+                <span>{item.source}</span>
+                <b>{item.event_count}</b>
+                <span>{new Date(item.imported_at).toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="operation-panel">

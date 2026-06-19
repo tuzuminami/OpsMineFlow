@@ -5,6 +5,8 @@ import type {
   Diagnostics,
   EventRecord,
   Health,
+  ImportHistoryEntry,
+  ImportPreview,
   ProcessMap,
   Summary
 } from "./types";
@@ -39,10 +41,11 @@ async function postJson<T>(path: string, payload: unknown = {}): Promise<T> {
 }
 
 export async function loadDashboardData() {
-  const [health, diagnostics, settings, events, summary, processMap, candidates, appSwitching, report] = await Promise.all([
+  const [health, diagnostics, settings, importHistory, events, summary, processMap, candidates, appSwitching, report] = await Promise.all([
     getJson<Health>("/health"),
     getJson<Diagnostics>("/diagnostics"),
     getJson<AppSettings>("/settings"),
+    getJson<ImportHistoryEntry[]>("/import/history"),
     getJson<EventRecord[]>("/events"),
     getJson<Summary>("/analytics/summary"),
     getJson<ProcessMap>("/analytics/process-map"),
@@ -55,6 +58,7 @@ export async function loadDashboardData() {
     health,
     diagnostics,
     settings,
+    importHistory,
     events,
     summary,
     processMap,
@@ -72,6 +76,10 @@ export type ImportResult = {
 
 export async function importEvents(format: "csv" | "json", path: string) {
   return postJson<ImportResult>(`/import/${format}`, { path });
+}
+
+export async function previewImport(format: "csv" | "json", path: string) {
+  return postJson<ImportPreview>("/import/preview", { format, path });
 }
 
 export async function importActivityWatchLocal(enabled: boolean) {

@@ -31,6 +31,20 @@ need_command "$PYTHON_BIN"
 need_command node
 need_command npm
 
+if command -v cargo >/dev/null 2>&1; then
+  cargo --version
+else
+  printf 'WARNING: Rust cargo was not found. Browser WebUI can run, but Tauri packaging requires Rust.\n' >&2
+fi
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  if xcode-select -p >/dev/null 2>&1; then
+    xcode-select -p
+  else
+    printf 'WARNING: Xcode Command Line Tools were not found. Tauri packaging may fail until they are installed.\n' >&2
+  fi
+fi
+
 "$PYTHON_BIN" - <<'PY'
 import sys
 

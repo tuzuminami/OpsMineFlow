@@ -15,6 +15,12 @@
 
 The installer creates `.venv`, installs Python packages, installs desktop dependencies, and runs smoke checks.
 
+Fresh-machine bootstrap:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuzuminami/OpsMineFlow/main/scripts/bootstrap_mac.sh)"
+```
+
 ## Run
 
 ```bash

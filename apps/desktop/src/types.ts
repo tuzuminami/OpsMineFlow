@@ -79,6 +79,7 @@ export type Diagnostics = {
     storage_path: string;
     event_count: number;
     manual_label_count: number;
+    import_history_count: number;
   };
   runtime_policy: {
     local_only: boolean;
@@ -95,4 +96,26 @@ export type AppSettings = {
   activitywatch_enabled: boolean;
   excluded_apps: string[];
   excluded_domains: string[];
+};
+
+export type ImportPreview = {
+  format: string;
+  path: string;
+  event_count: number;
+  confidential_count: number;
+  sample_events: Array<{
+    case_id: string;
+    activity: string;
+    app_name: string;
+    domain: string;
+    duration_seconds: number;
+  }>;
+};
+
+export type ImportHistoryEntry = {
+  id?: number;
+  source: string;
+  path: string;
+  event_count: number;
+  imported_at: string;
 };
