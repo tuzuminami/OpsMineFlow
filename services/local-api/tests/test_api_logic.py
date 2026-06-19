@@ -64,6 +64,34 @@ class ApiLogicTests(unittest.TestCase):
         self.assertTrue(reopened.is_initialized())
         self.assertEqual(reopened.events, [])
 
+    def test_settings_filter_events_and_normalize_values(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        store = EventStore(events=events)
+        settings = store.update_settings(
+            {
+                "retention_days": 999,
+                "excluded_apps": "Slack, slack",
+                "excluded_domains": "example.local",
+            }
+        )
+
+        self.assertEqual(settings["retention_days"], 365)
+        self.assertEqual(settings["excluded_apps"], ["Slack"])
+        self.assertEqual(len(store.events), 4)
+        self.assertNotIn("Slack", {event.app_name for event in store.events})
+
+    def test_snapshot_respects_masking_settings(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        store = EventStore(events=events)
+        masked_snapshot = create_api_snapshot(store)
+        store.update_settings({"mask_url_paths": False})
+        unmasked_snapshot = create_api_snapshot(store)
+
+        masked_chrome = next(event for event in masked_snapshot["events"] if event["app_name"] == "Chrome")
+        unmasked_chrome = next(event for event in unmasked_snapshot["events"] if event["app_name"] == "Chrome")
+        self.assertNotIn("/search", str(masked_chrome["url_masked"]))
+        self.assertIn("/search", str(unmasked_chrome["url_masked"]))
+
 
 if __name__ == "__main__":
     unittest.main()
