@@ -75,7 +75,11 @@ export type Diagnostics = {
   api: {
     status: string;
     bind: string;
+    port: number;
     cors: string[];
+  };
+  webui: DiagnosticItem & {
+    expected_url: string;
   };
   storage: {
     storage_mode: string;
@@ -83,14 +87,38 @@ export type Diagnostics = {
     event_count: number;
     manual_label_count: number;
     import_history_count: number;
+    automation_review_count: number;
   };
+  dependencies: Record<string, DiagnosticItem>;
+  ports: Record<string, DiagnosticItem & { host: string; port: number }>;
+  activitywatch: DiagnosticItem & {
+    enabled: boolean;
+  };
+  guardrails: Record<string, DiagnosticItem & { command: string }>;
   runtime_policy: {
     local_only: boolean;
     external_network: string;
     llm_supported: boolean;
     remote_reporting: boolean;
   };
+  remediation: string[];
 };
+
+export type DiagnosticItem = {
+  status: string;
+  version?: string;
+  remediation: string;
+};
+
+export type DiagnosticCheckResult = {
+  status: string;
+  command: string;
+  exit_code?: number;
+  output: string;
+  remediation: string;
+};
+
+export type DiagnosticChecks = Record<string, DiagnosticCheckResult>;
 
 export type AppSettings = {
   mask_url_paths: boolean;

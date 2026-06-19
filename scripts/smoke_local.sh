@@ -39,6 +39,7 @@ API_PID=$!
 
 "$PYTHON_BIN" - "$API_PORT" "$DATA_DIR" <<'PY'
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -78,6 +79,9 @@ else:
 diagnostics = request("/diagnostics")
 assert isinstance(diagnostics, dict)
 assert diagnostics["runtime_policy"]["local_only"] is True
+assert diagnostics["api"]["port"] == int(os.environ["OPSMINEFLOW_API_PORT"])
+assert "dependencies" in diagnostics
+assert "guardrails" in diagnostics
 
 preview = request("/import/preview", {"format": "csv", "path": "data/sample/sample_events.csv"})
 assert isinstance(preview, dict)

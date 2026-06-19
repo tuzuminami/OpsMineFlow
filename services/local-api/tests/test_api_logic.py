@@ -10,6 +10,7 @@ from opsmineflow_api.app import (
     create_export_artifact,
     create_import_preview,
     import_path_into_store,
+    run_diagnostic_checks,
     save_export_artifact,
 )
 from opsmineflow_api.storage import EventStore
@@ -50,8 +51,19 @@ class ApiLogicTests(unittest.TestCase):
         snapshot = create_diagnostics(EventStore(events=events))
 
         self.assertEqual(snapshot["api"]["bind"], "127.0.0.1")
+        self.assertIn("webui", snapshot)
+        self.assertIn("dependencies", snapshot)
+        self.assertIn("ports", snapshot)
+        self.assertIn("guardrails", snapshot)
+        self.assertEqual(snapshot["activitywatch"]["status"], "disabled")
         self.assertTrue(snapshot["runtime_policy"]["local_only"])
         self.assertEqual(snapshot["storage"]["event_count"], 7)
+
+    def test_diagnostic_checks_run_local_guardrails(self) -> None:
+        results = run_diagnostic_checks()
+
+        self.assertEqual(results["license_policy"]["status"], "passed")
+        self.assertEqual(results["local_network_policy"]["status"], "passed")
 
     def test_import_preview_and_store_import_history(self) -> None:
         preview = create_import_preview("csv", "data/sample/sample_events.csv")
