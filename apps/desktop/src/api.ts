@@ -3,6 +3,7 @@ import type {
   AppSettings,
   AutomationCandidate,
   AutomationReviewStatus,
+  DiagnosticChecks,
   Diagnostics,
   EventRecord,
   ExportFormat,
@@ -92,6 +93,10 @@ export async function importActivityWatchLocal(enabled: boolean) {
 
 export async function saveSettings(settings: Partial<AppSettings>) {
   return postJson<AppSettings>("/settings", settings);
+}
+
+export async function runDiagnosticChecks() {
+  return postJson<DiagnosticChecks>("/diagnostics/checks");
 }
 
 export async function saveAutomationReview(activity: string, status: AutomationReviewStatus) {

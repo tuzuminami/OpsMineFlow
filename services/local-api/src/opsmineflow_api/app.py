@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import csv
+import os
+import platform
+import shutil
+import socket
+import subprocess
+import sys
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -260,19 +266,144 @@ def json_dumps(payload: object) -> str:
 def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
     diagnostics = active_store.diagnostics()
+    settings = active_store.get_settings()
+    api_port = int(os.environ.get("OPSMINEFLOW_API_PORT", "8765"))
+    webui_port = int(os.environ.get("OPSMINEFLOW_WEBUI_PORT", "5173"))
+    activitywatch_enabled = bool(settings.get("activitywatch_enabled", False))
     return {
         "api": {
             "status": "ok",
             "bind": "127.0.0.1",
+            "port": api_port,
             "cors": ["http://127.0.0.1:5173", "http://localhost:5173", "tauri://localhost"],
         },
+        "webui": {
+            "status": "reachable" if _tcp_open("127.0.0.1", webui_port) else "not_detected",
+            "expected_url": f"http://127.0.0.1:{webui_port}",
+            "remediation": "Run ./scripts/run_local.sh if the browser UI is closed.",
+        },
         "storage": diagnostics,
+        "dependencies": {
+            "python": _dependency_status("python", [sys.executable, "--version"]),
+            "node": _dependency_status("node", ["node", "--version"]),
+            "npm": _dependency_status("npm", ["npm", "--version"]),
+            "cargo": _dependency_status("cargo", ["cargo", "--version"]),
+            "platform": {
+                "status": "detected",
+                "version": f"{platform.system()} {platform.release()}",
+                "remediation": "",
+            },
+        },
+        "ports": {
+            "api": {
+                "host": "127.0.0.1",
+                "port": api_port,
+                "status": "bound_by_current_api",
+                "remediation": "",
+            },
+            "webui": {
+                "host": "127.0.0.1",
+                "port": webui_port,
+                "status": "open" if _tcp_open("127.0.0.1", webui_port) else "not_open",
+                "remediation": "Run ./scripts/run_local.sh to start the WebUI.",
+            },
+        },
+        "activitywatch": {
+            "enabled": activitywatch_enabled,
+            "status": _activitywatch_status(activitywatch_enabled),
+            "remediation": "Enable ActivityWatch import only when the user explicitly wants localhost ActivityWatch data.",
+        },
+        "guardrails": {
+            "license_policy": {
+                "status": "available",
+                "command": "./scripts/check_licenses.sh",
+                "remediation": "Run diagnostics checks or ./scripts/check_licenses.sh.",
+            },
+            "local_network_policy": {
+                "status": "available",
+                "command": "./scripts/check_no_external_network.sh",
+                "remediation": "Run diagnostics checks or ./scripts/check_no_external_network.sh.",
+            },
+        },
         "runtime_policy": {
             "local_only": True,
             "external_network": "blocked_by_policy",
             "llm_supported": False,
             "remote_reporting": False,
         },
+        "remediation": [
+            "Run ./scripts/install_mac.sh when dependencies are missing.",
+            "Run ./scripts/run_local.sh when API or WebUI ports are not open.",
+            "Use Settings to keep ActivityWatch disabled unless explicitly needed.",
+            "Run diagnostics checks before sharing exports or releases.",
+        ],
+    }
+
+
+def run_diagnostic_checks() -> dict[str, Any]:
+    return {
+        "license_policy": _run_guardrail_script("check_licenses.sh"),
+        "local_network_policy": _run_guardrail_script("check_no_external_network.sh"),
+    }
+
+
+def _dependency_status(name: str, command: list[str]) -> dict[str, str]:
+    executable = command[0]
+    if not shutil.which(executable) and executable != sys.executable:
+        return {
+            "status": "missing",
+            "version": "",
+            "remediation": f"Install {name} with ./scripts/install_mac.sh.",
+        }
+    try:
+        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"status": "error", "version": "", "remediation": str(exc)}
+    version = (result.stdout or result.stderr).strip().splitlines()[0] if (result.stdout or result.stderr).strip() else ""
+    return {
+        "status": "installed" if result.returncode == 0 else "error",
+        "version": version,
+        "remediation": "" if result.returncode == 0 else f"Re-run ./scripts/install_mac.sh for {name}.",
+    }
+
+
+def _activitywatch_status(enabled: bool) -> str:
+    if not enabled:
+        return "disabled"
+    return "reachable" if _tcp_open("127.0.0.1", 5600) else "not_reachable"
+
+
+def _tcp_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.15):
+            return True
+    except OSError:
+        return False
+
+
+def _run_guardrail_script(script_name: str) -> dict[str, object]:
+    root_dir = Path(__file__).resolve().parents[4]
+    script_path = root_dir / "scripts" / script_name
+    if not script_path.exists():
+        return {"status": "missing", "command": f"./scripts/{script_name}", "output": "", "remediation": "Restore the diagnostics script."}
+    try:
+        result = subprocess.run(
+            [str(script_path)],
+            cwd=root_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "command": f"./scripts/{script_name}", "output": "", "remediation": "Run the script manually for full output."}
+    output = "\n".join((result.stdout + result.stderr).strip().splitlines()[-20:])
+    return {
+        "status": "passed" if result.returncode == 0 else "failed",
+        "command": f"./scripts/{script_name}",
+        "exit_code": result.returncode,
+        "output": output,
+        "remediation": "" if result.returncode == 0 else "Review the script output and remove blocked dependencies or network integrations.",
     }
 
 
@@ -310,6 +441,10 @@ if app is not None:
     @app.get("/diagnostics")
     def diagnostics() -> dict[str, Any]:
         return create_diagnostics()
+
+    @app.post("/diagnostics/checks")
+    def diagnostics_checks() -> dict[str, Any]:
+        return run_diagnostic_checks()
 
     @app.get("/settings")
     def settings() -> dict[str, object]:

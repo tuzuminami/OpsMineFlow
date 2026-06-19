@@ -13,6 +13,7 @@ from .app import (
     create_export_artifact,
     create_import_preview,
     import_path_into_store,
+    run_diagnostic_checks,
     save_export_artifact,
 )
 from .storage import default_store
@@ -78,6 +79,9 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 return
             if path == "/settings":
                 self._send_json(default_store().update_settings(payload))
+                return
+            if path == "/diagnostics/checks":
+                self._send_json(run_diagnostic_checks())
                 return
             if path == "/automation/review":
                 self._send_json(

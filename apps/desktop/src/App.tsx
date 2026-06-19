@@ -7,6 +7,7 @@ import {
   loadDashboardData,
   previewImport,
   previewExport,
+  runDiagnosticChecks,
   saveAutomationReview,
   saveExport,
   saveSettings
@@ -16,6 +17,7 @@ import type {
   AppSettings,
   AutomationCandidate,
   AutomationReviewStatus,
+  DiagnosticChecks,
   Diagnostics,
   EventRecord,
   ExportFormat,
@@ -52,6 +54,7 @@ type AppActions = {
   saveExport: (format: ExportFormat, path: string) => Promise<void>;
   saveSettings: (settings: Partial<AppSettings>) => Promise<void>;
   saveAutomationReview: (activity: string, status: AutomationReviewStatus) => Promise<void>;
+  runDiagnosticChecks: () => Promise<DiagnosticChecks>;
   deleteData: () => Promise<void>;
 };
 
@@ -169,6 +172,21 @@ export function App() {
         const result = await saveAutomationReview(activity, status);
         return `Review saved for ${result.activity}.`;
       }),
+    runDiagnosticChecks: async () => {
+      setWorking(true);
+      setError("");
+      setActionMessage("");
+      try {
+        const result = await runDiagnosticChecks();
+        setActionMessage("Diagnostics checks finished.");
+        return result;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Diagnostics checks failed");
+        throw err;
+      } finally {
+        setWorking(false);
+      }
+    },
     deleteData: () =>
       runAction(async () => {
         await deleteLocalData();
@@ -285,6 +303,7 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
   const [exportFormat, setExportFormat] = useState<ExportFormat>("markdown");
   const [exportPath, setExportPath] = useState(defaultExportPath("markdown"));
   const [exportPreview, setExportPreview] = useState<ExportPreview | null>(null);
+  const [diagnosticChecks, setDiagnosticChecks] = useState<DiagnosticChecks | null>(null);
 
   useEffect(() => {
     setSettingsDraft(data.settings);
@@ -462,15 +481,43 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
       <section className="operation-panel">
         <div className="panel-heading">
           <h2>Diagnostics</h2>
-          <span>{data.diagnostics.storage.storage_mode}</span>
+          <span>{data.diagnostics.webui.status}</span>
         </div>
         <div className="diagnostic-list">
-          <Setting label="API bind" value={data.diagnostics.api.bind} />
-          <Setting label="Storage" value={data.diagnostics.storage.storage_mode} />
+          <Setting label="API" value={`${data.diagnostics.api.status} ${data.diagnostics.api.bind}:${data.diagnostics.api.port}`} />
+          <Setting label="WebUI" value={`${data.diagnostics.webui.status} ${data.diagnostics.webui.expected_url}`} />
+          <Setting label="Storage" value={`${data.diagnostics.storage.storage_mode} ${data.diagnostics.storage.storage_path || ""}`} />
           <Setting label="Events" value={data.diagnostics.storage.event_count.toString()} />
+          <Setting label="Reviews" value={data.diagnostics.storage.automation_review_count.toString()} />
+          <Setting label="ActivityWatch" value={`${data.diagnostics.activitywatch.enabled ? "enabled" : "disabled"} / ${data.diagnostics.activitywatch.status}`} />
           <Setting label="External network" value={data.diagnostics.runtime_policy.external_network} />
+          {Object.entries(data.diagnostics.dependencies).map(([name, item]) => (
+            <Setting key={name} label={name} value={`${item.status}${item.version ? ` / ${item.version}` : ""}`} />
+          ))}
+          {Object.entries(data.diagnostics.ports).map(([name, item]) => (
+            <Setting key={name} label={`${name} port`} value={`${item.host}:${item.port} / ${item.status}`} />
+          ))}
         </div>
+        {diagnosticChecks ? (
+          <div className="check-results">
+            {Object.entries(diagnosticChecks).map(([name, result]) => (
+              <div className="check-result" key={name}>
+                <span>{result.command}</span>
+                <b>{result.status}</b>
+                <pre>{result.output}</pre>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div className="danger-row">
+          <button
+            onClick={() => {
+              void actions.runDiagnosticChecks().then(setDiagnosticChecks);
+            }}
+            disabled={working}
+          >
+            Run Checks
+          </button>
           <button onClick={() => void actions.refresh()} disabled={working}>
             Refresh
           </button>

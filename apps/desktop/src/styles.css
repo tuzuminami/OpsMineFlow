@@ -324,12 +324,43 @@ textarea {
 .danger-row {
   display: grid;
   gap: 8px;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }
 
 .operation-panel .danger-button {
   background: #8a2432;
   border-color: #8a2432;
+}
+
+.check-results {
+  display: grid;
+  gap: 8px;
+}
+
+.check-result {
+  border-top: 1px solid #edf1f1;
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+}
+
+.check-result span {
+  color: #68757d;
+  font-size: 12px;
+}
+
+.check-result b {
+  color: #0f766e;
+}
+
+.check-result pre {
+  background: #f6f8f8;
+  border-radius: 8px;
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px;
+  white-space: pre-wrap;
 }
 
 .view-grid {
