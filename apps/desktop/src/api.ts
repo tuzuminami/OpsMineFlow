@@ -2,6 +2,7 @@ import type {
   AppSwitching,
   AppSettings,
   AutomationCandidate,
+  AutomationReviewStatus,
   Diagnostics,
   EventRecord,
   ExportFormat,
@@ -91,6 +92,10 @@ export async function importActivityWatchLocal(enabled: boolean) {
 
 export async function saveSettings(settings: Partial<AppSettings>) {
   return postJson<AppSettings>("/settings", settings);
+}
+
+export async function saveAutomationReview(activity: string, status: AutomationReviewStatus) {
+  return postJson<{ activity: string; review_status: AutomationReviewStatus }>("/automation/review", { activity, status });
 }
 
 export async function deleteLocalData() {

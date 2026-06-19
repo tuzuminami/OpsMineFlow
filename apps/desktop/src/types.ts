@@ -55,12 +55,15 @@ export type ProcessMap = {
   end_activities: Record<string, number>;
 };
 
+export type AutomationReviewStatus = "unreviewed" | "adopted" | "on_hold" | "rejected";
+
 export type AutomationCandidate = {
   activity: string;
   automation_score: number;
   frequency: number;
   classification: string;
   reasons: string[];
+  review_status: AutomationReviewStatus;
 };
 
 export type AppSwitching = {

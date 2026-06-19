@@ -33,6 +33,7 @@ class ApiLogicTests(unittest.TestCase):
             db_path = Path(temp_dir) / "opsmineflow.sqlite3"
             store = EventStore(events=events, db_path=db_path)
             store.set_label(events[0].event_id, "Reviewed")
+            store.set_automation_review("社内確認", "adopted")
             store.update_settings({"retention_days": 14, "mask_url_paths": True})
             store.record_import("csv", "data/sample/sample_events.csv", len(events))
 
@@ -40,6 +41,7 @@ class ApiLogicTests(unittest.TestCase):
 
         self.assertEqual(len(reopened.events), 7)
         self.assertEqual(reopened.manual_labels[events[0].event_id], "Reviewed")
+        self.assertEqual(reopened.automation_reviews["社内確認"], "adopted")
         self.assertEqual(reopened.get_settings()["retention_days"], 14)
         self.assertEqual(reopened.list_import_history()[0]["event_count"], 7)
 
@@ -112,6 +114,17 @@ class ApiLogicTests(unittest.TestCase):
         self.assertIn("Review masked fields", artifact["warning"])
         self.assertTrue(saved_path.name.endswith(".drawio"))
         self.assertGreater(result["byte_size"], 0)
+
+    def test_automation_review_state_is_exposed_and_exported(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        store = EventStore(events=events)
+        store.set_automation_review("社内確認", "on_hold")
+        snapshot = create_api_snapshot(store)
+        reviewed = next(item for item in snapshot["automation_candidates"] if item["activity"] == "社内確認")
+
+        self.assertEqual(reviewed["review_status"], "on_hold")
+        self.assertIn("## Automation Review Status", snapshot["markdown_report"])
+        self.assertIn("社内確認: review on_hold", snapshot["markdown_report"])
 
 
 if __name__ == "__main__":
