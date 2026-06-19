@@ -218,7 +218,7 @@ function View({
 }) {
   if (tab === "home") return <HomeView data={data} actions={actions} working={working} />;
   if (tab === "events") return <EventsView events={data.events} />;
-  if (tab === "process") return <ProcessView processMap={data.processMap} />;
+  if (tab === "process") return <ProcessView processMap={data.processMap} events={data.events} />;
   if (tab === "switching") return <SwitchingView switching={data.appSwitching} />;
   if (tab === "candidates") return <CandidatesView candidates={data.candidates} />;
   if (tab === "reports") return <ReportsView markdown={data.markdown} />;
@@ -545,33 +545,99 @@ function EventsView({ events }: { events: EventRecord[] }) {
   );
 }
 
-function ProcessView({ processMap }: { processMap: ProcessMap }) {
+function ProcessView({ processMap, events }: { processMap: ProcessMap; events: EventRecord[] }) {
+  const [query, setQuery] = useState("");
+  const [appFilter, setAppFilter] = useState("all");
+  const [selectedActivity, setSelectedActivity] = useState("");
+  const activityApps = useMemo(() => {
+    const mapping = new Map<string, Set<string>>();
+    for (const event of events) {
+      if (!mapping.has(event.activity_raw)) mapping.set(event.activity_raw, new Set<string>());
+      mapping.get(event.activity_raw)?.add(event.app_name || "Unknown");
+    }
+    return mapping;
+  }, [events]);
+  const appOptions = useMemo(() => {
+    return Array.from(new Set(events.map((event) => event.app_name || "Unknown"))).sort();
+  }, [events]);
+  const visibleNodes = processMap.nodes.filter((node) => {
+    const matchesQuery = query.trim() === "" || node.activity.toLowerCase().includes(query.trim().toLowerCase());
+    const apps = activityApps.get(node.activity) || new Set<string>();
+    const matchesApp = appFilter === "all" || apps.has(appFilter);
+    return matchesQuery && matchesApp;
+  });
+  const visibleActivities = new Set(visibleNodes.map((node) => node.activity));
+  const visibleEdges = processMap.edges.filter((edge) => visibleActivities.has(edge.source) && visibleActivities.has(edge.target));
+  const selectedNode = visibleNodes.find((node) => node.activity === selectedActivity) || visibleNodes[0] || null;
+  const selectedEvents = selectedNode ? events.filter((event) => event.activity_raw === selectedNode.activity) : [];
+  const selectedApps = selectedNode ? Array.from(activityApps.get(selectedNode.activity) || []).sort() : [];
+
   return (
-    <section className="process-canvas">
-      {processMap.nodes.map((node) => (
-        <div
-          key={node.activity}
-          className={[
-            "process-node",
-            node.bottleneck ? "is-bottleneck" : "",
-            node.automation_candidate ? "is-automation" : ""
-          ].join(" ")}
-        >
-          <strong>{node.activity}</strong>
-          <span>freq {node.frequency}</span>
-          <span>avg {node.average_duration_seconds.toFixed(0)}s</span>
+    <section className="process-workspace">
+      <div className="process-toolbar">
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter activity" />
+        <select value={appFilter} onChange={(event) => setAppFilter(event.target.value)}>
+          <option value="all">All apps</option>
+          {appOptions.map((appName) => (
+            <option key={appName} value={appName}>
+              {appName}
+            </option>
+          ))}
+        </select>
+      </div>
+      <section className="process-canvas">
+        {visibleNodes.map((node) => (
+          <button
+            key={node.activity}
+            className={[
+              "process-node",
+              node.activity === selectedNode?.activity ? "is-selected" : "",
+              node.bottleneck ? "is-bottleneck" : "",
+              node.automation_candidate ? "is-automation" : ""
+            ].join(" ")}
+            onClick={() => setSelectedActivity(node.activity)}
+          >
+            <strong>{node.activity}</strong>
+            <span>freq {node.frequency}</span>
+            <span>avg {node.average_duration_seconds.toFixed(0)}s</span>
+            <span>
+              start {processMap.start_activities[node.activity] || 0} / end {processMap.end_activities[node.activity] || 0}
+            </span>
+          </button>
+        ))}
+        {visibleNodes.length === 0 ? <p className="empty">No process nodes match the filters</p> : null}
+      </section>
+      <section className="process-detail">
+        <div>
+          <h2>{selectedNode?.activity || "No activity selected"}</h2>
+          <p>{selectedApps.join(", ") || "No app data"}</p>
         </div>
-      ))}
-      <div className="edge-list">
-        {processMap.edges.map((edge) => (
-          <div key={`${edge.source}-${edge.target}`} className="edge-row">
+        {selectedNode ? (
+          <div className="process-detail-grid">
+            <DetailStat label="Frequency" value={selectedNode.frequency.toString()} />
+            <DetailStat label="Avg seconds" value={selectedNode.average_duration_seconds.toFixed(0)} />
+            <DetailStat label="Start count" value={(processMap.start_activities[selectedNode.activity] || 0).toString()} />
+            <DetailStat label="End count" value={(processMap.end_activities[selectedNode.activity] || 0).toString()} />
+            <DetailStat label="Events" value={selectedEvents.length.toString()} />
+            <DetailStat label="Signals" value={[selectedNode.bottleneck ? "Bottleneck" : "", selectedNode.automation_candidate ? "Automation" : ""].filter(Boolean).join(", ") || "None"} />
+          </div>
+        ) : null}
+      </section>
+      <section className="edge-list">
+        {visibleEdges.map((edge) => (
+          <div
+            key={`${edge.source}-${edge.target}`}
+            className={["edge-row", selectedNode && (edge.source === selectedNode.activity || edge.target === selectedNode.activity) ? "is-linked" : ""].join(" ")}
+          >
             <span>{edge.source}</span>
             <span>to</span>
             <span>{edge.target}</span>
-            <b>{edge.frequency}</b>
+            <b>{edge.frequency}x</b>
+            <span>{edge.average_transition_seconds.toFixed(0)}s avg</span>
           </div>
         ))}
-      </div>
+        {visibleEdges.length === 0 ? <p className="empty">No transitions match the filters</p> : null}
+      </section>
     </section>
   );
 }
@@ -728,6 +794,15 @@ function Metric({ label, value }: { label: string; value: string }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </article>
+  );
+}
+
+function DetailStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="detail-stat">
+      <span>{label}</span>
+      <b>{value}</b>
+    </div>
   );
 }
 
