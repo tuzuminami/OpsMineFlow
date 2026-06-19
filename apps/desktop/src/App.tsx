@@ -6,6 +6,8 @@ import {
   importEvents,
   loadDashboardData,
   previewImport,
+  previewExport,
+  saveExport,
   saveSettings
 } from "./api";
 import type {
@@ -14,6 +16,8 @@ import type {
   AutomationCandidate,
   Diagnostics,
   EventRecord,
+  ExportFormat,
+  ExportPreview,
   Health,
   ImportHistoryEntry,
   ImportPreview,
@@ -41,7 +45,9 @@ type AppActions = {
   previewImport: (format: "csv" | "json", path: string) => Promise<ImportPreview>;
   importEvents: (format: "csv" | "json", path: string) => Promise<void>;
   importActivityWatch: () => Promise<void>;
-  exportArtifact: (format: "markdown" | "json" | "csv" | "mermaid" | "drawio") => Promise<void>;
+  previewExport: (format: ExportFormat) => Promise<ExportPreview>;
+  exportArtifact: (format: ExportFormat) => Promise<void>;
+  saveExport: (format: ExportFormat, path: string) => Promise<void>;
   saveSettings: (settings: Partial<AppSettings>) => Promise<void>;
   deleteData: () => Promise<void>;
 };
@@ -121,6 +127,19 @@ export function App() {
         const result = await importActivityWatchLocal(true);
         return result.message || `${result.imported_events} ActivityWatch events imported.`;
       }),
+    previewExport: async (format) => {
+      setWorking(true);
+      setError("");
+      setActionMessage("");
+      try {
+        return await previewExport(format);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Export preview failed");
+        throw err;
+      } finally {
+        setWorking(false);
+      }
+    },
     exportArtifact: (format) =>
       runAction(async () => {
         if (!window.confirm("Review masked fields and confidential flags before sharing this export. Continue?")) {
@@ -128,6 +147,14 @@ export function App() {
         }
         const filename = downloadExport(format, await exportArtifact(format));
         return `${filename} downloaded.`;
+      }),
+    saveExport: (format, path) =>
+      runAction(async () => {
+        if (!window.confirm("Review masked fields and confidential flags before sharing this export. Continue?")) {
+          return "Export cancelled.";
+        }
+        const result = await saveExport(format, path);
+        return `Saved ${result.format} export to ${result.path}.`;
       }),
     saveSettings: (settings) =>
       runAction(async () => {
@@ -200,13 +227,13 @@ function View({
 }
 
 function downloadExport(
-  format: "markdown" | "json" | "csv" | "mermaid" | "drawio",
+  format: ExportFormat,
   payload: unknown
 ): string {
   const typed = payload as {
     markdown?: string;
-    snapshot?: unknown;
-    events?: EventRecord[];
+    json?: string;
+    csv?: string;
     mermaid?: string;
     drawio?: string;
   };
@@ -218,10 +245,10 @@ function downloadExport(
     content = typed.markdown || "";
     mime = "text/markdown;charset=utf-8";
   } else if (format === "json") {
-    content = JSON.stringify(typed.snapshot, null, 2);
+    content = typed.json || "";
     mime = "application/json;charset=utf-8";
   } else if (format === "csv") {
-    content = eventsToCsv(typed.events || []);
+    content = typed.csv || "";
     mime = "text/csv;charset=utf-8";
   } else if (format === "mermaid") {
     content = typed.mermaid || "";
@@ -241,36 +268,15 @@ function downloadExport(
   return filename;
 }
 
-function eventsToCsv(events: EventRecord[]): string {
-  const columns: Array<keyof EventRecord> = [
-    "event_id",
-    "case_id",
-    "user_hash",
-    "app_name",
-    "window_title_masked",
-    "url_masked",
-    "domain",
-    "activity_raw",
-    "timestamp_start",
-    "timestamp_end",
-    "duration_seconds",
-    "confidential_flag"
-  ];
-  const rows = events.map((event) => columns.map((column) => csvCell(String(event[column]))).join(","));
-  return [columns.join(","), ...rows].join("\n");
-}
-
-function csvCell(value: string): string {
-  if (!/[",\n]/.test(value)) return value;
-  return `"${value.replaceAll('"', '""')}"`;
-}
-
 function HomeView({ data, actions, working }: { data: DashboardData; actions: AppActions; working: boolean }) {
   const [format, setFormat] = useState<"csv" | "json">("csv");
   const [path, setPath] = useState("data/sample/sample_events.csv");
   const [activityWatchEnabled, setActivityWatchEnabled] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(data.settings);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("markdown");
+  const [exportPath, setExportPath] = useState(defaultExportPath("markdown"));
+  const [exportPreview, setExportPreview] = useState<ExportPreview | null>(null);
 
   useEffect(() => {
     setSettingsDraft(data.settings);
@@ -347,14 +353,51 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
       <section className="operation-panel">
         <div className="panel-heading">
           <h2>Exports</h2>
-          <span>Local files only</span>
+          <span>{exportPreview ? `${exportPreview.byte_size} bytes` : "Local files only"}</span>
         </div>
+        <div className="inline-fields">
+          <select
+            value={exportFormat}
+            onChange={(event) => {
+              const nextFormat = event.target.value as ExportFormat;
+              setExportFormat(nextFormat);
+              setExportPath(defaultExportPath(nextFormat));
+              setExportPreview(null);
+            }}
+            disabled={working}
+          >
+            {(["markdown", "json", "csv", "mermaid", "drawio"] as const).map((formatName) => (
+              <option key={formatName} value={formatName}>
+                {formatName}
+              </option>
+            ))}
+          </select>
+          <input value={exportPath} onChange={(event) => setExportPath(event.target.value)} disabled={working} />
+          <button
+            onClick={() => {
+              void actions.previewExport(exportFormat).then(setExportPreview);
+            }}
+            disabled={working}
+          >
+            Preview
+          </button>
+        </div>
+        {exportPreview ? (
+          <div className="export-preview-box">
+            <div className="preview-summary">
+              <b>{exportPreview.filename}</b>
+              <span>{exportPreview.confidential_count} confidential flags</span>
+            </div>
+            <pre>{exportPreview.preview}</pre>
+          </div>
+        ) : null}
         <div className="button-grid">
-          {(["markdown", "json", "csv", "mermaid", "drawio"] as const).map((formatName) => (
-            <button key={formatName} onClick={() => void actions.exportArtifact(formatName)} disabled={working}>
-              {formatName}
-            </button>
-          ))}
+          <button onClick={() => void actions.saveExport(exportFormat, exportPath)} disabled={working || !exportPath.trim()}>
+            Save to Path
+          </button>
+          <button onClick={() => void actions.exportArtifact(exportFormat)} disabled={working}>
+            Download
+          </button>
         </div>
       </section>
 
@@ -666,6 +709,17 @@ function textToList(value: string): string[] {
     .split(/[\n,]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function defaultExportPath(format: ExportFormat): string {
+  const extensionByFormat: Record<ExportFormat, string> = {
+    markdown: "md",
+    json: "json",
+    csv: "csv",
+    mermaid: "mmd",
+    drawio: "drawio"
+  };
+  return `exports/opsmineflow-export.${extensionByFormat[format]}`;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

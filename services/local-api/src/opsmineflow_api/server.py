@@ -7,7 +7,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .activitywatch import import_activitywatch_local
-from .app import create_api_snapshot, create_diagnostics, create_import_preview, import_path_into_store
+from .app import (
+    create_api_snapshot,
+    create_diagnostics,
+    create_export_artifact,
+    create_import_preview,
+    import_path_into_store,
+    save_export_artifact,
+)
 from .storage import default_store
 
 HOST = os.environ.get("OPSMINEFLOW_API_HOST", "127.0.0.1")
@@ -76,16 +83,22 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 default_store().clear()
                 self._send_json({"deleted": True})
                 return
-            snapshot = create_api_snapshot()
             export_routes: dict[str, Any] = {
-                "/export/mermaid": {"mermaid": snapshot["mermaid"]},
-                "/export/drawio": {"drawio": snapshot["drawio"]},
+                "/export/mermaid": {"mermaid": create_export_artifact("mermaid")["content"]},
+                "/export/drawio": {"drawio": create_export_artifact("drawio")["content"]},
                 "/export/svg": {"status": "planned", "message": "SVG export will use a local renderer."},
-                "/export/csv": {"events": snapshot["events"]},
-                "/export/json": {"snapshot": snapshot},
+                "/export/csv": {"csv": create_export_artifact("csv")["content"], "events": create_api_snapshot()["events"]},
+                "/export/json": {"json": create_export_artifact("json")["content"], "snapshot": create_api_snapshot()},
             }
             if path in export_routes:
                 self._send_json(export_routes[path])
+                return
+            if path == "/export/preview":
+                artifact = create_export_artifact(str(payload.get("format") or ""))
+                self._send_json({key: artifact[key] for key in ("format", "filename", "byte_size", "preview", "confidential_count", "warning")})
+                return
+            if path == "/export/save":
+                self._send_json(save_export_artifact(str(payload.get("format") or ""), str(payload.get("path") or "")))
                 return
         except FileNotFoundError as exc:
             self._send_json({"error": str(exc)}, status=404)

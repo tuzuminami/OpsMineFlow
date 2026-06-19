@@ -211,6 +211,7 @@ textarea {
 }
 
 .preview-panel,
+.export-preview-box,
 .history-list {
   border: 1px solid #edf1f1;
   border-radius: 8px;
@@ -237,6 +238,17 @@ textarea {
 .history-list {
   display: grid;
   gap: 6px;
+}
+
+.export-preview-box pre {
+  background: #f8faf9;
+  border: 1px solid #edf1f1;
+  border-radius: 8px;
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
 }
 
 .preview-row,

@@ -4,6 +4,9 @@ import type {
   AutomationCandidate,
   Diagnostics,
   EventRecord,
+  ExportFormat,
+  ExportPreview,
+  ExportSaveResult,
   Health,
   ImportHistoryEntry,
   ImportPreview,
@@ -94,10 +97,18 @@ export async function deleteLocalData() {
   return postJson<{ deleted: boolean }>("/data/delete");
 }
 
-export async function exportArtifact(format: "markdown" | "json" | "csv" | "mermaid" | "drawio") {
+export async function exportArtifact(format: ExportFormat) {
   if (format === "markdown") return getJson<{ markdown: string }>("/reports/markdown");
-  if (format === "json") return postJson<{ snapshot: unknown }>("/export/json");
-  if (format === "csv") return postJson<{ events: EventRecord[] }>("/export/csv");
+  if (format === "json") return postJson<{ json: string }>("/export/json");
+  if (format === "csv") return postJson<{ csv: string }>("/export/csv");
   if (format === "mermaid") return postJson<{ mermaid: string }>("/export/mermaid");
   return postJson<{ drawio: string }>("/export/drawio");
+}
+
+export async function previewExport(format: ExportFormat) {
+  return postJson<ExportPreview>("/export/preview", { format });
+}
+
+export async function saveExport(format: ExportFormat, path: string) {
+  return postJson<ExportSaveResult>("/export/save", { format, path });
 }

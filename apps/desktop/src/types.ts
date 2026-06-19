@@ -119,3 +119,22 @@ export type ImportHistoryEntry = {
   event_count: number;
   imported_at: string;
 };
+
+export type ExportFormat = "markdown" | "json" | "csv" | "mermaid" | "drawio";
+
+export type ExportPreview = {
+  format: ExportFormat;
+  filename: string;
+  byte_size: number;
+  preview: string;
+  confidential_count: number;
+  warning: string;
+};
+
+export type ExportSaveResult = {
+  saved: boolean;
+  format: ExportFormat;
+  path: string;
+  byte_size: number;
+  warning: string;
+};

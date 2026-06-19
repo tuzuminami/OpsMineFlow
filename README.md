@@ -95,7 +95,7 @@ Run the local API and desktop UI during development:
 4. Preview and import CSV, JSON, or explicitly enabled ActivityWatch localhost data from the WebUI.
 5. Review events, diagnostics, process maps, app switching, import history, and automation candidates.
 6. Adjust local privacy settings if needed.
-7. Export Mermaid, draw.io, Markdown, CSV, or JSON artifacts after confirming the export warning.
+7. Preview exports, choose a local save path, and export Mermaid, draw.io, Markdown, CSV, or JSON artifacts after confirming the export warning.
 
 ## Import CSV/JSON
 
@@ -114,7 +114,7 @@ JSON imports normalize generic arrays and ActivityWatch-style exports into the O
 
 ## Export Mermaid/SVG/draw.io
 
-Process maps can be exported as Mermaid and draw.io-compatible mxfile XML. SVG export is planned as a local rendering step with no external CDN.
+Process maps can be exported as Mermaid and draw.io-compatible mxfile XML. The WebUI can preview export content, download it, or save it to a local path. SVG export is planned as a local rendering step with no external CDN.
 
 ## Local Storage
 
