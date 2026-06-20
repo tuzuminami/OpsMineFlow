@@ -77,33 +77,70 @@ cd ~/OpsMineFlow && ./scripts/stop_local.sh
 
 You can also press `Control-C` in the terminal running OpsMineFlow. Re-running the start command safely reuses an existing healthy instance. `./scripts/...` commands work only from the OpsMineFlow repository directory. The bootstrap installs to `~/OpsMineFlow` by default; if you chose another location, use that actual directory instead.
 
-The browser opens automatically. Normal use after startup is completed in the WebUI.
+The browser opens automatically at `http://127.0.0.1:5173`. Normal use after startup is completed in the WebUI.
 
-## WebUI Workflow
+## Beginner Guide
 
-### 1. Import Logs
+### 1. Choose English or Japanese
 
-Open **Home > Import**, select CSV or JSON, enter the local file path, and choose **Preview**. Confirm the event count and masked sample, then choose **Import Previewed File**. ActivityWatch localhost import stays disabled unless the user explicitly enables it.
+Use the **日本語 / English** control in the top-right corner. The first launch follows the browser language. Your choice is stored only in the browser and is restored on the next launch.
 
-### 2. Analyze Work
+### 2. Understand the First Seven Events
 
-Use **Dashboard** for totals, **Event Explorer** for masked records, **Process Map** for transitions and bottlenecks, **App Switching** for handoff patterns, and **Automation** to sort candidates and save Adopt, Hold, or Reject review states.
+The seven events shown on the first launch are sample data. They demonstrate the dashboard and are not records from your Mac.
 
-### 3. Export Results
+- **Reload** reads the latest state from the local SQLite database. It does not initialize or delete data.
+- **Delete sample data** or **Settings > Delete Data** removes events, labels, reviews, and import history.
+- After deletion, the empty state remains empty after a reload or app restart.
+- Privacy settings remain after data deletion.
 
-Open **Home > Exports**, choose Markdown, JSON, CSV, Mermaid, or draw.io, then preview the content. Save it to a local path or download it only after reviewing the privacy warning.
+To restore the example later, import `data/sample/sample_events.csv` from the repository.
 
-### 4. Run Diagnostics
+### 3. Start Collecting Data
 
-Open **Home > Diagnostics** to inspect API, WebUI, storage, dependencies, ports, ActivityWatch, and local-only policy status. Choose **Run Checks** for the license and local-network guardrails.
+Choose **Home > Start collecting data**. This opens the supported collection choices:
 
-### 5. Delete Local Analysis Data
+1. **CSV or JSON file**: import an event log that you already exported or prepared.
+2. **ActivityWatch localhost**: import only after explicitly confirming the collection scope and participant consent.
+3. **Automatic Mac recording**: not included in the current product.
 
-Open **Settings**, review the local data controls, and choose **Delete Data**. Confirm the deletion prompt. Imported events, labels, review state, and import history are removed from the local database.
+OpsMineFlow does not start background monitoring when the WebUI opens. It does not capture keystrokes, screenshots, screen recordings, microphone audio, camera video, passwords, or typed text. The **Start collecting data** button guides you to supported imports; it is not a hidden recording switch.
 
-### 6. Stop
+### 4. Import a CSV or JSON File
 
-Return to the terminal running OpsMineFlow and press `Control-C`.
+1. Prepare a CSV or JSON event log.
+2. In Finder, select the file and press `Option-Command-C` to copy its full pathname.
+3. Open **Home > Data import**.
+4. Choose CSV or JSON and paste the pathname.
+5. Choose **Preview** and verify the event count, confidential flags, applications, and durations.
+6. Choose **Import Previewed File** only after the preview looks correct.
+
+CSV commonly uses `case_id`, `activity`, `timestamp_start`, `timestamp_end`, `user`, `app_name`, `url`, and `memo`. The import replaces the current analysis dataset and records the import in local history.
+
+### 5. Analyze the Work
+
+- **Dashboard**: totals, application time, business-label time, bottlenecks, and top automation candidates.
+- **Event Explorer**: masked event-level records.
+- **Process Map**: starts, ends, transitions, frequency, duration, and selected activity details.
+- **App Switching**: application transitions and round trips.
+- **Automation**: sort candidates and save Adopt, Hold, Reject, or Unreviewed states.
+- **Reports**: review the locally generated Markdown report.
+
+### 6. Export Results
+
+Open **Home > Exports**, choose Markdown, JSON, CSV, Mermaid, or draw.io, and preview it. Review masking and confidential flags before choosing **Save to Path** or **Download**.
+
+### 7. Check or Remove Local Data
+
+Use **Home > Diagnostics** for API, WebUI, SQLite storage, dependencies, ports, ActivityWatch, and local-only policy. Use **Settings > Delete Data** when the current analysis must be removed. This deletion cannot be undone unless the source file still exists and is imported again.
+
+### 8. Stop OpsMineFlow
+
+Press `Control-C` in the startup terminal, or run this from another terminal:
+
+```bash
+cd ~/OpsMineFlow && ./scripts/stop_local.sh
+```
 
 For the full operating flow, see [docs/operations/RUNBOOK.md](docs/operations/RUNBOOK.md). For problems, see [docs/operations/TROUBLESHOOTING.md](docs/operations/TROUBLESHOOTING.md).
 
@@ -133,7 +170,7 @@ Run the local API and desktop UI during development:
 ./scripts/dev.sh
 ```
 
-## Import CSV/JSON
+## CSV/JSON Reference
 
 CSV imports support columns such as:
 

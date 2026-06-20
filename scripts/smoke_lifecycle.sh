@@ -55,11 +55,18 @@ web_url = f"http://127.0.0.1:{sys.argv[2]}"
 last_error = ""
 for _ in range(80):
     try:
-        with urllib.request.urlopen(api_url, timeout=0.5) as response:
+        api_request = urllib.request.Request(api_url, headers={"Origin": web_url})
+        with urllib.request.urlopen(api_request, timeout=0.5) as response:
             health = json.loads(response.read().decode("utf-8"))
+            allowed_origin = response.headers.get("access-control-allow-origin")
         with urllib.request.urlopen(web_url, timeout=0.5) as response:
             html = response.read().decode("utf-8")
-        if health.get("status") == "ok" and health.get("local_only") is True and "<title>OpsMineFlow</title>" in html:
+        if (
+            health.get("status") == "ok"
+            and health.get("local_only") is True
+            and allowed_origin == web_url
+            and "<title>OpsMineFlow</title>" in html
+        ):
             raise SystemExit(0)
     except Exception as exc:
         last_error = str(exc)
