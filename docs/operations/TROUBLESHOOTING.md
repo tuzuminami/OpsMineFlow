@@ -7,10 +7,10 @@ When the WebUI opens, use **Home > Diagnostics** first. Confirm the API, WebUI, 
 When the WebUI does not open, rerun:
 
 ```bash
-./scripts/run_local.sh
+cd ~/OpsMineFlow && ./scripts/run_local.sh
 ```
 
-Read the first `ERROR:` line in the terminal. The startup script stops instead of silently choosing another port.
+If OpsMineFlow is already healthy, the command reuses it and opens the WebUI. If another program owns a required port, read the first `ERROR:` line in the terminal. The startup script does not silently kill another program or choose a different port.
 
 ## Dependencies Are Missing
 
@@ -43,9 +43,10 @@ If port 8765 is already in use:
 
 ```bash
 lsof -nP -iTCP:8765 -sTCP:LISTEN
+cd ~/OpsMineFlow && ./scripts/stop_local.sh
 ```
 
-Stop the old OpsMineFlow process, then rerun `./scripts/run_local.sh`. Do not bind the API to `0.0.0.0`.
+The stop script terminates the listener only when the health response identifies it as OpsMineFlow. Then rerun the start command. Do not bind the API to `0.0.0.0`.
 
 ## WebUI Does Not Open
 
@@ -59,9 +60,10 @@ Check for a port conflict:
 
 ```bash
 lsof -nP -iTCP:5173 -sTCP:LISTEN
+cd ~/OpsMineFlow && ./scripts/stop_local.sh
 ```
 
-Stop the stale process and rerun `./scripts/run_local.sh`.
+The stop script leaves an unrelated listener untouched and reports it as an error. Stop that application yourself, then rerun the start command.
 
 ## Import Preview Fails
 

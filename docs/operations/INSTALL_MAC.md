@@ -17,11 +17,10 @@ From a fresh Mac terminal, install once:
 
 The bootstrap clones to `~/OpsMineFlow` by default. The installer selects an available Python 3.11 or newer, creates `.venv`, installs the local Python packages and WebUI dependencies, and runs install checks.
 
-For an existing clone:
+For an existing clone at the default location:
 
 ```bash
-cd /path/to/OpsMineFlow
-./scripts/install_mac.sh
+cd ~/OpsMineFlow && ./scripts/install_mac.sh
 ```
 
 Start OpsMineFlow:
@@ -30,7 +29,13 @@ Start OpsMineFlow:
 cd ~/OpsMineFlow && ./scripts/run_local.sh
 ```
 
-The browser opens automatically. Keep this terminal window open while using OpsMineFlow. Press `Control-C` in the terminal to stop the local API and WebUI.
+Stop OpsMineFlow from another terminal:
+
+```bash
+cd ~/OpsMineFlow && ./scripts/stop_local.sh
+```
+
+The browser opens automatically. Keep the startup terminal window open while using OpsMineFlow. Press `Control-C` there or run the stop command above to stop the local API and WebUI. Re-running the start command reuses an existing healthy instance. If the checkout is not under `~/OpsMineFlow`, use its actual directory.
 
 Docker, a cloud account, an API key, and an LLM are not required.
 

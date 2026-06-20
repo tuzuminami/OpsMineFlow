@@ -57,11 +57,10 @@ From a fresh Mac terminal, install once:
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuzuminami/OpsMineFlow/main/scripts/bootstrap_mac.sh)"
 ```
 
-If the repository is already cloned, first move into its directory:
+If the repository is already cloned at the default location, reinstall with:
 
 ```bash
-cd /path/to/OpsMineFlow
-./scripts/install_mac.sh
+cd ~/OpsMineFlow && ./scripts/install_mac.sh
 ```
 
 Start each time:
@@ -70,7 +69,13 @@ Start each time:
 cd ~/OpsMineFlow && ./scripts/run_local.sh
 ```
 
-`./scripts/...` commands work only from the OpsMineFlow repository directory. The bootstrap installs to `~/OpsMineFlow` by default.
+Stop from another terminal:
+
+```bash
+cd ~/OpsMineFlow && ./scripts/stop_local.sh
+```
+
+You can also press `Control-C` in the terminal running OpsMineFlow. Re-running the start command safely reuses an existing healthy instance. `./scripts/...` commands work only from the OpsMineFlow repository directory. The bootstrap installs to `~/OpsMineFlow` by default; if you chose another location, use that actual directory instead.
 
 The browser opens automatically. Normal use after startup is completed in the WebUI.
 
