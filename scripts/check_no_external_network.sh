@@ -10,11 +10,20 @@ SCAN_PATHS=(apps services packages scripts)
 URL_PATTERN='https?://[^"'"'"'` <>)]+'
 FAILED=0
 
+is_scan_metadata() {
+  local file="$1"
+  [[ "$file" == apps/desktop/src-tauri/target/* \
+    || "$file" == apps/desktop/src-tauri/gen/* \
+    || "$file" == apps/desktop/src-tauri/icons/* \
+    || "$file" == *"Cargo.lock" \
+    || "$file" == *"package-lock.json" ]]
+}
+
 while IFS= read -r match; do
   file="${match%%:*}"
   rest="${match#*:}"
   value="${rest#*:}"
-  if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == "scripts/bootstrap_mac.sh" || "$file" == *"package-lock.json" ]]; then
+  if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == "scripts/bootstrap_mac.sh" ]] || is_scan_metadata "$file"; then
     continue
   fi
   if [[ "$value" =~ ^https?://(127\.0\.0\.1|localhost)([:/].*)?$ ]]; then
@@ -42,7 +51,7 @@ PROHIBITED_TERMS=(
 for term in "${PROHIBITED_TERMS[@]}"; do
   while IFS= read -r match; do
     file="${match%%:*}"
-    if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == "scripts/bootstrap_mac.sh" || "$file" == *"package-lock.json" ]]; then
+    if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == "scripts/bootstrap_mac.sh" ]] || is_scan_metadata "$file"; then
       continue
     fi
     echo "Prohibited integration term '$term' found in $match"

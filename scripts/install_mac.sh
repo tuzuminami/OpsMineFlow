@@ -33,6 +33,11 @@ need_command npm
 
 if command -v cargo >/dev/null 2>&1; then
   cargo --version
+  rust_version="$(rustc --version | awk '{print $2}')"
+  IFS='.' read -r rust_major rust_minor _ <<<"$rust_version"
+  if (( rust_major < 1 || (rust_major == 1 && rust_minor < 85) )); then
+    printf 'WARNING: Rust 1.85 or newer is required for Tauri packaging. Browser WebUI installation can continue.\n' >&2
+  fi
 else
   printf 'WARNING: Rust cargo was not found. Browser WebUI can run, but Tauri packaging requires Rust.\n' >&2
 fi
