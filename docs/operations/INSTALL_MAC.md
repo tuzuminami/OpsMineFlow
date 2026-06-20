@@ -28,3 +28,13 @@ Fresh-machine bootstrap:
 ```
 
 The app runs on localhost only. Docker is not required.
+
+## Package
+
+To create macOS `.app` and `.dmg` artifacts:
+
+```bash
+./scripts/package_macos.sh
+```
+
+See [PACKAGING_MACOS.md](PACKAGING_MACOS.md) for signing, notarization, checksum, and unsigned internal testing notes.

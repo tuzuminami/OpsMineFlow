@@ -23,8 +23,10 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["app", "dmg"],
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    }
   }
 }
-

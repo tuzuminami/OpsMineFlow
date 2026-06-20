@@ -69,6 +69,14 @@ Run:
 ./scripts/run_local.sh
 ```
 
+Build macOS app artifacts:
+
+```bash
+./scripts/package_macos.sh
+```
+
+Packaging details: [docs/operations/PACKAGING_MACOS.md](docs/operations/PACKAGING_MACOS.md)
+
 ## Development Setup
 
 Run all checks:
