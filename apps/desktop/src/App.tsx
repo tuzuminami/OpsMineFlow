@@ -12,6 +12,8 @@ import {
   saveExport,
   saveSettings
 } from "./api";
+import { useI18n } from "./i18n";
+import type { TranslationKey } from "./i18n";
 import type {
   AppSwitching,
   AppSettings,
@@ -58,18 +60,19 @@ type AppActions = {
   deleteData: () => Promise<void>;
 };
 
-const tabs: Array<{ id: Tab; label: string }> = [
-  { id: "home", label: "Home" },
-  { id: "dashboard", label: "Dashboard" },
-  { id: "events", label: "Event Explorer" },
-  { id: "process", label: "Process Map" },
-  { id: "switching", label: "App Switching" },
-  { id: "candidates", label: "Automation" },
-  { id: "reports", label: "Reports" },
-  { id: "settings", label: "Settings" }
+const tabs: Array<{ id: Tab; label: TranslationKey }> = [
+  { id: "home", label: "nav.home" },
+  { id: "dashboard", label: "nav.dashboard" },
+  { id: "events", label: "nav.events" },
+  { id: "process", label: "nav.process" },
+  { id: "switching", label: "nav.switching" },
+  { id: "candidates", label: "nav.candidates" },
+  { id: "reports", label: "nav.reports" },
+  { id: "settings", label: "nav.settings" }
 ];
 
 export function App() {
+  const { language, setLanguage, t } = useI18n();
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string>("");
@@ -83,7 +86,7 @@ export function App() {
     try {
       setData(await loadDashboardData());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Local API unavailable");
+      setError(err instanceof Error ? err.message : t("message.apiUnavailable", { error: "" }));
     } finally {
       setLoading(false);
     }
@@ -102,7 +105,7 @@ export function App() {
       setActionMessage(message);
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Action failed");
+      setError(err instanceof Error ? err.message : t("message.actionFailed"));
     } finally {
       setWorking(false);
     }
@@ -117,7 +120,7 @@ export function App() {
       try {
         return await previewImport(format, path);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Preview failed");
+        setError(err instanceof Error ? err.message : t("message.previewFailed"));
         throw err;
       } finally {
         setWorking(false);
@@ -126,12 +129,12 @@ export function App() {
     importEvents: (format, path) =>
       runAction(async () => {
         const result = await importEvents(format, path);
-        return `${result.imported_events} events imported from ${result.source || format}.`;
+        return t("message.imported", { count: result.imported_events, source: result.source || format });
       }),
     importActivityWatch: () =>
       runAction(async () => {
         const result = await importActivityWatchLocal(true);
-        return result.message || `${result.imported_events} ActivityWatch events imported.`;
+        return t("message.activityImported", { count: result.imported_events });
       }),
     previewExport: async (format) => {
       setWorking(true);
@@ -140,7 +143,7 @@ export function App() {
       try {
         return await previewExport(format);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Export preview failed");
+        setError(err instanceof Error ? err.message : t("message.exportPreviewFailed"));
         throw err;
       } finally {
         setWorking(false);
@@ -148,29 +151,29 @@ export function App() {
     },
     exportArtifact: (format) =>
       runAction(async () => {
-        if (!window.confirm("Review masked fields and confidential flags before sharing this export. Continue?")) {
-          return "Export cancelled.";
+        if (!window.confirm(t("message.exportReview"))) {
+          return t("message.exportCancelled");
         }
         const filename = downloadExport(format, await exportArtifact(format));
-        return `${filename} downloaded.`;
+        return t("message.downloaded", { filename });
       }),
     saveExport: (format, path) =>
       runAction(async () => {
-        if (!window.confirm("Review masked fields and confidential flags before sharing this export. Continue?")) {
-          return "Export cancelled.";
+        if (!window.confirm(t("message.exportReview"))) {
+          return t("message.exportCancelled");
         }
         const result = await saveExport(format, path);
-        return `Saved ${result.format} export to ${result.path}.`;
+        return t("message.savedExport", { format: result.format, path: result.path });
       }),
     saveSettings: (settings) =>
       runAction(async () => {
         await saveSettings(settings);
-        return "Settings saved.";
+        return t("message.settingsSaved");
       }),
     saveAutomationReview: (activity, status) =>
       runAction(async () => {
         const result = await saveAutomationReview(activity, status);
-        return `Review saved for ${result.activity}.`;
+        return t("message.reviewSaved", { activity: result.activity });
       }),
     runDiagnosticChecks: async () => {
       setWorking(true);
@@ -178,10 +181,10 @@ export function App() {
       setActionMessage("");
       try {
         const result = await runDiagnosticChecks();
-        setActionMessage("Diagnostics checks finished.");
+        setActionMessage(t("message.diagnosticsFinished"));
         return result;
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Diagnostics checks failed");
+        setError(err instanceof Error ? err.message : t("message.diagnosticsFailed"));
         throw err;
       } finally {
         setWorking(false);
@@ -190,8 +193,14 @@ export function App() {
     deleteData: () =>
       runAction(async () => {
         await deleteLocalData();
-        return "Local analysis data deleted.";
+        return t("message.dataDeleted");
       })
+  };
+
+  const demoMode = Boolean(data && data.events.length > 0 && data.importHistory.length === 0);
+  const openCollection = () => {
+    setActiveTab("home");
+    window.setTimeout(() => document.getElementById("collection-start")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   };
 
   return (
@@ -199,34 +208,59 @@ export function App() {
       <header className="topbar">
         <div>
           <h1>OpsMineFlow</h1>
-          <p>Local-first task mining for consent-based As-Is discovery</p>
+          <p>{t("app.tagline")}</p>
         </div>
         <div className="status-strip">
-          <StatusPill label="Network" value={data?.health.local_only ? "Local Only" : "Checking"} tone="good" />
-          <StatusPill label="LLM" value={data?.health.llm_supported ? "Enabled" : "Not Supported"} tone="neutral" />
-          <button className="refresh-button" onClick={() => void refresh()} disabled={loading}>
-            Refresh
+          <div className="language-switch" role="group" aria-label={t("language.label")}>
+            <button className={language === "ja" ? "is-active" : ""} onClick={() => setLanguage("ja")} aria-pressed={language === "ja"}>
+              日本語
+            </button>
+            <button className={language === "en" ? "is-active" : ""} onClick={() => setLanguage("en")} aria-pressed={language === "en"}>
+              English
+            </button>
+          </div>
+          <StatusPill label={t("status.network")} value={data?.health.local_only ? t("status.localOnly") : t("status.checking")} tone="good" />
+          <StatusPill label={t("status.llm")} value={data?.health.llm_supported ? t("status.enabled") : t("status.notSupported")} tone="neutral" />
+          <button className="refresh-button" title={t("action.refreshHelp")} onClick={() => void refresh()} disabled={loading}>
+            {t("action.refresh")}
           </button>
         </div>
       </header>
 
-      <nav className="tabs" aria-label="Views">
+      <nav className="tabs" aria-label={t("nav.views")}>
         {tabs.map((tab) => (
           <button
             key={tab.id}
             className={tab.id === activeTab ? "tab is-active" : "tab"}
             onClick={() => setActiveTab(tab.id)}
           >
-            {tab.label}
+            {t(tab.label)}
           </button>
         ))}
       </nav>
 
-      {error ? <div className="api-warning">Local API is not available: {error}</div> : null}
+      {demoMode ? (
+        <section className="data-state-banner sample-state" aria-live="polite">
+          <div>
+            <strong>{t("sample.title")}</strong>
+            <p>{t("sample.body")}</p>
+          </div>
+          <button
+            className="danger-button"
+            onClick={() => {
+              if (window.confirm(t("confirm.deleteData"))) void actions.deleteData();
+            }}
+            disabled={working}
+          >
+            {t("action.deleteSample")}
+          </button>
+        </section>
+      ) : null}
+      {error ? <div className="api-warning">{t("message.apiUnavailable", { error })}</div> : null}
       {actionMessage ? <div className="action-message">{actionMessage}</div> : null}
-      {loading && !data ? <div className="loading">Loading local analysis...</div> : null}
+      {loading && !data ? <div className="loading">{t("message.loading")}</div> : null}
 
-      {data ? <View tab={activeTab} data={data} actions={actions} working={working || loading} /> : null}
+      {data ? <View tab={activeTab} data={data} actions={actions} working={working || loading} onStart={openCollection} /> : null}
     </main>
   );
 }
@@ -235,14 +269,17 @@ function View({
   tab,
   data,
   actions,
-  working
+  working,
+  onStart
 }: {
   tab: Tab;
   data: DashboardData;
   actions: AppActions;
   working: boolean;
+  onStart: () => void;
 }) {
   if (tab === "home") return <HomeView data={data} actions={actions} working={working} />;
+  if (data.events.length === 0 && tab !== "settings") return <EmptyDataView onStart={onStart} />;
   if (tab === "events") return <EventsView events={data.events} />;
   if (tab === "process") return <ProcessView processMap={data.processMap} events={data.events} />;
   if (tab === "switching") return <SwitchingView switching={data.appSwitching} />;
@@ -295,9 +332,11 @@ function downloadExport(
 }
 
 function HomeView({ data, actions, working }: { data: DashboardData; actions: AppActions; working: boolean }) {
+  const { formatDateTime, t } = useI18n();
   const [format, setFormat] = useState<"csv" | "json">("csv");
-  const [path, setPath] = useState("data/sample/sample_events.csv");
+  const [path, setPath] = useState("");
   const [activityWatchEnabled, setActivityWatchEnabled] = useState(false);
+  const [collectionOpen, setCollectionOpen] = useState(data.events.length === 0);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(data.settings);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("markdown");
@@ -309,48 +348,91 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
     setSettingsDraft(data.settings);
   }, [data.settings]);
 
+  useEffect(() => {
+    if (data.events.length === 0) setCollectionOpen(true);
+  }, [data.events.length]);
+
   return (
     <section className="home-grid">
-      <section className="operation-panel primary-panel">
+      <section className="collection-intro" id="collection-start">
+        <div>
+          <h2>{t("collection.title")}</h2>
+          <p>{t("collection.body")}</p>
+        </div>
+        <button onClick={() => setCollectionOpen((current) => !current)} aria-expanded={collectionOpen}>
+          {collectionOpen ? t("action.cancel") : t("action.startCollecting")}
+        </button>
+        {collectionOpen ? (
+          <div className="collection-options">
+            <div>
+              <strong>{t("collection.fileTitle")}</strong>
+              <p>{t("collection.fileBody")}</p>
+              <button
+                onClick={() => {
+                  document.getElementById("import-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }}
+              >
+                {t("action.goToImport")}
+              </button>
+            </div>
+            <div>
+              <strong>{t("collection.activityTitle")}</strong>
+              <p>{t("collection.activityBody")}</p>
+            </div>
+            <div>
+              <strong>{t("collection.autoTitle")}</strong>
+              <p>{t("collection.autoBody")}</p>
+            </div>
+          </div>
+        ) : null}
+      </section>
+
+      <section className="operation-panel primary-panel" id="import-panel">
         <div className="panel-heading">
-          <h2>Import</h2>
-          <span>{data.events.length} events loaded</span>
+          <h2>{t("import.title")}</h2>
+          <span>{t("import.loaded", { count: data.events.length })}</span>
         </div>
         <div className="inline-fields">
           <select value={format} onChange={(event) => setFormat(event.target.value as "csv" | "json")} disabled={working}>
             <option value="csv">CSV</option>
             <option value="json">JSON</option>
           </select>
-          <input value={path} onChange={(event) => setPath(event.target.value)} disabled={working} />
+          <input
+            value={path}
+            onChange={(event) => setPath(event.target.value)}
+            disabled={working}
+            placeholder={t("import.path")}
+            aria-label={t("import.path")}
+          />
           <button
             onClick={() => {
               void actions.previewImport(format, path).then(setPreview);
             }}
             disabled={working || path.trim() === ""}
           >
-            Preview
+            {t("action.preview")}
           </button>
         </div>
         {preview ? (
           <div className="preview-panel">
             <div className="preview-summary">
-              <b>{preview.event_count} events</b>
-              <span>{preview.confidential_count} confidential flags</span>
+              <b>{t("import.events", { count: preview.event_count })}</b>
+              <span>{t("import.confidential", { count: preview.confidential_count })}</span>
             </div>
             <div className="preview-list">
               {preview.sample_events.map((event, index) => (
                 <div className="preview-row" key={`${event.case_id}-${event.activity}-${index}`}>
                   <span>{event.case_id}</span>
                   <b>{event.activity}</b>
-                  <span>{event.app_name || "Unknown"}</span>
-                  <span>{Math.round(event.duration_seconds)}s</span>
+                  <span>{event.app_name || t("import.unknown")}</span>
+                  <span>{t("unit.secondsShort", { count: Math.round(event.duration_seconds) })}</span>
                 </div>
               ))}
             </div>
           </div>
         ) : null}
         <button onClick={() => void actions.importEvents(format, path)} disabled={working || path.trim() === ""}>
-          Import Previewed File
+          {t("import.previewed")}
         </button>
         <label className="check-row">
           <input
@@ -359,18 +441,19 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
             onChange={(event) => setActivityWatchEnabled(event.target.checked)}
             disabled={working}
           />
-          <span>ActivityWatch localhost import</span>
+          <span>{t("import.activityConsent")}</span>
         </label>
         <button onClick={() => void actions.importActivityWatch()} disabled={working || !activityWatchEnabled}>
-          Import ActivityWatch
+          {t("import.activityButton")}
         </button>
         {data.importHistory.length > 0 ? (
           <div className="history-list">
+            <strong>{t("import.history")}</strong>
             {data.importHistory.slice(0, 4).map((item) => (
               <div className="history-row" key={`${item.imported_at}-${item.path}`}>
                 <span>{item.source}</span>
                 <b>{item.event_count}</b>
-                <span>{new Date(item.imported_at).toLocaleString()}</span>
+                <span>{formatDateTime(item.imported_at)}</span>
               </div>
             ))}
           </div>
@@ -379,8 +462,8 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
 
       <section className="operation-panel">
         <div className="panel-heading">
-          <h2>Exports</h2>
-          <span>{exportPreview ? `${exportPreview.byte_size} bytes` : "Local files only"}</span>
+          <h2>{t("export.title")}</h2>
+          <span>{exportPreview ? t("export.bytes", { count: exportPreview.byte_size }) : t("export.localOnly")}</span>
         </div>
         <div className="inline-fields">
           <select
@@ -406,32 +489,32 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
             }}
             disabled={working}
           >
-            Preview
+            {t("action.preview")}
           </button>
         </div>
         {exportPreview ? (
           <div className="export-preview-box">
             <div className="preview-summary">
               <b>{exportPreview.filename}</b>
-              <span>{exportPreview.confidential_count} confidential flags</span>
+              <span>{t("import.confidential", { count: exportPreview.confidential_count })}</span>
             </div>
             <pre>{exportPreview.preview}</pre>
           </div>
         ) : null}
         <div className="button-grid">
           <button onClick={() => void actions.saveExport(exportFormat, exportPath)} disabled={working || !exportPath.trim()}>
-            Save to Path
+            {t("action.savePath")}
           </button>
           <button onClick={() => void actions.exportArtifact(exportFormat)} disabled={working}>
-            Download
+            {t("action.download")}
           </button>
         </div>
       </section>
 
       <section className="operation-panel">
         <div className="panel-heading">
-          <h2>Settings</h2>
-          <span>{settingsDraft.retention_days} days</span>
+          <h2>{t("settings.title")}</h2>
+          <span>{t("settings.days", { count: settingsDraft.retention_days })}</span>
         </div>
         <label className="check-row">
           <input
@@ -439,7 +522,7 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
             checked={settingsDraft.mask_url_paths}
             onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_url_paths: event.target.checked })}
           />
-          <span>Mask URL paths</span>
+          <span>{t("settings.maskUrls")}</span>
         </label>
         <label className="check-row">
           <input
@@ -447,10 +530,10 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
             checked={settingsDraft.mask_window_titles}
             onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_window_titles: event.target.checked })}
           />
-          <span>Mask window titles</span>
+          <span>{t("settings.maskWindows")}</span>
         </label>
         <label className="number-row">
-          <span>Retention days</span>
+          <span>{t("settings.retention")}</span>
           <input
             type="number"
             min="1"
@@ -460,42 +543,42 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
           />
         </label>
         <label className="text-row">
-          <span>Excluded apps</span>
+          <span>{t("settings.excludedApps")}</span>
           <textarea
             value={listToText(settingsDraft.excluded_apps)}
             onChange={(event) => setSettingsDraft({ ...settingsDraft, excluded_apps: textToList(event.target.value) })}
           />
         </label>
         <label className="text-row">
-          <span>Excluded domains</span>
+          <span>{t("settings.excludedDomains")}</span>
           <textarea
             value={listToText(settingsDraft.excluded_domains)}
             onChange={(event) => setSettingsDraft({ ...settingsDraft, excluded_domains: textToList(event.target.value) })}
           />
         </label>
         <button onClick={() => void actions.saveSettings(settingsDraft)} disabled={working}>
-          Save Settings
+          {t("action.save")}
         </button>
       </section>
 
       <section className="operation-panel">
         <div className="panel-heading">
-          <h2>Diagnostics</h2>
-          <span>{data.diagnostics.webui.status}</span>
+          <h2>{t("diagnostics.title")}</h2>
+          <span>{localizeStatus(data.diagnostics.webui.status, t)}</span>
         </div>
         <div className="diagnostic-list">
-          <Setting label="API" value={`${data.diagnostics.api.status} ${data.diagnostics.api.bind}:${data.diagnostics.api.port}`} />
-          <Setting label="WebUI" value={`${data.diagnostics.webui.status} ${data.diagnostics.webui.expected_url}`} />
-          <Setting label="Storage" value={`${data.diagnostics.storage.storage_mode} ${data.diagnostics.storage.storage_path || ""}`} />
-          <Setting label="Events" value={data.diagnostics.storage.event_count.toString()} />
-          <Setting label="Reviews" value={data.diagnostics.storage.automation_review_count.toString()} />
-          <Setting label="ActivityWatch" value={`${data.diagnostics.activitywatch.enabled ? "enabled" : "disabled"} / ${data.diagnostics.activitywatch.status}`} />
-          <Setting label="External network" value={data.diagnostics.runtime_policy.external_network} />
+          <Setting label={t("diagnostics.api")} value={`${localizeStatus(data.diagnostics.api.status, t)} ${data.diagnostics.api.bind}:${data.diagnostics.api.port}`} />
+          <Setting label={t("diagnostics.webui")} value={`${localizeStatus(data.diagnostics.webui.status, t)} ${data.diagnostics.webui.expected_url}`} />
+          <Setting label={t("diagnostics.storage")} value={`${data.diagnostics.storage.storage_mode} ${data.diagnostics.storage.storage_path || ""}`} />
+          <Setting label={t("diagnostics.events")} value={data.diagnostics.storage.event_count.toString()} />
+          <Setting label={t("diagnostics.reviews")} value={data.diagnostics.storage.automation_review_count.toString()} />
+          <Setting label={t("diagnostics.activitywatch")} value={`${data.diagnostics.activitywatch.enabled ? t("status.enabled") : localizeStatus("disabled", t)} / ${localizeStatus(data.diagnostics.activitywatch.status, t)}`} />
+          <Setting label={t("diagnostics.external")} value={localizeStatus(data.diagnostics.runtime_policy.external_network, t)} />
           {Object.entries(data.diagnostics.dependencies).map(([name, item]) => (
-            <Setting key={name} label={name} value={`${item.status}${item.version ? ` / ${item.version}` : ""}`} />
+            <Setting key={name} label={name} value={`${localizeStatus(item.status, t)}${item.version ? ` / ${item.version}` : ""}`} />
           ))}
           {Object.entries(data.diagnostics.ports).map(([name, item]) => (
-            <Setting key={name} label={`${name} port`} value={`${item.host}:${item.port} / ${item.status}`} />
+            <Setting key={name} label={t("diagnostics.port", { name })} value={`${item.host}:${item.port} / ${localizeStatus(item.status, t)}`} />
           ))}
         </div>
         {diagnosticChecks ? (
@@ -503,7 +586,7 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
             {Object.entries(diagnosticChecks).map(([name, result]) => (
               <div className="check-result" key={name}>
                 <span>{result.command}</span>
-                <b>{result.status}</b>
+                <b>{localizeStatus(result.status, t)}</b>
                 <pre>{result.output}</pre>
               </div>
             ))}
@@ -516,19 +599,19 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
             }}
             disabled={working}
           >
-            Run Checks
+            {t("action.runChecks")}
           </button>
           <button onClick={() => void actions.refresh()} disabled={working}>
-            Refresh
+            {t("action.refresh")}
           </button>
           <button
             className="danger-button"
             onClick={() => {
-              if (window.confirm("Delete all local analysis data?")) void actions.deleteData();
+              if (window.confirm(t("confirm.deleteData"))) void actions.deleteData();
             }}
             disabled={working}
           >
-            Delete Data
+            {t("action.delete")}
           </button>
         </div>
       </section>
@@ -537,30 +620,31 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
 }
 
 function DashboardView({ data }: { data: DashboardData }) {
+  const { t } = useI18n();
   const totalMinutes = Math.round(data.summary.total_active_seconds / 60);
   return (
     <section className="view-grid">
-      <Metric label="Events" value={data.summary.total_events.toString()} />
-      <Metric label="Active minutes" value={totalMinutes.toString()} />
-      <Metric label="Avg event seconds" value={data.summary.average_event_duration_seconds.toFixed(0)} />
-      <Metric label="Automation candidates" value={data.candidates.length.toString()} />
-      <BarPanel title="App time" values={data.summary.app_usage_seconds} />
-      <BarPanel title="Business label time" values={data.summary.label_usage_seconds} />
+      <Metric label={t("dashboard.events")} value={data.summary.total_events.toString()} />
+      <Metric label={t("dashboard.activeMinutes")} value={totalMinutes.toString()} />
+      <Metric label={t("dashboard.avgSeconds")} value={data.summary.average_event_duration_seconds.toFixed(0)} />
+      <Metric label={t("dashboard.candidates")} value={data.candidates.length.toString()} />
+      <BarPanel title={t("dashboard.appTime")} values={data.summary.app_usage_seconds} />
+      <BarPanel title={t("dashboard.labelTime")} values={data.summary.label_usage_seconds} />
       <TopList
-        title="Top automation candidates"
+        title={t("dashboard.topCandidates")}
         rows={data.candidates.slice(0, 10).map((item) => ({
           key: item.activity,
-          value: `${Math.round(item.automation_score * 100)} / ${item.classification}`
+          value: `${Math.round(item.automation_score * 100)} / ${localizeClassification(item.classification, t)}`
         }))}
       />
       <TopList
-        title="Bottleneck signals"
+        title={t("dashboard.bottlenecks")}
         rows={data.processMap.nodes
           .filter((node) => node.bottleneck)
           .slice(0, 10)
           .map((node) => ({
             key: node.activity,
-            value: `${node.average_duration_seconds.toFixed(0)}s avg`
+            value: t("unit.secondsAverage", { count: node.average_duration_seconds.toFixed(0) })
           }))}
       />
     </section>
@@ -568,18 +652,19 @@ function DashboardView({ data }: { data: DashboardData }) {
 }
 
 function EventsView({ events }: { events: EventRecord[] }) {
+  const { t } = useI18n();
   return (
     <section className="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>Case</th>
-            <th>Activity</th>
-            <th>App</th>
-            <th>Window</th>
-            <th>Domain</th>
-            <th>Seconds</th>
-            <th>Masking</th>
+            <th>{t("table.case")}</th>
+            <th>{t("table.activity")}</th>
+            <th>{t("table.app")}</th>
+            <th>{t("table.window")}</th>
+            <th>{t("table.domain")}</th>
+            <th>{t("table.seconds")}</th>
+            <th>{t("table.masking")}</th>
           </tr>
         </thead>
         <tbody>
@@ -587,11 +672,11 @@ function EventsView({ events }: { events: EventRecord[] }) {
             <tr key={event.event_id}>
               <td>{event.case_id}</td>
               <td>{event.activity_raw}</td>
-              <td>{event.app_name || "Unknown"}</td>
+              <td>{event.app_name || t("import.unknown")}</td>
               <td>{event.window_title_masked || "-"}</td>
               <td>{event.domain || "-"}</td>
               <td>{event.duration_seconds.toFixed(0)}</td>
-              <td>{event.confidential_flag ? "Confidential" : "Masked"}</td>
+              <td>{event.confidential_flag ? t("table.confidential") : t("table.masked")}</td>
             </tr>
           ))}
         </tbody>
@@ -601,6 +686,7 @@ function EventsView({ events }: { events: EventRecord[] }) {
 }
 
 function ProcessView({ processMap, events }: { processMap: ProcessMap; events: EventRecord[] }) {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [appFilter, setAppFilter] = useState("all");
   const [selectedActivity, setSelectedActivity] = useState("");
@@ -608,13 +694,13 @@ function ProcessView({ processMap, events }: { processMap: ProcessMap; events: E
     const mapping = new Map<string, Set<string>>();
     for (const event of events) {
       if (!mapping.has(event.activity_raw)) mapping.set(event.activity_raw, new Set<string>());
-      mapping.get(event.activity_raw)?.add(event.app_name || "Unknown");
+      mapping.get(event.activity_raw)?.add(event.app_name || t("import.unknown"));
     }
     return mapping;
-  }, [events]);
+  }, [events, t]);
   const appOptions = useMemo(() => {
-    return Array.from(new Set(events.map((event) => event.app_name || "Unknown"))).sort();
-  }, [events]);
+    return Array.from(new Set(events.map((event) => event.app_name || t("import.unknown")))).sort();
+  }, [events, t]);
   const visibleNodes = processMap.nodes.filter((node) => {
     const matchesQuery = query.trim() === "" || node.activity.toLowerCase().includes(query.trim().toLowerCase());
     const apps = activityApps.get(node.activity) || new Set<string>();
@@ -630,9 +716,9 @@ function ProcessView({ processMap, events }: { processMap: ProcessMap; events: E
   return (
     <section className="process-workspace">
       <div className="process-toolbar">
-        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter activity" />
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("process.filter")} />
         <select value={appFilter} onChange={(event) => setAppFilter(event.target.value)}>
-          <option value="all">All apps</option>
+          <option value="all">{t("process.allApps")}</option>
           {appOptions.map((appName) => (
             <option key={appName} value={appName}>
               {appName}
@@ -653,28 +739,26 @@ function ProcessView({ processMap, events }: { processMap: ProcessMap; events: E
             onClick={() => setSelectedActivity(node.activity)}
           >
             <strong>{node.activity}</strong>
-            <span>freq {node.frequency}</span>
-            <span>avg {node.average_duration_seconds.toFixed(0)}s</span>
-            <span>
-              start {processMap.start_activities[node.activity] || 0} / end {processMap.end_activities[node.activity] || 0}
-            </span>
+            <span>{t("process.frequency")} {node.frequency}</span>
+            <span>{t("process.avgSeconds")} {t("unit.secondsShort", { count: node.average_duration_seconds.toFixed(0) })}</span>
+            <span>{t("process.startEnd", { start: processMap.start_activities[node.activity] || 0, end: processMap.end_activities[node.activity] || 0 })}</span>
           </button>
         ))}
-        {visibleNodes.length === 0 ? <p className="empty">No process nodes match the filters</p> : null}
+        {visibleNodes.length === 0 ? <p className="empty">{t("process.noNodes")}</p> : null}
       </section>
       <section className="process-detail">
         <div>
-          <h2>{selectedNode?.activity || "No activity selected"}</h2>
-          <p>{selectedApps.join(", ") || "No app data"}</p>
+          <h2>{selectedNode?.activity || t("process.noActivity")}</h2>
+          <p>{selectedApps.join(", ") || t("process.noApp")}</p>
         </div>
         {selectedNode ? (
           <div className="process-detail-grid">
-            <DetailStat label="Frequency" value={selectedNode.frequency.toString()} />
-            <DetailStat label="Avg seconds" value={selectedNode.average_duration_seconds.toFixed(0)} />
-            <DetailStat label="Start count" value={(processMap.start_activities[selectedNode.activity] || 0).toString()} />
-            <DetailStat label="End count" value={(processMap.end_activities[selectedNode.activity] || 0).toString()} />
-            <DetailStat label="Events" value={selectedEvents.length.toString()} />
-            <DetailStat label="Signals" value={[selectedNode.bottleneck ? "Bottleneck" : "", selectedNode.automation_candidate ? "Automation" : ""].filter(Boolean).join(", ") || "None"} />
+            <DetailStat label={t("process.frequency")} value={selectedNode.frequency.toString()} />
+            <DetailStat label={t("process.avgSeconds")} value={selectedNode.average_duration_seconds.toFixed(0)} />
+            <DetailStat label={t("process.startCount")} value={(processMap.start_activities[selectedNode.activity] || 0).toString()} />
+            <DetailStat label={t("process.endCount")} value={(processMap.end_activities[selectedNode.activity] || 0).toString()} />
+            <DetailStat label={t("process.events")} value={selectedEvents.length.toString()} />
+            <DetailStat label={t("process.signals")} value={[selectedNode.bottleneck ? t("process.bottleneck") : "", selectedNode.automation_candidate ? t("process.automation") : ""].filter(Boolean).join(", ") || t("process.none")} />
           </div>
         ) : null}
       </section>
@@ -685,30 +769,31 @@ function ProcessView({ processMap, events }: { processMap: ProcessMap; events: E
             className={["edge-row", selectedNode && (edge.source === selectedNode.activity || edge.target === selectedNode.activity) ? "is-linked" : ""].join(" ")}
           >
             <span>{edge.source}</span>
-            <span>to</span>
+            <span>{t("process.to")}</span>
             <span>{edge.target}</span>
-            <b>{edge.frequency}x</b>
-            <span>{edge.average_transition_seconds.toFixed(0)}s avg</span>
+            <b>{t("unit.times", { count: edge.frequency })}</b>
+            <span>{t("unit.secondsAverage", { count: edge.average_transition_seconds.toFixed(0) })}</span>
           </div>
         ))}
-        {visibleEdges.length === 0 ? <p className="empty">No transitions match the filters</p> : null}
+        {visibleEdges.length === 0 ? <p className="empty">{t("process.noTransitions")}</p> : null}
       </section>
     </section>
   );
 }
 
 function SwitchingView({ switching }: { switching: AppSwitching }) {
+  const { t } = useI18n();
   return (
     <section className="split-view">
       <TopList
-        title="App transition ranking"
+        title={t("switching.ranking")}
         rows={switching.transition_ranking.map((item) => ({
-          key: `${item.source_app} to ${item.target_app}`,
+          key: `${item.source_app} ${t("process.to")} ${item.target_app}`,
           value: `${item.count}`
         }))}
       />
       <TopList
-        title="Round trips"
+        title={t("switching.roundTrips")}
         rows={switching.round_trips.map((item) => ({
           key: item.pattern,
           value: `${item.count}`
@@ -720,14 +805,15 @@ function SwitchingView({ switching }: { switching: AppSwitching }) {
 
 type CandidateSortKey = "score" | "frequency" | "classification" | "reason" | "status";
 
-const reviewOptions: Array<{ label: string; value: AutomationReviewStatus }> = [
-  { label: "Unreviewed", value: "unreviewed" },
-  { label: "Adopt", value: "adopted" },
-  { label: "Hold", value: "on_hold" },
-  { label: "Reject", value: "rejected" }
+const reviewOptions: Array<{ label: TranslationKey; value: AutomationReviewStatus }> = [
+  { label: "candidate.unreviewed", value: "unreviewed" },
+  { label: "candidate.adopt", value: "adopted" },
+  { label: "candidate.hold", value: "on_hold" },
+  { label: "candidate.reject", value: "rejected" }
 ];
 
 function CandidatesView({ candidates, actions, working }: { candidates: AutomationCandidate[]; actions: AppActions; working: boolean }) {
+  const { t } = useI18n();
   const [sortKey, setSortKey] = useState<CandidateSortKey>("score");
   const sortedCandidates = useMemo(() => {
     const valueFor = (candidate: AutomationCandidate) => {
@@ -749,11 +835,11 @@ function CandidatesView({ candidates, actions, working }: { candidates: Automati
     <section className="candidate-workspace">
       <div className="candidate-toolbar">
         <select value={sortKey} onChange={(event) => setSortKey(event.target.value as CandidateSortKey)}>
-          <option value="score">Score</option>
-          <option value="frequency">Frequency</option>
-          <option value="classification">Classification</option>
-          <option value="reason">Reason</option>
-          <option value="status">Review status</option>
+          <option value="score">{t("candidate.sortScore")}</option>
+          <option value="frequency">{t("candidate.sortFrequency")}</option>
+          <option value="classification">{t("candidate.sortClassification")}</option>
+          <option value="reason">{t("candidate.sortReason")}</option>
+          <option value="status">{t("candidate.sortStatus")}</option>
         </select>
       </div>
       <section className="candidate-list">
@@ -763,13 +849,13 @@ function CandidatesView({ candidates, actions, working }: { candidates: Automati
             <article className="candidate-card" key={candidate.activity}>
               <div>
                 <h2>{candidate.activity}</h2>
-                <p>{candidate.reasons.join(", ")}</p>
+                <p>{candidate.reasons.map((reason) => localizeReason(reason, t)).join(", ")}</p>
               </div>
               <div className="candidate-metrics">
                 <b>{Math.round(candidate.automation_score * 100)}</b>
                 <span>{candidate.frequency}x</span>
               </div>
-              <span>{candidate.classification}</span>
+              <span>{localizeClassification(candidate.classification, t)}</span>
               <div className="review-controls">
                 {reviewOptions.map((option) => (
                   <button
@@ -778,7 +864,7 @@ function CandidatesView({ candidates, actions, working }: { candidates: Automati
                     onClick={() => void actions.saveAutomationReview(candidate.activity, option.value)}
                     disabled={working || option.value === status}
                   >
-                    {option.label}
+                    {t(option.label)}
                   </button>
                 ))}
               </div>
@@ -795,6 +881,7 @@ function ReportsView({ markdown }: { markdown: string }) {
 }
 
 function SettingsView({ data, actions, working }: { data: DashboardData; actions: AppActions; working: boolean }) {
+  const { t } = useI18n();
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(data.settings);
 
   useEffect(() => {
@@ -805,8 +892,8 @@ function SettingsView({ data, actions, working }: { data: DashboardData; actions
     <section className="settings-workspace">
       <section className="operation-panel">
         <div className="panel-heading">
-          <h2>Privacy Controls</h2>
-          <span>{settingsDraft.retention_days} days</span>
+          <h2>{t("settings.privacy")}</h2>
+          <span>{t("settings.days", { count: settingsDraft.retention_days })}</span>
         </div>
         <label className="check-row">
           <input
@@ -814,7 +901,7 @@ function SettingsView({ data, actions, working }: { data: DashboardData; actions
             checked={settingsDraft.mask_url_paths}
             onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_url_paths: event.target.checked })}
           />
-          <span>Mask URL paths</span>
+          <span>{t("settings.maskUrls")}</span>
         </label>
         <label className="check-row">
           <input
@@ -822,10 +909,10 @@ function SettingsView({ data, actions, working }: { data: DashboardData; actions
             checked={settingsDraft.mask_window_titles}
             onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_window_titles: event.target.checked })}
           />
-          <span>Mask window titles</span>
+          <span>{t("settings.maskWindows")}</span>
         </label>
         <label className="number-row">
-          <span>Retention days</span>
+          <span>{t("settings.retention")}</span>
           <input
             type="number"
             min="1"
@@ -835,14 +922,14 @@ function SettingsView({ data, actions, working }: { data: DashboardData; actions
           />
         </label>
         <label className="text-row">
-          <span>Excluded apps</span>
+          <span>{t("settings.excludedApps")}</span>
           <textarea
             value={listToText(settingsDraft.excluded_apps)}
             onChange={(event) => setSettingsDraft({ ...settingsDraft, excluded_apps: textToList(event.target.value) })}
           />
         </label>
         <label className="text-row">
-          <span>Excluded domains</span>
+          <span>{t("settings.excludedDomains")}</span>
           <textarea
             value={listToText(settingsDraft.excluded_domains)}
             onChange={(event) => setSettingsDraft({ ...settingsDraft, excluded_domains: textToList(event.target.value) })}
@@ -850,27 +937,27 @@ function SettingsView({ data, actions, working }: { data: DashboardData; actions
         </label>
         <div className="danger-row">
           <button onClick={() => void actions.saveSettings(settingsDraft)} disabled={working}>
-            Save Settings
+            {t("action.save")}
           </button>
           <button
             className="danger-button"
             onClick={() => {
-              if (window.confirm("Delete all local analysis data?")) void actions.deleteData();
+              if (window.confirm(t("confirm.deleteData"))) void actions.deleteData();
             }}
             disabled={working}
           >
-            Delete Data
+            {t("action.delete")}
           </button>
         </div>
       </section>
       <section className="settings-grid">
-        <Setting label="API bind" value={data.health.bind} />
-        <Setting label="External network" value={data.health.local_only ? "Blocked by policy" : "Unknown"} />
-        <Setting label="LLM integration" value={data.health.llm_supported ? "Enabled" : "Not supported"} />
-        <Setting label="Data storage" value={data.health.storage_mode} />
-        <Setting label="Events loaded" value={data.health.event_count.toString()} />
-        <Setting label="ActivityWatch" value="Optional localhost import only" />
-        <Setting label="Sensitive capture" value="No keystrokes, screenshots, audio, or camera" />
+        <Setting label={t("settings.apiBind")} value={data.health.bind} />
+        <Setting label={t("diagnostics.external")} value={data.health.local_only ? t("status.blocked") : t("status.unknown")} />
+        <Setting label={t("settings.llmIntegration")} value={data.health.llm_supported ? t("status.enabled") : t("status.notSupported")} />
+        <Setting label={t("settings.dataStorage")} value={data.health.storage_mode} />
+        <Setting label={t("settings.eventsLoaded")} value={data.health.event_count.toString()} />
+        <Setting label={t("diagnostics.activitywatch")} value={t("status.optionalLocalImport")} />
+        <Setting label={t("settings.sensitiveCapture")} value={t("status.noSensitiveCapture")} />
       </section>
     </section>
   );
@@ -926,6 +1013,7 @@ function StatusPill({ label, value, tone }: { label: string; value: string; tone
 }
 
 function BarPanel({ title, values }: { title: string; values: Record<string, number> }) {
+  const { t } = useI18n();
   const max = useMemo(() => Math.max(...Object.values(values), 1), [values]);
   return (
     <section className="panel">
@@ -937,7 +1025,7 @@ function BarPanel({ title, values }: { title: string; values: Record<string, num
             <div className="bar-track">
               <div className="bar-fill" style={{ width: `${Math.max((value / max) * 100, 4)}%` }} />
             </div>
-            <b>{Math.round(value / 60)}m</b>
+            <b>{t("unit.minutesShort", { count: Math.round(value / 60) })}</b>
           </div>
         ))}
       </div>
@@ -946,11 +1034,12 @@ function BarPanel({ title, values }: { title: string; values: Record<string, num
 }
 
 function TopList({ title, rows }: { title: string; rows: Array<{ key: string; value: string }> }) {
+  const { t } = useI18n();
   return (
     <section className="panel">
       <h2>{title}</h2>
       <div className="rank-list">
-        {rows.length === 0 ? <p className="empty">No items yet</p> : null}
+        {rows.length === 0 ? <p className="empty">{t("common.noItems")}</p> : null}
         {rows.map((row) => (
           <div className="rank-row" key={row.key}>
             <span>{row.key}</span>
@@ -969,4 +1058,68 @@ function Setting({ label, value }: { label: string; value: string }) {
       <b>{value}</b>
     </div>
   );
+}
+
+function EmptyDataView({ onStart }: { onStart: () => void }) {
+  const { t } = useI18n();
+  return (
+    <section className="empty-workspace">
+      <h2>{t("empty.title")}</h2>
+      <p>{t("empty.body")}</p>
+      <button onClick={onStart}>{t("action.startCollecting")}</button>
+    </section>
+  );
+}
+
+type Translate = (key: TranslationKey, params?: Record<string, string | number>) => string;
+
+function localizeClassification(classification: string, t: Translate): string {
+  const key = `candidate.class.${classification}` as TranslationKey;
+  return key in classificationKeys ? t(key) : classification;
+}
+
+const classificationKeys: Partial<Record<TranslationKey, true>> = {
+  "candidate.class.rpa": true,
+  "candidate.class.operations_rule_change": true,
+  "candidate.class.system_change": true,
+  "candidate.class.improvement_review": true
+};
+
+function localizeReason(reason: string, t: Translate): string {
+  const key = `candidate.reason.${reason}` as TranslationKey;
+  return key in reasonKeys ? t(key) : reason;
+}
+
+const reasonKeys: Partial<Record<TranslationKey, true>> = {
+  "candidate.reason.repeated activity": true,
+  "candidate.reason.rule-based wording": true,
+  "candidate.reason.manual transfer risk": true,
+  "candidate.reason.system handover": true,
+  "candidate.reason.low-volume hypothesis": true
+};
+
+function localizeStatus(status: string, t: Translate): string {
+  const normalized = status.trim().toLowerCase().replaceAll(" ", "_");
+  const statusKeys: Record<string, TranslationKey> = {
+    ok: "status.ready",
+    ready: "status.ready",
+    passed: "status.passed",
+    available: "status.available",
+    free: "status.available",
+    enabled: "status.enabled",
+    disabled: "status.disabled",
+    unavailable: "status.unavailable",
+    blocked: "status.blocked",
+    blocked_by_policy: "status.blocked",
+    not_checked: "status.notChecked",
+    reachable: "status.reachable",
+    installed: "status.installed",
+    detected: "status.detected",
+    bound_by_current_api: "status.bound",
+    open: "status.open",
+    not_detected: "status.notDetected",
+    not_open: "status.notOpen",
+    not_reachable: "status.notReachable"
+  };
+  return statusKeys[normalized] ? t(statusKeys[normalized]) : status;
 }

@@ -3,8 +3,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from opsmineflow_api.app import (
+    allowed_webui_origins,
     create_api_snapshot,
     create_diagnostics,
     create_export_artifact,
@@ -18,6 +20,14 @@ from opsmineflow_mining import load_events_from_csv
 
 
 class ApiLogicTests(unittest.TestCase):
+    def test_cors_origins_follow_configured_local_webui_port(self) -> None:
+        with patch.dict("os.environ", {"OPSMINEFLOW_WEBUI_PORT": "5273"}):
+            origins = allowed_webui_origins()
+
+        self.assertEqual(origins[0], "http://127.0.0.1:5273")
+        self.assertEqual(origins[1], "http://localhost:5273")
+        self.assertEqual(origins[2], "tauri://localhost")
+
     def test_snapshot_contains_local_only_health_and_exports(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
         snapshot = create_api_snapshot(EventStore(events=events))

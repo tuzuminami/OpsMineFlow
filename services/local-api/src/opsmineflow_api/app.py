@@ -82,6 +82,15 @@ class ExportSaveRequest(BaseModel):  # type: ignore[misc, valid-type]
     path: str
 
 
+def allowed_webui_origins() -> list[str]:
+    webui_port = int(os.environ.get("OPSMINEFLOW_WEBUI_PORT", "5173"))
+    return [
+        f"http://127.0.0.1:{webui_port}",
+        f"http://localhost:{webui_port}",
+        "tauri://localhost",
+    ]
+
+
 def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
     events = active_store.events
@@ -275,7 +284,7 @@ def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
             "status": "ok",
             "bind": "127.0.0.1",
             "port": api_port,
-            "cors": ["http://127.0.0.1:5173", "http://localhost:5173", "tauri://localhost"],
+            "cors": allowed_webui_origins(),
         },
         "webui": {
             "status": "reachable" if _tcp_open("127.0.0.1", webui_port) else "not_detected",
@@ -411,7 +420,7 @@ if FastAPI is not None:
     app = FastAPI(title="OpsMineFlow Local API", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", "tauri://localhost"],
+        allow_origins=allowed_webui_origins(),
         allow_credentials=False,
         allow_methods=["GET", "POST"],
         allow_headers=["content-type"],

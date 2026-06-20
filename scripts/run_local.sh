@@ -20,6 +20,7 @@ fi
 export PYTHONPATH="$ROOT_DIR/services/mining-core/src:$ROOT_DIR/services/local-api/src:$ROOT_DIR/packages/drawio-exporter/src:${PYTHONPATH:-}"
 export OPSMINEFLOW_API_HOST="$API_HOST"
 export OPSMINEFLOW_API_PORT="$API_PORT"
+export OPSMINEFLOW_WEBUI_PORT="$WEB_PORT"
 export VITE_API_BASE="${LOCAL_HTTP_SCHEME}://${API_HOST}:${API_PORT}"
 
 info() {

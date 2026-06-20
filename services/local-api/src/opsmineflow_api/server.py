@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from .activitywatch import import_activitywatch_local
 from .app import (
+    allowed_webui_origins,
     create_api_snapshot,
     create_diagnostics,
     create_export_artifact,
@@ -143,7 +144,9 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         return json.loads(body)
 
     def _send_cors_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5173")
+        origin = self.headers.get("Origin", "")
+        if origin in allowed_webui_origins():
+            self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "content-type")
 
