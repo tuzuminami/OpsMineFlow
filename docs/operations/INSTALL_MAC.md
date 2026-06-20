@@ -9,31 +9,30 @@ Requirements:
 - Node.js 20 or newer
 - npm
 
-From a cloned repository, install once:
+From a fresh Mac terminal, install once:
 
 ```bash
-./scripts/install_mac.sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuzuminami/OpsMineFlow/main/scripts/bootstrap_mac.sh)"
 ```
 
-The installer creates `.venv`, installs the local Python packages and WebUI dependencies, and runs install checks.
+The bootstrap clones to `~/OpsMineFlow` by default. The installer selects an available Python 3.11 or newer, creates `.venv`, installs the local Python packages and WebUI dependencies, and runs install checks.
+
+For an existing clone:
+
+```bash
+cd /path/to/OpsMineFlow
+./scripts/install_mac.sh
+```
 
 Start OpsMineFlow:
 
 ```bash
-./scripts/run_local.sh
+cd ~/OpsMineFlow && ./scripts/run_local.sh
 ```
 
 The browser opens automatically. Keep this terminal window open while using OpsMineFlow. Press `Control-C` in the terminal to stop the local API and WebUI.
 
 Docker, a cloud account, an API key, and an LLM are not required.
-
-## Fresh Mac Bootstrap
-
-The bootstrap command clones the repository and runs the installer:
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuzuminami/OpsMineFlow/main/scripts/bootstrap_mac.sh)"
-```
 
 Review the downloaded bootstrap script before using it in a client-managed environment.
 

@@ -27,3 +27,6 @@ fi
 
 cd "$INSTALL_DIR"
 ./scripts/install_mac.sh
+
+printf '\nOpsMineFlow is installed at:\n  %s\n' "$INSTALL_DIR"
+printf 'Start it with:\n  cd "%s" && ./scripts/run_local.sh\n' "$INSTALL_DIR"
