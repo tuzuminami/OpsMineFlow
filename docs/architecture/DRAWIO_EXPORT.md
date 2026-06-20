@@ -23,5 +23,4 @@ Edges include transition frequency and average transition duration.
 
 ## Layout
 
-The MVP uses deterministic horizontal placement with Start and End nodes. Future versions may add swimlanes by department, app, or anonymized user.
-
+The current exporter uses deterministic horizontal placement with Start and End nodes. Future versions may add swimlanes by department, app, or anonymized user.
