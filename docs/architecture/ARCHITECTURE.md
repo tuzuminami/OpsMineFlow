@@ -28,3 +28,8 @@ flowchart LR
 
 All runtime data remains local. No component should require remote services after dependencies are installed.
 
+## Planned Collector Boundary
+
+Native and browser collectors are not part of the default product runtime. The first native preview is Swift-only, and the browser extension is a separate opt-in install with optional domain permissions. Both must use a validated Tauri or localhost API boundary and must not write directly to SQLite.
+
+See [../product/COLLECTION_ROADMAP.md](../product/COLLECTION_ROADMAP.md).

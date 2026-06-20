@@ -40,7 +40,7 @@ The project is licensed under Apache-2.0. Direct dependencies must be commercial
 
 ## Local Product Scope
 
-OpsMineFlow now targets a product-ready local workflow: one-command installation, one-command local startup, browser-based control, persistent local storage, diagnostics, import, analysis, and export. Native macOS logging, browser extension logging, and advanced swimlanes remain roadmap items.
+OpsMineFlow now targets a product-ready local workflow: one-command installation, one-command local startup, browser-based control, persistent local storage, diagnostics, import, analysis, and export. Native macOS logging and browser extension logging remain default-off roadmap items documented in [docs/product/COLLECTION_ROADMAP.md](docs/product/COLLECTION_ROADMAP.md).
 
 ## Quick Start
 
