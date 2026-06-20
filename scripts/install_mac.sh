@@ -98,3 +98,4 @@ npm --prefix apps/desktop run lint
 
 info "Install complete"
 printf '\nStart OpsMineFlow with:\n  cd "%s" && ./scripts/run_local.sh\n' "$ROOT_DIR"
+printf 'Stop OpsMineFlow with:\n  cd "%s" && ./scripts/stop_local.sh\n' "$ROOT_DIR"

@@ -58,3 +58,4 @@ if [[ -f packages/drawio-exporter/package.json && -d packages/drawio-exporter/no
 fi
 
 ./scripts/smoke_local.sh
+./scripts/smoke_lifecycle.sh

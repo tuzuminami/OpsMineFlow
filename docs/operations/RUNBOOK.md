@@ -18,7 +18,19 @@ cd ~/OpsMineFlow && ./scripts/run_local.sh
 
 The command starts the API and WebUI on localhost and opens the browser. Keep the terminal open. Press `Control-C` to stop both services.
 
-### 3. Import Logs
+If OpsMineFlow is already healthy, running the same command opens it without treating its ports as an error.
+
+### 3. Stop
+
+From another terminal:
+
+```bash
+cd ~/OpsMineFlow && ./scripts/stop_local.sh
+```
+
+The stop script verifies that the listeners belong to OpsMineFlow before terminating them. It leaves unrelated programs untouched.
+
+### 4. Import Logs
 
 1. Open **Home > Import**.
 2. Choose CSV or JSON.
@@ -29,7 +41,7 @@ The command starts the API and WebUI on localhost and opens the browser. Keep th
 
 ActivityWatch import is optional. Enable it only when the participant-approved scope includes ActivityWatch localhost data. If it is unavailable, use a CSV or JSON export instead.
 
-### 4. Analyze
+### 5. Analyze
 
 - **Dashboard**: totals, durations, and top signals
 - **Event Explorer**: masked event-level records
@@ -40,7 +52,7 @@ ActivityWatch import is optional. Enable it only when the participant-approved s
 
 Automation review states are stored in the local SQLite database and included in Markdown and JSON exports.
 
-### 5. Export
+### 6. Export
 
 1. Open **Home > Exports**.
 2. Choose Markdown, JSON, CSV, Mermaid, or draw.io.
@@ -51,7 +63,7 @@ Automation review states are stored in the local SQLite database and included in
 
 Treat export preview as the final manual checkpoint before sharing output with a client.
 
-### 6. Delete Local Analysis Data
+### 7. Delete Local Analysis Data
 
 1. Open **Settings**.
 2. Choose **Delete Data**.
