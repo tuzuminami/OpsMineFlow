@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 VENV_DIR="${OPSMINEFLOW_VENV_DIR:-.venv}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 
 info() {
   printf '==> %s\n' "$1"
@@ -22,12 +22,32 @@ need_command() {
   fi
 }
 
+python_is_supported() {
+  "$1" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+}
+
 info "Checking macOS local app prerequisites"
 if [[ "$(uname -s)" != "Darwin" ]]; then
   printf 'WARNING: OpsMineFlow is currently targeted at macOS. Continuing for development use.\n' >&2
 fi
 
-need_command "$PYTHON_BIN"
+if [[ -n "$PYTHON_BIN" ]]; then
+  need_command "$PYTHON_BIN"
+  python_is_supported "$PYTHON_BIN" || fail "$PYTHON_BIN must be Python 3.11 or newer."
+else
+  for candidate in python3.11 python3.12 python3.13 python3.14 python3; do
+    if command -v "$candidate" >/dev/null 2>&1 && python_is_supported "$candidate"; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+  done
+  [[ -n "$PYTHON_BIN" ]] || fail "Python 3.11 or newer was not found. Install it, then rerun this command."
+fi
+
+info "Using $($PYTHON_BIN --version 2>&1) from $(command -v "$PYTHON_BIN")"
 need_command node
 need_command npm
 
@@ -49,13 +69,6 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     printf 'WARNING: Xcode Command Line Tools were not found. Tauri packaging may fail until they are installed.\n' >&2
   fi
 fi
-
-"$PYTHON_BIN" - <<'PY'
-import sys
-
-if sys.version_info < (3, 11):
-    raise SystemExit("Python 3.11 or newer is required.")
-PY
 
 node -e 'const [major] = process.versions.node.split(".").map(Number); if (major < 20) { console.error("Node.js 20 or newer is required."); process.exit(1); }'
 
@@ -84,4 +97,4 @@ PY
 npm --prefix apps/desktop run lint
 
 info "Install complete"
-printf '\nStart OpsMineFlow with:\n  ./scripts/run_local.sh\n'
+printf '\nStart OpsMineFlow with:\n  cd "%s" && ./scripts/run_local.sh\n' "$ROOT_DIR"

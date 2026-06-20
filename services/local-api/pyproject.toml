@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "opsmineflow-local-api"
 version = "0.1.0"
 description = "Localhost-only API for OpsMineFlow"
-readme = "../../README.md"
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 dependencies = [
@@ -22,4 +22,3 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

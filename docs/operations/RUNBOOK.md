@@ -2,6 +2,8 @@
 
 ## User Workflow
 
+Commands beginning with `./scripts/` must be run from the OpsMineFlow repository directory. The default bootstrap location is `~/OpsMineFlow`.
+
 ### 1. Install Once
 
 ```bash
@@ -11,7 +13,7 @@
 ### 2. Start
 
 ```bash
-./scripts/run_local.sh
+cd ~/OpsMineFlow && ./scripts/run_local.sh
 ```
 
 The command starts the API and WebUI on localhost and opens the browser. Keep the terminal open. Press `Control-C` to stop both services.

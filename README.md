@@ -51,23 +51,26 @@ Requirements:
 - Node.js 20 or newer
 - npm
 
-Install once:
-
-```bash
-./scripts/install_mac.sh
-```
-
-One-line bootstrap from a fresh Mac terminal:
+From a fresh Mac terminal, install once:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuzuminami/OpsMineFlow/main/scripts/bootstrap_mac.sh)"
 ```
 
+If the repository is already cloned, first move into its directory:
+
+```bash
+cd /path/to/OpsMineFlow
+./scripts/install_mac.sh
+```
+
 Start each time:
 
 ```bash
-./scripts/run_local.sh
+cd ~/OpsMineFlow && ./scripts/run_local.sh
 ```
+
+`./scripts/...` commands work only from the OpsMineFlow repository directory. The bootstrap installs to `~/OpsMineFlow` by default.
 
 The browser opens automatically. Normal use after startup is completed in the WebUI.
 
