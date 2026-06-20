@@ -2,7 +2,7 @@
 
 ## LLM Integration
 
-LLM integration is not part of the MVP and is not part of the near-term roadmap.
+LLM integration is not part of the local product and is not part of the near-term roadmap.
 
 OpsMineFlow will not implement:
 
@@ -29,11 +29,10 @@ OpsMineFlow will not implement:
 - Hidden background telemetry.
 - Employee scoring or performance evaluation features.
 
-## MVP Exclusions
+## Current Product Exclusions
 
 - BPMN generation.
 - Native macOS agent collection.
 - Browser extension collection.
 - Advanced swimlanes.
 - SaaS deployment.
-

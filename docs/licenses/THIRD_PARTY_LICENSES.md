@@ -19,29 +19,28 @@
 | awesome-processmining | https://github.com/TheWoops/awesome-processmining | Research list | Mixed | No | No | Unknown | design-reference-only | Review each referenced project separately. |
 | RPA_UILogger | https://github.com/apromore/RPA_UILogger | Reference only | Non-commercial/unclear risk | No | No | No or unclear | prohibited | Do not use. |
 | screenrpa | https://github.com/RPA-US/screenrpa | Reference only | Non-commercial/unclear risk | No | No | No or unclear | prohibited | Do not use. |
-| openrpa | https://github.com/open-rpa/openrpa | Reference only | License review required | No | No | Unclear | design-reference-only | No code reuse in MVP. |
-| openflow | https://github.com/open-rpa/openflow | Reference only | License review required | No | No | Unclear | design-reference-only | No code reuse in MVP. |
-| rrweb | https://github.com/rrweb-io/rrweb | Future web logging review | MIT | Possibly | Only after privacy design | Yes | design-reference-only | Session replay is not in MVP. |
+| openrpa | https://github.com/open-rpa/openrpa | Reference only | License review required | No | No | Unclear | design-reference-only | No code reuse in the core product. |
+| openflow | https://github.com/open-rpa/openflow | Reference only | License review required | No | No | Unclear | design-reference-only | No code reuse in the core product. |
+| rrweb | https://github.com/rrweb-io/rrweb | Future web logging review | MIT | Possibly | Only after privacy design | Yes | design-reference-only | Session replay is excluded from the current product. |
 | openreplay | https://github.com/openreplay/openreplay | Reference only | ELv2/Business restrictions risk | No | No | Restricted | prohibited | Avoid direct use. |
-| rrweb-server | https://github.com/alokemajumder/rrweb-server | Reference only | Review required | No | No | Unclear | design-reference-only | No MVP use. |
+| rrweb-server | https://github.com/alokemajumder/rrweb-server | Reference only | Review required | No | No | Unclear | design-reference-only | No product use. |
 | drawio-desktop | https://github.com/jgraph/drawio-desktop | Format reference | Apache-2.0 | No | No | Yes | design-reference-only | Generate XML ourselves. |
 | drawio | https://github.com/jgraph/drawio | Format reference | Apache-2.0 | No | No | Yes | design-reference-only | Do not vendor. |
 | mxgraph | https://github.com/jgraph/mxgraph | Format reference | Apache-2.0 | No | No | Yes | design-reference-only | Do not vendor. |
 | drawio-diagrams | https://github.com/jgraph/drawio-diagrams | Format examples | Apache-2.0 | No | No | Yes | design-reference-only | Examples only. |
 | vscode-drawio | https://github.com/hediet/vscode-drawio | Reference only | MIT | No | No | Yes | design-reference-only | No code reuse. |
-| DuckDB | https://github.com/duckdb/duckdb | Future local storage | MIT | Yes | Yes | Yes | candidate | Not required for MVP. |
-| SQLite | https://github.com/sqlite/sqlite | Future local storage | Public domain/blessing | Yes | Yes | Yes | candidate | Not required for MVP. |
+| DuckDB | https://github.com/duckdb/duckdb | Future local analytics | MIT | Yes | Yes | Yes | candidate | Not required for current storage. |
+| SQLite | https://github.com/sqlite/sqlite | Local storage | Public domain/blessing | Yes | Yes | Yes | standard-library | Used through Python's standard library. |
 | Mermaid | https://github.com/mermaid-js/mermaid | Diagrams | MIT | Yes | Yes | Yes | candidate | Avoid CDN. |
 | Apache ECharts | https://github.com/apache/echarts | Charts | Apache-2.0 | Yes | Yes | Yes | candidate | Local bundle only. |
-| Apache Arrow | https://github.com/apache/arrow | Future data format | Apache-2.0 | Yes | Yes | Yes | candidate | Not required for MVP. |
-| Polars | https://github.com/pola-rs/polars | Future analysis | MIT | Yes | Yes | Yes | candidate | Not required for MVP. |
-| pandas | https://github.com/pandas-dev/pandas | Future analysis | BSD-3-Clause | Yes | Yes | Yes | candidate | Not required for MVP. |
-| NetworkX | https://github.com/networkx/networkx | Future graph analysis | BSD-3-Clause | Yes | Yes | Yes | candidate | Current MVP avoids dependency. |
+| Apache Arrow | https://github.com/apache/arrow | Future data format | Apache-2.0 | Yes | Yes | Yes | candidate | Not required for the current release. |
+| Polars | https://github.com/pola-rs/polars | Future analysis | MIT | Yes | Yes | Yes | candidate | Not required for the current release. |
+| pandas | https://github.com/pandas-dev/pandas | Future analysis | BSD-3-Clause | Yes | Yes | Yes | candidate | Not required for the current release. |
+| NetworkX | https://github.com/networkx/networkx | Future graph analysis | BSD-3-Clause | Yes | Yes | Yes | candidate | Current implementation avoids this dependency. |
 | FastAPI | https://github.com/fastapi/fastapi | Local API | MIT | Yes | Yes | Yes | direct-dependency | Localhost only. |
 | Uvicorn | https://github.com/encode/uvicorn | Local API server | BSD-3-Clause | Yes | Yes | Yes | direct-dependency | Bind to 127.0.0.1. |
 | Pydantic | https://github.com/pydantic/pydantic | Validation | MIT | Yes | Yes | Yes | direct-dependency | Used in local schema. |
 | uv | https://github.com/astral-sh/uv | Developer setup | MIT/Apache-2.0 | Yes | Yes | Yes | candidate | Optional developer tool. |
-| Tauri | https://github.com/tauri-apps/tauri | Desktop shell | MIT/Apache-2.0 | Yes | Yes | Yes | candidate | Lock down external URLs. |
+| Tauri | https://github.com/tauri-apps/tauri | Desktop shell | MIT/Apache-2.0 | Yes | Yes | Yes | direct-dependency | Lock down external URLs. |
 | React | https://github.com/facebook/react | UI | MIT | Yes | Yes | Yes | direct-dependency | Local bundle. |
 | Vite | https://github.com/vitejs/vite | UI build | MIT | Yes | Yes | Yes | direct-dependency | Dev server is local. |
-

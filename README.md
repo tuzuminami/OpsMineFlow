@@ -42,7 +42,7 @@ The project is licensed under Apache-2.0. Direct dependencies must be commercial
 
 OpsMineFlow now targets a product-ready local workflow: one-command installation, one-command local startup, browser-based control, persistent local storage, diagnostics, import, analysis, and export. Native macOS logging, browser extension logging, and advanced swimlanes remain roadmap items.
 
-## macOS Installation
+## Quick Start
 
 Requirements:
 
@@ -51,7 +51,7 @@ Requirements:
 - Node.js 20 or newer
 - npm
 
-Install:
+Install once:
 
 ```bash
 ./scripts/install_mac.sh
@@ -63,11 +63,41 @@ One-line bootstrap from a fresh Mac terminal:
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuzuminami/OpsMineFlow/main/scripts/bootstrap_mac.sh)"
 ```
 
-Run:
+Start each time:
 
 ```bash
 ./scripts/run_local.sh
 ```
+
+The browser opens automatically. Normal use after startup is completed in the WebUI.
+
+## WebUI Workflow
+
+### 1. Import Logs
+
+Open **Home > Import**, select CSV or JSON, enter the local file path, and choose **Preview**. Confirm the event count and masked sample, then choose **Import Previewed File**. ActivityWatch localhost import stays disabled unless the user explicitly enables it.
+
+### 2. Analyze Work
+
+Use **Dashboard** for totals, **Event Explorer** for masked records, **Process Map** for transitions and bottlenecks, **App Switching** for handoff patterns, and **Automation** to sort candidates and save Adopt, Hold, or Reject review states.
+
+### 3. Export Results
+
+Open **Home > Exports**, choose Markdown, JSON, CSV, Mermaid, or draw.io, then preview the content. Save it to a local path or download it only after reviewing the privacy warning.
+
+### 4. Run Diagnostics
+
+Open **Home > Diagnostics** to inspect API, WebUI, storage, dependencies, ports, ActivityWatch, and local-only policy status. Choose **Run Checks** for the license and local-network guardrails.
+
+### 5. Delete Local Analysis Data
+
+Open **Settings**, review the local data controls, and choose **Delete Data**. Confirm the deletion prompt. Imported events, labels, review state, and import history are removed from the local database.
+
+### 6. Stop
+
+Return to the terminal running OpsMineFlow and press `Control-C`.
+
+For the full operating flow, see [docs/operations/RUNBOOK.md](docs/operations/RUNBOOK.md). For problems, see [docs/operations/TROUBLESHOOTING.md](docs/operations/TROUBLESHOOTING.md).
 
 Build macOS app artifacts:
 
@@ -77,7 +107,7 @@ Build macOS app artifacts:
 
 Packaging details: [docs/operations/PACKAGING_MACOS.md](docs/operations/PACKAGING_MACOS.md)
 
-## Development Setup
+## Developer Workflow
 
 Run all checks:
 
@@ -94,16 +124,6 @@ Run the local API and desktop UI during development:
 ```bash
 ./scripts/dev.sh
 ```
-
-## Usage
-
-1. Explain the collection scope to participants.
-2. Obtain consent.
-3. Start OpsMineFlow with `./scripts/run_local.sh`.
-4. Preview and import CSV, JSON, or explicitly enabled ActivityWatch localhost data from the WebUI.
-5. Review events, diagnostics, process maps, app switching, import history, and automation candidates.
-6. Adjust local privacy settings if needed.
-7. Preview exports, choose a local save path, and export Mermaid, draw.io, Markdown, CSV, or JSON artifacts after confirming the export warning.
 
 ## Import CSV/JSON
 
