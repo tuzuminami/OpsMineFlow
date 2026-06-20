@@ -43,7 +43,7 @@ OpenAI、Anthropic、Google、Azure、Ollama、ローカルLLMを含むLLM連携
 
 ## ローカル製品版スコープ
 
-OpsMineFlow は、1コマンド導入、1コマンド起動、WebUI操作、ローカル永続保存、診断、取り込み、分析、出力までをローカルアプリとして扱える水準を目指す。macOS常駐ログ収集とブラウザ拡張はロードマップ項目。
+OpsMineFlow は、1コマンド導入、1コマンド起動、WebUI操作、ローカル永続保存、診断、取り込み、分析、出力までをローカルアプリとして扱える水準を目指す。macOS常駐ログ収集とブラウザ拡張は既定OFFのロードマップ項目で、方針は [docs/product/COLLECTION_ROADMAP.md](docs/product/COLLECTION_ROADMAP.md) に記録する。
 
 ## 最短セットアップ
 
