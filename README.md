@@ -27,6 +27,7 @@ The project is licensed under Apache-2.0. Direct dependencies must be commercial
 - CSV event log import
 - JSON event log import, including ActivityWatch-style exports
 - Optional ActivityWatch localhost import, enabled only by explicit user action
+- Explicit start/stop recording of frontmost macOS applications
 - Standard event schema
 - URL and window-title masking
 - Rule-based business labeling
@@ -40,7 +41,7 @@ The project is licensed under Apache-2.0. Direct dependencies must be commercial
 
 ## Local Product Scope
 
-OpsMineFlow now targets a product-ready local workflow: one-command installation, one-command local startup, browser-based control, persistent local storage, diagnostics, import, analysis, and export. Native macOS logging and browser extension logging remain default-off roadmap items documented in [docs/product/COLLECTION_ROADMAP.md](docs/product/COLLECTION_ROADMAP.md).
+OpsMineFlow targets a product-ready local workflow: one-command installation, one-command local startup, browser-based control, persistent local storage, diagnostics, recording, import, analysis, and export. Native macOS recording runs only after an explicit WebUI start. Browser extension logging remains a default-off roadmap item documented in [docs/product/COLLECTION_ROADMAP.md](docs/product/COLLECTION_ROADMAP.md).
 
 ## Quick Start
 
@@ -96,15 +97,27 @@ The seven events shown on the first launch are sample data. They demonstrate the
 
 To restore the example later, import `data/sample/sample_events.csv` from the repository.
 
-### 3. Start Collecting Data
+### 3. Record Work on This Mac
 
-Choose **Home > Start collecting data**. This opens the supported collection choices:
+Use **Record work** at the top of Home to capture a normal work session:
 
-1. **CSV or JSON file**: import an event log that you already exported or prepared.
-2. **ActivityWatch localhost**: import only after explicitly confirming the collection scope and participant consent.
-3. **Automatic Mac recording**: not included in the current product.
+1. Enter a recognizable **Case or work unit**, such as `2026-06-21 Monthly invoice review`.
+2. Enter the **Work label**, such as `Invoice processing`.
+3. Read the collection scope and select the explicit consent checkbox.
+4. Choose **Start recording**. If first-run sample data is still present, confirm its removal before recording begins.
+5. Use Safari, Excel, mail, and other work applications normally. The panel shows the current app, elapsed time, and completed app intervals.
+6. Choose **Stop recording** when that work unit is complete.
+7. Review the result in **Dashboard**, **Process Map**, and **App Switching**.
 
-OpsMineFlow does not start background monitoring when the WebUI opens. It does not capture keystrokes, screenshots, screen recordings, microphone audio, camera video, passwords, or typed text. The **Start collecting data** button guides you to supported imports; it is not a hidden recording switch.
+Recording stores only the frontmost app display name, bundle identifier, start/end timestamps, and duration. It does not capture window titles, URLs, keystrokes, typed text, passwords, clipboard contents, screenshots, screen recordings, microphone audio, or camera video. Opening the WebUI does not start recording, and a stopped session never resumes by itself.
+
+To omit an application, add its display name under **Settings > Excluded apps** before starting. If the recording agent is unavailable, reinstall it and restart OpsMineFlow:
+
+```bash
+cd ~/OpsMineFlow && ./scripts/install_mac.sh
+```
+
+For existing logs, choose **Home > Start collecting data** and use CSV/JSON or the explicit ActivityWatch localhost import.
 
 ### 4. Import a CSV or JSON File
 

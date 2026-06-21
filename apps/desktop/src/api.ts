@@ -13,6 +13,7 @@ import type {
   ImportHistoryEntry,
   ImportPreview,
   ProcessMap,
+  RecordingStatus,
   Summary
 } from "./types";
 
@@ -46,9 +47,10 @@ async function postJson<T>(path: string, payload: unknown = {}): Promise<T> {
 }
 
 export async function loadDashboardData() {
-  const [health, diagnostics, settings, importHistory, events, summary, processMap, candidates, appSwitching, report] = await Promise.all([
+  const [health, diagnostics, recording, settings, importHistory, events, summary, processMap, candidates, appSwitching, report] = await Promise.all([
     getJson<Health>("/health"),
     getJson<Diagnostics>("/diagnostics"),
+    getJson<RecordingStatus>("/recording/status"),
     getJson<AppSettings>("/settings"),
     getJson<ImportHistoryEntry[]>("/import/history"),
     getJson<EventRecord[]>("/events"),
@@ -62,6 +64,7 @@ export async function loadDashboardData() {
   return {
     health,
     diagnostics,
+    recording,
     settings,
     importHistory,
     events,
@@ -71,6 +74,14 @@ export async function loadDashboardData() {
     appSwitching,
     markdown: report.markdown
   };
+}
+
+export async function startRecording(caseId: string, activityLabel: string) {
+  return postJson<RecordingStatus>("/recording/start", { case_id: caseId, activity_label: activityLabel, consent: true });
+}
+
+export async function stopRecording() {
+  return postJson<RecordingStatus>("/recording/stop");
 }
 
 export type ImportResult = {

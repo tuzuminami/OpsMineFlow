@@ -32,7 +32,7 @@ OpsMineFlow will not implement:
 ## Current Product Exclusions
 
 - BPMN generation.
-- Native macOS agent collection.
+- Automatic, hidden, or always-on macOS collection.
 - Browser extension collection.
 - Advanced swimlanes.
 - SaaS deployment.

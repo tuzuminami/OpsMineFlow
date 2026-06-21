@@ -34,7 +34,10 @@ test("language selection defaults from the browser and persists locally", () => 
 test("beginner workflow labels are explicit in both languages", () => {
   assert.equal(ja["action.startCollecting"], "データ収集を始める");
   assert.match(ja["sample.body"], /再読込.*削除されない/);
-  assert.match(en["collection.autoBody"], /does not capture/);
+  assert.match(en["collection.autoBody"], /No keystrokes/);
+  assert.equal(ja["recording.start"], "記録を開始");
+  assert.equal(ja["recording.stop"], "記録を停止");
+  assert.match(ja["recording.scopeBody"], /前面アプリ名.*ウィンドウタイトル.*取得しない/);
   assert.match(appSource, /title=\{t\("action\.refreshHelp"\)\}/);
   assert.match(appSource, /t\("confirm\.deleteData"\)/);
   assert.match(appSource, /<EmptyDataView onStart=\{onStart\}/);

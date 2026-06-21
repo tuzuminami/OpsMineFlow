@@ -1,4 +1,4 @@
-from .importers import load_events_from_csv, load_events_from_json
+from .importers import build_native_app_event, load_events_from_csv, load_events_from_json
 from .models import StandardEvent
 from .pipeline import (
     analyze_variants,
@@ -23,6 +23,7 @@ __all__ = [
     "analyze_variants",
     "assign_activity_labels",
     "build_directly_follows_graph",
+    "build_native_app_event",
     "calculate_duration_metrics",
     "detect_app_switches",
     "detect_bottlenecks",

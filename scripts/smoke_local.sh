@@ -82,6 +82,12 @@ assert diagnostics["runtime_policy"]["local_only"] is True
 assert diagnostics["api"]["port"] == int(os.environ["OPSMINEFLOW_API_PORT"])
 assert "dependencies" in diagnostics
 assert "guardrails" in diagnostics
+assert diagnostics["recording"]["capture_scope"] == "frontmost_app_only"
+
+recording = request("/recording/status")
+assert isinstance(recording, dict)
+assert recording["active"] is False
+assert recording["capture_scope"] == "frontmost_app_only"
 
 preview = request("/import/preview", {"format": "csv", "path": "data/sample/sample_events.csv"})
 assert isinstance(preview, dict)

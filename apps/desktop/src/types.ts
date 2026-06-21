@@ -94,6 +94,7 @@ export type Diagnostics = {
   activitywatch: DiagnosticItem & {
     enabled: boolean;
   };
+  recording: RecordingStatus;
   guardrails: Record<string, DiagnosticItem & { command: string }>;
   runtime_policy: {
     local_only: boolean;
@@ -102,6 +103,22 @@ export type Diagnostics = {
     remote_reporting: boolean;
   };
   remediation: string[];
+};
+
+export type RecordingStatus = {
+  supported: boolean;
+  installed: boolean;
+  available: boolean;
+  remediation: string;
+  active: boolean;
+  session_id: string;
+  case_id: string;
+  activity_label: string;
+  started_at: string;
+  current_app: string;
+  recorded_events: number;
+  last_error: string;
+  capture_scope: "frontmost_app_only";
 };
 
 export type DiagnosticItem = {

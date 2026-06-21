@@ -18,13 +18,13 @@ A separate helper process is deferred. It may be reconsidered only if measured r
 
 ### Native Agent Scope
 
-Allowed after explicit start:
+Implemented in the technical preview after explicit start:
 
 - frontmost application bundle identifier and display name
-- active window title only after masking rules are applied
 - start/end timestamps and duration
 - user-defined exclusions
-- visible running/paused state
+- visible running/stopped state
+- authenticated localhost ingestion into the normal validation and storage path
 
 Not collected:
 
@@ -32,6 +32,7 @@ Not collected:
 - clipboard contents
 - screenshots or screen recordings
 - document contents
+- window titles and URLs in the technical preview
 - microphone, camera, or audio
 - hidden background activity
 
@@ -77,12 +78,12 @@ No collector may contact a cloud service.
 ## Release Order
 
 1. **Current local product**: CSV/JSON and explicit ActivityWatch localhost import, WebUI analysis, SQLite, diagnostics, and exports.
-2. **Native agent technical preview**: Swift-only, manual start/stop, visible status, app metadata first, no browser extension dependency.
+2. **Native agent technical preview (implemented)**: Swift-only, manual start/stop, visible status, frontmost app metadata only, no browser extension dependency.
 3. **Native agent controlled beta**: signed/notarized build, consent flow, exclusion controls, retention/deletion verification, and client security review.
 4. **Browser extension technical preview**: separate install, optional domain permissions, local-only transport, and no page-content capture.
 5. **Browser extension controlled beta**: browser-store/enterprise policy review, consent updates, and end-to-end deletion verification.
 
-Native collection and browser collection remain out of the default production release until their review gates pass.
+Native recording is bundled but default-off and remains a technical preview until the controlled-beta review gates pass. Browser collection remains outside the default production release.
 
 ## Required Review Gates
 

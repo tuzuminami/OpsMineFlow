@@ -87,6 +87,11 @@ info "Installing Python packages"
 info "Installing desktop dependencies"
 npm --prefix apps/desktop install
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  info "Building the local macOS recording agent"
+  ./scripts/build_mac_agent.sh
+fi
+
 info "Running install smoke checks"
 "$VENV_PYTHON" - <<'PY'
 import importlib

@@ -19,6 +19,8 @@ fi
 
 export PYTHONPATH="$ROOT_DIR/services/mining-core/src:$ROOT_DIR/services/local-api/src:$ROOT_DIR/packages/drawio-exporter/src:${PYTHONPATH:-}"
 
+./scripts/build_mac_agent.sh --check
+
 "$PYTHON_BIN" - <<'PY'
 from pathlib import Path
 import tomllib
