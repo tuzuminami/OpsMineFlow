@@ -29,6 +29,41 @@ def load_events_from_json(path: str | Path, source: str = "json") -> list[Standa
     raise ValueError("Unsupported JSON event format")
 
 
+def build_native_app_event(
+    *,
+    session_id: str,
+    sequence: int,
+    case_id: str,
+    activity: str,
+    app_name: str,
+    app_bundle_id: str,
+    timestamp_start: str,
+    timestamp_end: str,
+    duration_seconds: float,
+) -> StandardEvent:
+    start = _parse_datetime(timestamp_start)
+    end = _parse_datetime(timestamp_end)
+    measured_duration = max((end - start).total_seconds(), 0.0)
+    duration = max(min(float(duration_seconds), measured_duration + 1.0), 0.0)
+    return _build_event(
+        source="native_mac_agent",
+        source_event_id=f"{session_id}:{sequence}",
+        case_id=case_id,
+        user_alias="local-user",
+        app_name=app_name,
+        app_bundle_id=app_bundle_id,
+        window_title="",
+        url="",
+        activity_raw=activity,
+        event_type="native_app_activity",
+        timestamp_start=start,
+        timestamp_end=end,
+        duration_seconds=duration,
+        idle_flag=False,
+        metadata={"session_id": session_id, "sequence": sequence, "capture_scope": "frontmost_app_only"},
+    )
+
+
 def _event_from_csv_row(row: dict[str, str], index: int, source: str) -> StandardEvent:
     start = _parse_datetime(row.get("timestamp_start") or row.get("start") or "")
     end_value = row.get("timestamp_end") or row.get("end") or ""
@@ -211,4 +246,3 @@ def _fallback_case_id(url: str, activity: str, index: int) -> str:
         return f"CASE-DOMAIN-{domain}"
     normalized = _normalize_activity(activity).replace(" ", "-")[:24]
     return f"CASE-INFERRED-{normalized or index}"
-

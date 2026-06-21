@@ -10,7 +10,9 @@ import {
   runDiagnosticChecks,
   saveAutomationReview,
   saveExport,
-  saveSettings
+  saveSettings,
+  startRecording,
+  stopRecording
 } from "./api";
 import { useI18n } from "./i18n";
 import type { TranslationKey } from "./i18n";
@@ -28,6 +30,7 @@ import type {
   ImportHistoryEntry,
   ImportPreview,
   ProcessMap,
+  RecordingStatus,
   Summary
 } from "./types";
 
@@ -36,6 +39,7 @@ type Tab = "home" | "dashboard" | "events" | "process" | "switching" | "candidat
 type DashboardData = {
   health: Health;
   diagnostics: Diagnostics;
+  recording: RecordingStatus;
   settings: AppSettings;
   importHistory: ImportHistoryEntry[];
   events: EventRecord[];
@@ -58,6 +62,8 @@ type AppActions = {
   saveAutomationReview: (activity: string, status: AutomationReviewStatus) => Promise<void>;
   runDiagnosticChecks: () => Promise<DiagnosticChecks>;
   deleteData: () => Promise<void>;
+  startRecording: (caseId: string, activityLabel: string, clearSample: boolean) => Promise<void>;
+  stopRecording: () => Promise<void>;
 };
 
 const tabs: Array<{ id: Tab; label: TranslationKey }> = [
@@ -80,21 +86,27 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
 
-  async function refresh() {
-    setLoading(true);
+  async function refresh(silent = false) {
+    if (!silent) setLoading(true);
     setError("");
     try {
       setData(await loadDashboardData());
     } catch (err) {
       setError(err instanceof Error ? err.message : t("message.apiUnavailable", { error: "" }));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(() => {
+    if (!data?.recording.active) return;
+    const timer = window.setInterval(() => void refresh(true), 2000);
+    return () => window.clearInterval(timer);
+  }, [data?.recording.active]);
 
   async function runAction(task: () => Promise<string>) {
     setWorking(true);
@@ -194,6 +206,17 @@ export function App() {
       runAction(async () => {
         await deleteLocalData();
         return t("message.dataDeleted");
+      }),
+    startRecording: (caseId, activityLabel, clearSample) =>
+      runAction(async () => {
+        if (clearSample) await deleteLocalData();
+        await startRecording(caseId, activityLabel);
+        return t("message.recordingStarted");
+      }),
+    stopRecording: () =>
+      runAction(async () => {
+        const result = await stopRecording();
+        return t("message.recordingStopped", { count: result.recorded_events });
       })
   };
 
@@ -354,6 +377,8 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
 
   return (
     <section className="home-grid">
+      <RecordingPanel data={data} actions={actions} working={working} />
+
       <section className="collection-intro" id="collection-start">
         <div>
           <h2>{t("collection.title")}</h2>
@@ -572,6 +597,10 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
           <Setting label={t("diagnostics.storage")} value={`${data.diagnostics.storage.storage_mode} ${data.diagnostics.storage.storage_path || ""}`} />
           <Setting label={t("diagnostics.events")} value={data.diagnostics.storage.event_count.toString()} />
           <Setting label={t("diagnostics.reviews")} value={data.diagnostics.storage.automation_review_count.toString()} />
+          <Setting
+            label={t("diagnostics.recording")}
+            value={data.diagnostics.recording.available ? t("status.available") : t("status.unavailable")}
+          />
           <Setting label={t("diagnostics.activitywatch")} value={`${data.diagnostics.activitywatch.enabled ? t("status.enabled") : localizeStatus("disabled", t)} / ${localizeStatus(data.diagnostics.activitywatch.status, t)}`} />
           <Setting label={t("diagnostics.external")} value={localizeStatus(data.diagnostics.runtime_policy.external_network, t)} />
           {Object.entries(data.diagnostics.dependencies).map(([name, item]) => (
@@ -615,6 +644,84 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
           </button>
         </div>
       </section>
+    </section>
+  );
+}
+
+function RecordingPanel({ data, actions, working }: { data: DashboardData; actions: AppActions; working: boolean }) {
+  const { t } = useI18n();
+  const [caseId, setCaseId] = useState(() => `WORK-${new Date().toISOString().slice(0, 10)}`);
+  const [activityLabel, setActivityLabel] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [clock, setClock] = useState(Date.now());
+  const status = data.recording;
+  const sampleDataLoaded = data.events.length > 0 && data.importHistory.length === 0;
+
+  useEffect(() => {
+    if (!status.active) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [status.active]);
+
+  const elapsedSeconds = status.active && status.started_at
+    ? Math.max(Math.floor((clock - new Date(status.started_at).getTime()) / 1000), 0)
+    : 0;
+
+  return (
+    <section className={status.active ? "recording-panel is-recording" : "recording-panel"} aria-live="polite">
+      <div className="recording-heading">
+        <div>
+          <span className="recording-kicker">{t("recording.kicker")}</span>
+          <h2>{status.active ? t("recording.activeTitle") : t("recording.title")}</h2>
+          <p>{status.active ? t("recording.activeBody") : t("recording.body")}</p>
+        </div>
+        <strong className="recording-state">{status.active ? t("recording.active") : t("recording.stopped")}</strong>
+      </div>
+
+      {status.active ? (
+        <div className="recording-live-grid">
+          <DetailStat label={t("recording.currentApp")} value={status.current_app || t("recording.waitingForApp")} />
+          <DetailStat label={t("recording.elapsed")} value={formatElapsed(elapsedSeconds)} />
+          <DetailStat label={t("recording.eventsRecorded")} value={status.recorded_events.toString()} />
+          <DetailStat label={t("recording.caseName")} value={status.case_id} />
+          <DetailStat label={t("recording.workLabel")} value={status.activity_label} />
+          <button className="stop-recording-button" onClick={() => void actions.stopRecording()} disabled={working}>
+            {t("recording.stop")}
+          </button>
+        </div>
+      ) : (
+        <div className="recording-setup">
+          <label>
+            <span>{t("recording.caseName")}</span>
+            <input value={caseId} onChange={(event) => setCaseId(event.target.value)} placeholder={t("recording.casePlaceholder")} disabled={working} />
+          </label>
+          <label>
+            <span>{t("recording.workLabel")}</span>
+            <input value={activityLabel} onChange={(event) => setActivityLabel(event.target.value)} placeholder={t("recording.workPlaceholder")} disabled={working} />
+          </label>
+          <label className="recording-consent">
+            <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} disabled={working || !status.available} />
+            <span>{t("recording.consent")}</span>
+          </label>
+          <button
+            className="start-recording-button"
+            onClick={() => {
+              if (sampleDataLoaded && !window.confirm(t("recording.confirmSampleRemoval"))) return;
+              void actions.startRecording(caseId, activityLabel, sampleDataLoaded);
+            }}
+            disabled={working || !status.available || !consent || !caseId.trim() || !activityLabel.trim()}
+          >
+            {t("recording.start")}
+          </button>
+        </div>
+      )}
+
+      <div className="recording-scope">
+        <strong>{t("recording.scopeTitle")}</strong>
+        <span>{t("recording.scopeBody")}</span>
+      </div>
+      {!status.available ? <div className="api-warning">{status.remediation || t("recording.unavailable")}</div> : null}
+      {status.last_error ? <div className="api-warning">{status.last_error}</div> : null}
     </section>
   );
 }
@@ -983,6 +1090,13 @@ function defaultExportPath(format: ExportFormat): string {
     drawio: "drawio"
   };
   return `exports/opsmineflow-export.${extensionByFormat[format]}`;
+}
+
+function formatElapsed(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return [hours, minutes, seconds].map((value) => value.toString().padStart(2, "0")).join(":");
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

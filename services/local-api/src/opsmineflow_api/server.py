@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
@@ -17,6 +17,7 @@ from .app import (
     run_diagnostic_checks,
     save_export_artifact,
 )
+from .recording import recording_manager
 from .storage import default_store
 
 HOST = os.environ.get("OPSMINEFLOW_API_HOST", "127.0.0.1")
@@ -37,6 +38,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             "/diagnostics": create_diagnostics(),
             "/settings": default_store().get_settings(),
             "/import/history": default_store().list_import_history(),
+            "/recording/status": recording_manager.status(),
             "/events": snapshot["events"],
             "/analytics/summary": snapshot["summary"],
             "/analytics/app-switching": snapshot["app_switching"],
@@ -53,6 +55,36 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             payload = self._read_json()
+            if path == "/recording/start":
+                self._send_json(
+                    recording_manager.start(
+                        str(payload.get("case_id") or ""),
+                        str(payload.get("activity_label") or ""),
+                        bool(payload.get("consent")),
+                    )
+                )
+                return
+            if path == "/recording/stop":
+                self._send_json(recording_manager.stop(default_store()))
+                return
+            if path == "/recording/events":
+                self._send_json(
+                    recording_manager.ingest(
+                        self.headers.get("X-OpsMineFlow-Session", ""),
+                        payload,
+                        default_store(),
+                    )
+                )
+                return
+            if path == "/recording/heartbeat":
+                self._send_json(
+                    recording_manager.heartbeat(
+                        self.headers.get("X-OpsMineFlow-Session", ""),
+                        str(payload.get("session_id") or ""),
+                        str(payload.get("current_app") or ""),
+                    )
+                )
+                return
             if path == "/import/preview":
                 self._send_json(create_import_preview(str(payload.get("format") or ""), str(payload.get("path") or "")))
                 return
@@ -93,6 +125,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 )
                 return
             if path == "/data/delete":
+                recording_manager.stop(default_store())
                 default_store().clear()
                 self._send_json({"deleted": True})
                 return
@@ -116,8 +149,11 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         except FileNotFoundError as exc:
             self._send_json({"error": str(exc)}, status=404)
             return
-        except ValueError as exc:
+        except (ValueError, RuntimeError) as exc:
             self._send_json({"error": str(exc)}, status=400)
+            return
+        except PermissionError as exc:
+            self._send_json({"error": str(exc)}, status=403)
             return
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=500)
@@ -152,6 +188,6 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server = HTTPServer((HOST, PORT), LocalApiHandler)
+    server = ThreadingHTTPServer((HOST, PORT), LocalApiHandler)
     print(f"OpsMineFlow local API listening on http://127.0.0.1:{PORT}")
     server.serve_forever()

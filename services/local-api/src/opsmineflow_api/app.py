@@ -27,16 +27,18 @@ from opsmineflow_mining import (
 from opsmineflow_mining.pipeline import metrics_to_dict
 
 from .activitywatch import import_activitywatch_local
+from .recording import recording_manager
 from .storage import EventStore, default_store
 
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, Header, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel
 except ModuleNotFoundError:
     FastAPI = None  # type: ignore[assignment]
     HTTPException = Exception  # type: ignore[assignment]
     CORSMiddleware = None  # type: ignore[assignment]
+    Header = None  # type: ignore[assignment]
     BaseModel = object  # type: ignore[assignment]
 
 
@@ -80,6 +82,27 @@ class ExportPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
 class ExportSaveRequest(BaseModel):  # type: ignore[misc, valid-type]
     format: str
     path: str
+
+
+class RecordingStartRequest(BaseModel):  # type: ignore[misc, valid-type]
+    case_id: str
+    activity_label: str
+    consent: bool = False
+
+
+class RecordingEventRequest(BaseModel):  # type: ignore[misc, valid-type]
+    session_id: str
+    sequence: int
+    app_name: str
+    app_bundle_id: str = ""
+    timestamp_start: str
+    timestamp_end: str
+    duration_seconds: float
+
+
+class RecordingHeartbeatRequest(BaseModel):  # type: ignore[misc, valid-type]
+    session_id: str
+    current_app: str = ""
 
 
 def allowed_webui_origins() -> list[str]:
@@ -322,6 +345,7 @@ def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
             "status": _activitywatch_status(activitywatch_enabled),
             "remediation": "Enable ActivityWatch import only when the user explicitly wants localhost ActivityWatch data.",
         },
+        "recording": recording_manager.status(),
         "guardrails": {
             "license_policy": {
                 "status": "available",
@@ -441,6 +465,12 @@ def _bad_request(message: str) -> Exception:
     return ValueError(message)
 
 
+def _forbidden(message: str) -> Exception:
+    if FastAPI is not None:
+        return HTTPException(status_code=403, detail=message)
+    return PermissionError(message)
+
+
 if app is not None:
 
     @app.get("/health")
@@ -462,6 +492,43 @@ if app is not None:
     @app.get("/import/history")
     def import_history() -> list[dict[str, object]]:
         return default_store().list_import_history()
+
+    @app.get("/recording/status")
+    def recording_status() -> dict[str, Any]:
+        return recording_manager.status()
+
+    @app.post("/recording/start")
+    def recording_start(request: RecordingStartRequest) -> dict[str, Any]:
+        try:
+            return recording_manager.start(request.case_id, request.activity_label, request.consent)
+        except (ValueError, RuntimeError) as exc:
+            raise _bad_request(str(exc))
+
+    @app.post("/recording/stop")
+    def recording_stop() -> dict[str, Any]:
+        return recording_manager.stop(default_store())
+
+    @app.post("/recording/events")
+    def recording_events(
+        request: RecordingEventRequest,
+        x_opsmineflow_session: str = Header(default=""),
+    ) -> dict[str, Any]:
+        try:
+            return recording_manager.ingest(x_opsmineflow_session, request.model_dump(), default_store())
+        except PermissionError as exc:
+            raise _forbidden(str(exc))
+        except ValueError as exc:
+            raise _bad_request(str(exc))
+
+    @app.post("/recording/heartbeat")
+    def recording_heartbeat(
+        request: RecordingHeartbeatRequest,
+        x_opsmineflow_session: str = Header(default=""),
+    ) -> dict[str, Any]:
+        try:
+            return recording_manager.heartbeat(x_opsmineflow_session, request.session_id, request.current_app)
+        except PermissionError as exc:
+            raise _forbidden(str(exc))
 
     @app.post("/import/preview")
     def import_preview(request: ImportPreviewRequest) -> dict[str, Any]:
@@ -512,6 +579,7 @@ if app is not None:
 
     @app.post("/data/delete")
     def delete_data() -> dict[str, Any]:
+        recording_manager.stop(default_store())
         default_store().clear()
         return {"deleted": True}
 

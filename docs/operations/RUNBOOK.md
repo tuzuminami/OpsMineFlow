@@ -30,7 +30,18 @@ cd ~/OpsMineFlow && ./scripts/stop_local.sh
 
 The stop script verifies that the listeners belong to OpsMineFlow before terminating them. It leaves unrelated programs untouched.
 
-### 4. Import Logs
+### 4. Record a Work Session
+
+1. Open **Home > Record work**.
+2. Enter a case or work-unit name and a work label.
+3. Read the collection scope and select the explicit consent checkbox.
+4. Choose **Start recording**.
+5. Use the required Mac applications normally.
+6. Choose **Stop recording** when the work unit is complete.
+
+The recorder stores only frontmost application names, bundle identifiers, timestamps, and durations. It does not collect window titles, URLs, input text, screenshots, audio, or camera data. Use **Settings > Excluded apps** before starting when an application must be omitted.
+
+### 5. Import Logs
 
 1. Open **Home > Import**.
 2. Choose CSV or JSON.
@@ -41,7 +52,7 @@ The stop script verifies that the listeners belong to OpsMineFlow before termina
 
 ActivityWatch import is optional. Enable it only when the participant-approved scope includes ActivityWatch localhost data. If it is unavailable, use a CSV or JSON export instead.
 
-### 5. Analyze
+### 6. Analyze
 
 - **Dashboard**: totals, durations, and top signals
 - **Event Explorer**: masked event-level records
@@ -52,7 +63,7 @@ ActivityWatch import is optional. Enable it only when the participant-approved s
 
 Automation review states are stored in the local SQLite database and included in Markdown and JSON exports.
 
-### 6. Export
+### 7. Export
 
 1. Open **Home > Exports**.
 2. Choose Markdown, JSON, CSV, Mermaid, or draw.io.
@@ -63,7 +74,7 @@ Automation review states are stored in the local SQLite database and included in
 
 Treat export preview as the final manual checkpoint before sharing output with a client.
 
-### 7. Delete Local Analysis Data
+### 8. Delete Local Analysis Data
 
 1. Open **Settings**.
 2. Choose **Delete Data**.
@@ -78,6 +89,7 @@ Open **Home > Diagnostics** to check:
 - API bind and port
 - WebUI status and port
 - SQLite path and record counts
+- macOS recording agent availability
 - Python, Node.js, npm, Cargo, and macOS versions
 - ActivityWatch status when explicitly enabled
 - local-only runtime policy
@@ -92,7 +104,7 @@ Exports are written only to the local path chosen by the user.
 
 ## Problem Resolution
 
-Use [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for startup, port, dependency, import, ActivityWatch, export, and packaging problems.
+Use [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for startup, port, dependency, recording, import, ActivityWatch, export, and packaging problems.
 
 ## Developer Workflow
 

@@ -29,6 +29,7 @@ textarea {
 
 .app-shell {
   min-height: 100vh;
+  overflow-x: hidden;
   padding: 20px;
 }
 
@@ -121,8 +122,10 @@ textarea {
 .tabs {
   display: flex;
   gap: 6px;
+  max-width: 100%;
   overflow-x: auto;
   padding-bottom: 10px;
+  width: 100%;
 }
 
 .tab {
@@ -200,6 +203,154 @@ textarea {
   display: grid;
   gap: 12px;
   grid-template-columns: minmax(320px, 1.3fr) repeat(2, minmax(260px, 1fr));
+}
+
+.recording-panel {
+  background: #ffffff;
+  border: 1px solid #a9b9b8;
+  border-left: 5px solid #0f766e;
+  border-radius: 8px;
+  display: grid;
+  gap: 14px;
+  grid-column: 1 / -1;
+  padding: 16px;
+}
+
+.recording-panel.is-recording {
+  background: #f0f8f5;
+  border-color: #4f9487;
+}
+
+.recording-heading {
+  align-items: start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.recording-heading h2 {
+  font-size: 20px;
+  margin: 2px 0 3px;
+}
+
+.recording-heading p {
+  color: #58646b;
+  margin: 0;
+}
+
+.recording-kicker {
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.recording-state {
+  background: #edf1f1;
+  border-radius: 999px;
+  color: #4b5a61;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+}
+
+.is-recording .recording-state {
+  background: #d7eee7;
+  color: #0b5e54;
+}
+
+.recording-setup {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(220px, 1fr) minmax(280px, 1.4fr) auto;
+}
+
+.recording-setup > label:not(.recording-consent) {
+  display: grid;
+  gap: 5px;
+}
+
+.recording-setup label > span {
+  color: #58646b;
+  font-size: 12px;
+}
+
+.recording-setup input[type="text"],
+.recording-setup input:not([type]) {
+  background: #fbfcfc;
+  border: 1px solid #a9b9b8;
+  border-radius: 8px;
+  min-height: 42px;
+  min-width: 0;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.recording-consent {
+  align-items: center;
+  border: 1px solid #dce3e3;
+  border-radius: 8px;
+  display: flex;
+  gap: 9px;
+  min-height: 42px;
+  padding: 8px 10px;
+}
+
+.recording-consent input {
+  flex: 0 0 auto;
+  height: 18px;
+  width: 18px;
+}
+
+.recording-panel button {
+  border: 1px solid #163235;
+  border-radius: 8px;
+  cursor: pointer;
+  min-height: 42px;
+  padding: 8px 13px;
+}
+
+.recording-panel button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.start-recording-button {
+  background: #163235;
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.stop-recording-button {
+  background: #8a2432;
+  border-color: #8a2432 !important;
+  color: #ffffff;
+}
+
+.recording-live-grid {
+  align-items: stretch;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(120px, 1fr)) auto;
+}
+
+.recording-live-grid .detail-stat {
+  background: #ffffff;
+  border: 1px solid #d5e4e0;
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
+.recording-scope {
+  align-items: baseline;
+  border-top: 1px solid #dce3e3;
+  display: flex;
+  gap: 10px;
+  padding-top: 10px;
+}
+
+.recording-scope span {
+  color: #58646b;
 }
 
 .collection-intro {
@@ -873,6 +1024,25 @@ th {
   .collection-intro,
   .collection-options {
     grid-template-columns: 1fr;
+  }
+
+  .recording-heading,
+  .recording-scope {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recording-state {
+    align-self: flex-start;
+  }
+
+  .recording-setup,
+  .recording-live-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .recording-panel button {
+    width: 100%;
   }
 
   .collection-options > div,

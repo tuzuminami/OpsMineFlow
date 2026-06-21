@@ -72,6 +72,23 @@ class EventStore:
         if import_source:
             self.record_import(import_source, import_path, len(self.events))
 
+    def append(self, events: list[StandardEvent]) -> int:
+        existing_ids = {event.event_id for event in self.events}
+        new_events = [event for event in self._filter_events(list(events)) if event.event_id not in existing_ids]
+        if not new_events:
+            return 0
+        self.events.extend(new_events)
+        self.events.sort(key=lambda event: (event.timestamp_start, event.event_id))
+        if self.db_path is not None:
+            with self._connect() as conn:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO events(event_id, payload_json) VALUES(?, ?)",
+                    [(event.event_id, json.dumps(event.to_dict(), ensure_ascii=False)) for event in new_events],
+                )
+                conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)", ("initialized", "true"))
+        self.metadata["initialized"] = "true"
+        return len(new_events)
+
     def set_label(self, event_id: str, label: str) -> None:
         if not any(event.event_id == event_id for event in self.events):
             raise KeyError(event_id)

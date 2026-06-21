@@ -15,11 +15,83 @@ from opsmineflow_api.app import (
     run_diagnostic_checks,
     save_export_artifact,
 )
+from opsmineflow_api.recording import RecordingManager, native_event_from_payload
 from opsmineflow_api.storage import EventStore
 from opsmineflow_mining import load_events_from_csv
 
 
 class ApiLogicTests(unittest.TestCase):
+    def test_native_recording_event_appends_and_persists(self) -> None:
+        session = {
+            "session_id": "rec-test",
+            "case_id": "CASE-RECORDED",
+            "activity_label": "請求処理",
+        }
+        payload = {
+            "session_id": "rec-test",
+            "sequence": 1,
+            "app_name": "Safari",
+            "app_bundle_id": "com.apple.Safari",
+            "timestamp_start": "2026-06-21T01:00:00+00:00",
+            "timestamp_end": "2026-06-21T01:00:10+00:00",
+            "duration_seconds": 10,
+        }
+        event = native_event_from_payload(payload, session)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            store = EventStore(db_path=db_path)
+            self.assertEqual(store.append([event]), 1)
+            self.assertEqual(store.append([event]), 0)
+            reopened = EventStore(db_path=db_path)
+
+        self.assertEqual(len(reopened.events), 1)
+        self.assertEqual(reopened.events[0].activity_raw, "請求処理 / Safari")
+        self.assertEqual(reopened.events[0].app_name, "Safari")
+        self.assertEqual(reopened.events[0].window_title, "")
+
+    def test_native_recording_respects_excluded_apps(self) -> None:
+        session = {"session_id": "rec-test", "case_id": "CASE", "activity_label": "Work"}
+        payload = {
+            "session_id": "rec-test",
+            "sequence": 1,
+            "app_name": "Safari",
+            "app_bundle_id": "com.apple.Safari",
+            "timestamp_start": "2026-06-21T01:00:00+00:00",
+            "timestamp_end": "2026-06-21T01:00:10+00:00",
+            "duration_seconds": 10,
+        }
+        store = EventStore()
+        store.update_settings({"excluded_apps": ["Safari"]})
+
+        self.assertEqual(store.append([native_event_from_payload(payload, session)]), 0)
+        self.assertEqual(store.events, [])
+
+    def test_recording_manager_requires_consent_and_stops_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            agent_path = root / "fake-agent.sh"
+            agent_path.write_text(
+                "#!/bin/bash\n"
+                "while [[ $# -gt 0 ]]; do\n"
+                "  if [[ $1 == --stop-file ]]; then stop_file=$2; shift 2; else shift; fi\n"
+                "done\n"
+                "while [[ ! -e $stop_file ]]; do sleep 0.05; done\n",
+                encoding="utf-8",
+            )
+            agent_path.chmod(0o755)
+            manager = RecordingManager(agent_path=agent_path, platform_name="Darwin")
+            with self.assertRaises(ValueError):
+                manager.start("CASE", "Work", False)
+            with patch.dict("os.environ", {"OPSMINEFLOW_DATA_DIR": str(root), "OPSMINEFLOW_API_PORT": "8765"}):
+                started = manager.start("CASE", "Work", True)
+                with self.assertRaises(PermissionError):
+                    manager.heartbeat("invalid-token", started["session_id"], "Safari")
+                stopped = manager.stop(EventStore())
+
+        self.assertTrue(started["active"])
+        self.assertFalse(stopped["active"])
+
     def test_cors_origins_follow_configured_local_webui_port(self) -> None:
         with patch.dict("os.environ", {"OPSMINEFLOW_WEBUI_PORT": "5273"}):
             origins = allowed_webui_origins()
@@ -65,6 +137,7 @@ class ApiLogicTests(unittest.TestCase):
         self.assertIn("dependencies", snapshot)
         self.assertIn("ports", snapshot)
         self.assertIn("guardrails", snapshot)
+        self.assertIn("recording", snapshot)
         self.assertEqual(snapshot["activitywatch"]["status"], "disabled")
         self.assertTrue(snapshot["runtime_policy"]["local_only"])
         self.assertEqual(snapshot["storage"]["event_count"], 7)

@@ -65,6 +65,20 @@ cd ~/OpsMineFlow && ./scripts/stop_local.sh
 
 The stop script leaves an unrelated listener untouched and reports it as an error. Stop that application yourself, then rerun the start command.
 
+## Mac Recording Is Unavailable
+
+Open **Home > Diagnostics** and check **Mac recording agent**. If it is unavailable, rebuild the local Swift helper:
+
+```bash
+cd ~/OpsMineFlow && ./scripts/install_mac.sh
+cd ~/OpsMineFlow && ./scripts/stop_local.sh
+cd ~/OpsMineFlow && ./scripts/run_local.sh
+```
+
+Recording starts only from **Home > Record work** after a case, work label, and explicit consent are supplied. Opening or reloading the WebUI does not start a session. If an active session appears stuck, choose **Stop recording** before restarting OpsMineFlow.
+
+The recorder intentionally does not request Screen Recording, microphone, camera, or input-monitoring permissions. It records frontmost application names and durations only.
+
 ## Import Preview Fails
 
 - Confirm the file path is local and the file exists.
