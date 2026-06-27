@@ -6,6 +6,7 @@ import platform
 import secrets
 import subprocess
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,10 @@ from typing import Any
 from opsmineflow_mining import build_native_app_event
 
 from .storage import EventStore, default_data_dir, default_store
+
+TOKEN_TTL_SECONDS = 12 * 60 * 60
+INGEST_RATE_WINDOW_SECONDS = 60
+INGEST_RATE_LIMIT = 240
 
 
 def _now_iso() -> str:
@@ -30,6 +35,9 @@ def native_event_from_payload(payload: dict[str, Any], session: dict[str, Any]):
     app_name = str(payload["app_name"]).strip()
     if not app_name or len(app_name) > 200:
         raise ValueError("Frontmost application name is invalid.")
+    sequence = int(payload["sequence"])
+    if sequence < 1:
+        raise ValueError("Recording event sequence is invalid.")
     duration = float(payload["duration_seconds"])
     if duration < 0 or duration > 86400:
         raise ValueError("Recording event duration is invalid.")
@@ -55,9 +63,14 @@ class RecordingManager:
         self._process: subprocess.Popen[bytes] | None = None
         self._log_handle: Any = None
         self._token = ""
+        self._token_issued_at = 0.0
         self._stop_file: Path | None = None
         self._session: dict[str, Any] | None = None
         self._last_error = ""
+        self._seen_sequences: set[int] = set()
+        self._recent_ingest_times: list[float] = []
+        self._agent_version_cache = ""
+        self._agent_version_mtime = 0.0
 
     def availability(self) -> dict[str, Any]:
         supported = self.platform_name == "Darwin"
@@ -67,7 +80,17 @@ class RecordingManager:
             remediation = "Native recording is available only on macOS."
         elif not installed:
             remediation = "Run ./scripts/install_mac.sh to build the local macOS recording agent."
-        return {"supported": supported, "installed": installed, "available": supported and installed, "remediation": remediation}
+        return {
+            "supported": supported,
+            "installed": installed,
+            "available": supported and installed,
+            "remediation": remediation,
+            "agent_path": str(self.agent_path),
+            "agent_version": self._agent_version() if supported and installed else "",
+            "log_path": str(default_data_dir() / "recording-agent.log"),
+            "token_ttl_seconds": TOKEN_TTL_SECONDS,
+            "rate_limit_per_minute": INGEST_RATE_LIMIT,
+        }
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -83,6 +106,7 @@ class RecordingManager:
                     "started_at": "",
                     "current_app": "",
                     "recorded_events": 0,
+                    "last_heartbeat_at": "",
                     "last_error": self._last_error,
                     "capture_scope": "frontmost_app_only",
                 }
@@ -111,6 +135,9 @@ class RecordingManager:
             log_path = default_data_dir() / "recording-agent.log"
             self._log_handle = log_path.open("ab")
             self._token = secrets.token_urlsafe(32)
+            self._token_issued_at = time.monotonic()
+            self._seen_sequences = set()
+            self._recent_ingest_times = []
             environment = dict(os.environ)
             environment["OPSMINEFLOW_RECORDING_TOKEN"] = self._token
             api_port = os.environ.get("OPSMINEFLOW_API_PORT", "8765")
@@ -138,6 +165,7 @@ class RecordingManager:
                 "started_at": _now_iso(),
                 "current_app": "",
                 "recorded_events": 0,
+                "last_heartbeat_at": "",
             }
             return self.status()
 
@@ -146,14 +174,20 @@ class RecordingManager:
             self._authorize(token, session_id)
             assert self._session is not None
             self._session["current_app"] = current_app.strip()[:200]
+            self._session["last_heartbeat_at"] = _now_iso()
             return {"accepted": True}
 
     def ingest(self, token: str, payload: dict[str, Any], store: EventStore | None = None) -> dict[str, Any]:
         with self._lock:
             session_id = str(payload.get("session_id") or "")
             self._authorize(token, session_id)
+            self._enforce_rate_limit()
             assert self._session is not None
+            sequence = int(payload.get("sequence") or 0)
+            if sequence in self._seen_sequences:
+                raise ValueError("Recording event sequence was already accepted.")
             event = native_event_from_payload(payload, self._session)
+            self._seen_sequences.add(sequence)
             active_store = store or default_store()
             appended = active_store.append([event])
             self._session["recorded_events"] = int(self._session["recorded_events"]) + appended
@@ -202,6 +236,18 @@ class RecordingManager:
             raise PermissionError("Recording session token is invalid.")
         if session_id != self._session.get("session_id"):
             raise PermissionError("Recording session is invalid.")
+        if self._token_issued_at and time.monotonic() - self._token_issued_at > TOKEN_TTL_SECONDS:
+            self._last_error = "Recording session token expired."
+            raise PermissionError("Recording session token expired.")
+
+    def _enforce_rate_limit(self) -> None:
+        now = time.monotonic()
+        cutoff = now - INGEST_RATE_WINDOW_SECONDS
+        self._recent_ingest_times = [item for item in self._recent_ingest_times if item >= cutoff]
+        if len(self._recent_ingest_times) >= INGEST_RATE_LIMIT:
+            self._last_error = "Recording event rate limit exceeded."
+            raise PermissionError("Recording event rate limit exceeded.")
+        self._recent_ingest_times.append(now)
 
     def _refresh_process_state(self) -> None:
         if self._process is None or self._process.poll() is None:
@@ -216,12 +262,37 @@ class RecordingManager:
     def _cleanup_process(self) -> None:
         self._process = None
         self._token = ""
+        self._token_issued_at = 0.0
+        self._recent_ingest_times = []
         if self._stop_file is not None:
             self._stop_file.unlink(missing_ok=True)
         self._stop_file = None
         if self._log_handle is not None:
             self._log_handle.close()
         self._log_handle = None
+
+    def _agent_version(self) -> str:
+        try:
+            mtime = self.agent_path.stat().st_mtime
+        except OSError:
+            return ""
+        if self._agent_version_cache and self._agent_version_mtime == mtime:
+            return self._agent_version_cache
+        try:
+            result = subprocess.run(
+                [str(self.agent_path), "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except Exception:
+            return "unknown"
+        output = (result.stdout or result.stderr).strip()
+        version = output if result.returncode == 0 and output else "unknown"
+        self._agent_version_cache = version
+        self._agent_version_mtime = mtime
+        return version
 
 
 recording_manager = RecordingManager()

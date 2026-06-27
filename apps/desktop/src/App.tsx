@@ -77,6 +77,26 @@ const tabs: Array<{ id: Tab; label: TranslationKey }> = [
   { id: "settings", label: "nav.settings" }
 ];
 
+const RECORDING_TEMPLATES_KEY = "opsmineflow.recordingTemplates";
+
+function loadRecordingTemplates(): string[] {
+  try {
+    const raw = window.localStorage.getItem(RECORDING_TEMPLATES_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string" && item.trim()).slice(0, 8) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecordingTemplates(templates: string[]) {
+  try {
+    window.localStorage.setItem(RECORDING_TEMPLATES_KEY, JSON.stringify(templates.slice(0, 8)));
+  } catch {
+    // The template list is a browser convenience; recording still works without localStorage.
+  }
+}
+
 export function App() {
   const { language, setLanguage, t } = useI18n();
   const [activeTab, setActiveTab] = useState<Tab>("home");
@@ -283,7 +303,7 @@ export function App() {
       {actionMessage ? <div className="action-message">{actionMessage}</div> : null}
       {loading && !data ? <div className="loading">{t("message.loading")}</div> : null}
 
-      {data ? <View tab={activeTab} data={data} actions={actions} working={working || loading} onStart={openCollection} /> : null}
+      {data ? <View tab={activeTab} data={data} actions={actions} working={working || loading} onStart={openCollection} onNavigate={setActiveTab} /> : null}
     </main>
   );
 }
@@ -293,15 +313,17 @@ function View({
   data,
   actions,
   working,
-  onStart
+  onStart,
+  onNavigate
 }: {
   tab: Tab;
   data: DashboardData;
   actions: AppActions;
   working: boolean;
   onStart: () => void;
+  onNavigate: (tab: Tab) => void;
 }) {
-  if (tab === "home") return <HomeView data={data} actions={actions} working={working} />;
+  if (tab === "home") return <HomeView data={data} actions={actions} working={working} onNavigate={onNavigate} />;
   if (data.events.length === 0 && tab !== "settings") return <EmptyDataView onStart={onStart} />;
   if (tab === "events") return <EventsView events={data.events} />;
   if (tab === "process") return <ProcessView processMap={data.processMap} events={data.events} />;
@@ -354,7 +376,17 @@ function downloadExport(
   return filename;
 }
 
-function HomeView({ data, actions, working }: { data: DashboardData; actions: AppActions; working: boolean }) {
+function HomeView({
+  data,
+  actions,
+  working,
+  onNavigate
+}: {
+  data: DashboardData;
+  actions: AppActions;
+  working: boolean;
+  onNavigate: (tab: Tab) => void;
+}) {
   const { formatDateTime, t } = useI18n();
   const [format, setFormat] = useState<"csv" | "json">("csv");
   const [path, setPath] = useState("");
@@ -377,6 +409,16 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
 
   return (
     <section className="home-grid">
+      <OnboardingPanel
+        data={data}
+        onRecord={() => document.getElementById("record-work")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+        onImport={() => {
+          setCollectionOpen(true);
+          window.setTimeout(() => document.getElementById("import-panel")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+        }}
+        onAnalyze={() => onNavigate("dashboard")}
+        onExport={() => document.getElementById("export-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+      />
       <RecordingPanel data={data} actions={actions} working={working} />
 
       <section className="collection-intro" id="collection-start">
@@ -485,7 +527,7 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
         ) : null}
       </section>
 
-      <section className="operation-panel">
+      <section className="operation-panel" id="export-panel">
         <div className="panel-heading">
           <h2>{t("export.title")}</h2>
           <span>{exportPreview ? t("export.bytes", { count: exportPreview.byte_size }) : t("export.localOnly")}</span>
@@ -601,6 +643,7 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
             label={t("diagnostics.recording")}
             value={data.diagnostics.recording.available ? t("status.available") : t("status.unavailable")}
           />
+          <RecordingDiagnosticDetails status={data.diagnostics.recording} />
           <Setting label={t("diagnostics.activitywatch")} value={`${data.diagnostics.activitywatch.enabled ? t("status.enabled") : localizeStatus("disabled", t)} / ${localizeStatus(data.diagnostics.activitywatch.status, t)}`} />
           <Setting label={t("diagnostics.external")} value={localizeStatus(data.diagnostics.runtime_policy.external_network, t)} />
           {Object.entries(data.diagnostics.dependencies).map(([name, item]) => (
@@ -610,6 +653,7 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
             <Setting key={name} label={t("diagnostics.port", { name })} value={`${item.host}:${item.port} / ${localizeStatus(item.status, t)}`} />
           ))}
         </div>
+        <PrivacyEvidencePanel data={data} />
         {diagnosticChecks ? (
           <div className="check-results">
             {Object.entries(diagnosticChecks).map(([name, result]) => (
@@ -648,12 +692,70 @@ function HomeView({ data, actions, working }: { data: DashboardData; actions: Ap
   );
 }
 
+function OnboardingPanel({
+  data,
+  onRecord,
+  onImport,
+  onAnalyze,
+  onExport
+}: {
+  data: DashboardData;
+  onRecord: () => void;
+  onImport: () => void;
+  onAnalyze: () => void;
+  onExport: () => void;
+}) {
+  const { t } = useI18n();
+  const sampleDataLoaded = data.events.length > 0 && data.importHistory.length === 0;
+  const hasEvents = data.events.length > 0;
+  const nextTitle = data.recording.active
+    ? t("onboarding.next.stop")
+    : sampleDataLoaded
+      ? t("onboarding.next.sample")
+      : hasEvents
+        ? t("onboarding.next.analyze")
+        : t("onboarding.next.collect");
+
+  return (
+    <section className="onboarding-panel" aria-label={t("onboarding.title")}>
+      <div className="onboarding-heading">
+        <span>{t("onboarding.kicker")}</span>
+        <h2>{t("onboarding.title")}</h2>
+        <p>{t("onboarding.body")}</p>
+      </div>
+      <div className="next-action-strip">
+        <strong>{t("onboarding.nextLabel")}</strong>
+        <span>{nextTitle}</span>
+      </div>
+      <div className="next-action-grid">
+        <button onClick={onRecord}>
+          <b>{t("onboarding.recordTitle")}</b>
+          <span>{t("onboarding.recordBody")}</span>
+        </button>
+        <button onClick={onImport}>
+          <b>{t("onboarding.importTitle")}</b>
+          <span>{t("onboarding.importBody")}</span>
+        </button>
+        <button onClick={onAnalyze} disabled={!hasEvents}>
+          <b>{t("onboarding.analyzeTitle")}</b>
+          <span>{hasEvents ? t("onboarding.analyzeBody") : t("onboarding.analyzeDisabled")}</span>
+        </button>
+        <button onClick={onExport} disabled={!hasEvents}>
+          <b>{t("onboarding.exportTitle")}</b>
+          <span>{hasEvents ? t("onboarding.exportBody") : t("onboarding.exportDisabled")}</span>
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function RecordingPanel({ data, actions, working }: { data: DashboardData; actions: AppActions; working: boolean }) {
   const { t } = useI18n();
   const [caseId, setCaseId] = useState(() => `WORK-${new Date().toISOString().slice(0, 10)}`);
   const [activityLabel, setActivityLabel] = useState("");
   const [consent, setConsent] = useState(false);
   const [clock, setClock] = useState(Date.now());
+  const [templates, setTemplates] = useState<string[]>(loadRecordingTemplates);
   const status = data.recording;
   const sampleDataLoaded = data.events.length > 0 && data.importHistory.length === 0;
 
@@ -668,7 +770,7 @@ function RecordingPanel({ data, actions, working }: { data: DashboardData; actio
     : 0;
 
   return (
-    <section className={status.active ? "recording-panel is-recording" : "recording-panel"} aria-live="polite">
+    <section id="record-work" className={status.active ? "recording-panel is-recording" : "recording-panel"} aria-live="polite">
       <div className="recording-heading">
         <div>
           <span className="recording-kicker">{t("recording.kicker")}</span>
@@ -697,8 +799,42 @@ function RecordingPanel({ data, actions, working }: { data: DashboardData; actio
           </label>
           <label>
             <span>{t("recording.workLabel")}</span>
-            <input value={activityLabel} onChange={(event) => setActivityLabel(event.target.value)} placeholder={t("recording.workPlaceholder")} disabled={working} />
+            <div className="input-with-button">
+              <input value={activityLabel} onChange={(event) => setActivityLabel(event.target.value)} placeholder={t("recording.workPlaceholder")} disabled={working} />
+              <button
+                type="button"
+                className="secondary-recording-button"
+                onClick={() => {
+                  const normalized = activityLabel.trim();
+                  if (!normalized) return;
+                  const next = [normalized, ...templates.filter((item) => item !== normalized)].slice(0, 8);
+                  setTemplates(next);
+                  saveRecordingTemplates(next);
+                }}
+                disabled={working || !activityLabel.trim()}
+              >
+                {t("recording.saveTemplate")}
+              </button>
+            </div>
           </label>
+          {templates.length > 0 ? (
+            <div className="recording-templates">
+              <span>{t("recording.templates")}</span>
+              <div>
+                {templates.map((template) => (
+                  <button key={template} type="button" className="template-chip" onClick={() => setActivityLabel(template)} disabled={working}>
+                    {template}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          <div className="recording-preflight">
+            <strong>{t("recording.preflightTitle")}</strong>
+            <span>{status.available ? t("recording.preflightAgentReady") : t("recording.preflightAgentMissing")}</span>
+            <span>{t("recording.preflightStorage", { mode: data.diagnostics.storage.storage_mode })}</span>
+            <span>{data.settings.excluded_apps.length > 0 ? t("recording.preflightExcludedApps", { count: data.settings.excluded_apps.length }) : t("recording.preflightNoExcludedApps")}</span>
+          </div>
           <label className="recording-consent">
             <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} disabled={working || !status.available} />
             <span>{t("recording.consent")}</span>
@@ -722,6 +858,42 @@ function RecordingPanel({ data, actions, working }: { data: DashboardData; actio
       </div>
       {!status.available ? <div className="api-warning">{status.remediation || t("recording.unavailable")}</div> : null}
       {status.last_error ? <div className="api-warning">{status.last_error}</div> : null}
+    </section>
+  );
+}
+
+function RecordingDiagnosticDetails({ status }: { status: RecordingStatus }) {
+  const { formatDateTime, t } = useI18n();
+  return (
+    <div className="recording-diagnostic-card">
+      <Setting label={t("diagnostics.agentVersion")} value={status.agent_version || t("status.unknown")} />
+      <Setting label={t("diagnostics.agentPath")} value={status.agent_path || "-"} />
+      <Setting label={t("diagnostics.agentLog")} value={status.log_path || "-"} />
+      <Setting label={t("diagnostics.heartbeat")} value={status.last_heartbeat_at ? formatDateTime(status.last_heartbeat_at) : t("status.notChecked")} />
+      <Setting label={t("diagnostics.captureScope")} value={status.capture_scope} />
+      <Setting label={t("diagnostics.sessionSafety")} value={t("diagnostics.sessionSafetyValue", { minutes: Math.round((status.token_ttl_seconds || 0) / 60), count: status.rate_limit_per_minute || 0 })} />
+      {status.remediation ? <p>{status.remediation}</p> : null}
+    </div>
+  );
+}
+
+function PrivacyEvidencePanel({ data }: { data: DashboardData }) {
+  const { t } = useI18n();
+  return (
+    <section className="privacy-evidence">
+      <div>
+        <h3>{t("privacyEvidence.title")}</h3>
+        <p>{data.diagnostics.privacy_evidence.summary}</p>
+      </div>
+      <div className="privacy-evidence-grid">
+        {data.diagnostics.privacy_evidence.items.map((item) => (
+          <article key={item.name}>
+            <b>{t(`privacyEvidence.${item.name}` as TranslationKey)}</b>
+            <span>{localizeStatus(item.status, t)}</span>
+            <p>{item.evidence}</p>
+          </article>
+        ))}
+      </div>
     </section>
   );
 }
@@ -1225,6 +1397,7 @@ function localizeStatus(status: string, t: Translate): string {
     unavailable: "status.unavailable",
     blocked: "status.blocked",
     blocked_by_policy: "status.blocked",
+    not_collected: "status.notCollected",
     not_checked: "status.notChecked",
     reachable: "status.reachable",
     installed: "status.installed",

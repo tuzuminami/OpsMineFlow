@@ -95,6 +95,7 @@ export type Diagnostics = {
     enabled: boolean;
   };
   recording: RecordingStatus;
+  privacy_evidence: PrivacyEvidence;
   guardrails: Record<string, DiagnosticItem & { command: string }>;
   runtime_policy: {
     local_only: boolean;
@@ -110,6 +111,11 @@ export type RecordingStatus = {
   installed: boolean;
   available: boolean;
   remediation: string;
+  agent_path: string;
+  agent_version: string;
+  log_path: string;
+  token_ttl_seconds: number;
+  rate_limit_per_minute: number;
   active: boolean;
   session_id: string;
   case_id: string;
@@ -117,8 +123,20 @@ export type RecordingStatus = {
   started_at: string;
   current_app: string;
   recorded_events: number;
+  last_heartbeat_at: string;
   last_error: string;
   capture_scope: "frontmost_app_only";
+};
+
+export type PrivacyEvidence = {
+  status: string;
+  capture_scope: string;
+  summary: string;
+  items: Array<{
+    name: string;
+    status: string;
+    evidence: string;
+  }>;
 };
 
 export type DiagnosticItem = {

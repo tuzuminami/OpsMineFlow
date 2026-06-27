@@ -3,6 +3,13 @@ import CoreGraphics
 import Darwin
 import Foundation
 
+private let agentVersion = "0.1.0"
+
+if CommandLine.arguments.contains("--version") {
+    print("opsmineflow-agent \(agentVersion)")
+    exit(0)
+}
+
 private struct Configuration {
     let apiPort: Int
     let sessionID: String
