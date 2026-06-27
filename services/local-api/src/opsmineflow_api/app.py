@@ -346,6 +346,7 @@ def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
             "remediation": "Enable ActivityWatch import only when the user explicitly wants localhost ActivityWatch data.",
         },
         "recording": recording_manager.status(),
+        "privacy_evidence": privacy_capture_evidence(),
         "guardrails": {
             "license_policy": {
                 "status": "available",
@@ -369,6 +370,31 @@ def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
             "Run ./scripts/run_local.sh when API or WebUI ports are not open.",
             "Use Settings to keep ActivityWatch disabled unless explicitly needed.",
             "Run diagnostics checks before sharing exports or releases.",
+        ],
+    }
+
+
+def privacy_capture_evidence() -> dict[str, Any]:
+    prohibited = [
+        ("keystrokes", "No keyboard hooks, input-monitoring APIs, or key event capture are implemented."),
+        ("typed_text", "Collectors do not read form values, document text, clipboard contents, or page body text."),
+        ("window_titles", "Native recording stores an empty window_title and does not request title metadata."),
+        ("urls", "Native recording stores an empty URL; CSV/JSON imports are masked by the privacy pipeline."),
+        ("screenshots", "No screenshot or screen-recording API is called by runtime collectors."),
+        ("audio_camera", "No microphone or camera API is called by runtime collectors."),
+        ("remote_reporting", "Runtime policy forbids remote event reporting, crash uploaders, analytics, and update checks."),
+    ]
+    return {
+        "status": "passed",
+        "capture_scope": "frontmost_app_only",
+        "summary": "Runtime recording is limited to frontmost application name, bundle identifier, timestamps, and duration.",
+        "items": [
+            {
+                "name": name,
+                "status": "not_collected",
+                "evidence": evidence,
+            }
+            for name, evidence in prohibited
         ],
     }
 

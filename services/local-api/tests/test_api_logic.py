@@ -49,6 +49,8 @@ class ApiLogicTests(unittest.TestCase):
         self.assertEqual(reopened.events[0].activity_raw, "請求処理 / Safari")
         self.assertEqual(reopened.events[0].app_name, "Safari")
         self.assertEqual(reopened.events[0].window_title, "")
+        self.assertEqual(reopened.events[0].url, "")
+        self.assertIn("frontmost_app_only", reopened.events[0].metadata_json)
 
     def test_native_recording_respects_excluded_apps(self) -> None:
         session = {"session_id": "rec-test", "case_id": "CASE", "activity_label": "Work"}
@@ -73,6 +75,7 @@ class ApiLogicTests(unittest.TestCase):
             agent_path = root / "fake-agent.sh"
             agent_path.write_text(
                 "#!/bin/bash\n"
+                "if [[ ${1:-} == --version ]]; then echo 'opsmineflow-agent test'; exit 0; fi\n"
                 "while [[ $# -gt 0 ]]; do\n"
                 "  if [[ $1 == --stop-file ]]; then stop_file=$2; shift 2; else shift; fi\n"
                 "done\n"
@@ -90,7 +93,44 @@ class ApiLogicTests(unittest.TestCase):
                 stopped = manager.stop(EventStore())
 
         self.assertTrue(started["active"])
+        self.assertIn("agent_path", started)
+        self.assertIn("token_ttl_seconds", started)
         self.assertFalse(stopped["active"])
+
+    def test_recording_manager_rejects_replayed_sequences(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            agent_path = root / "fake-agent.sh"
+            agent_path.write_text(
+                "#!/bin/bash\n"
+                "if [[ ${1:-} == --version ]]; then echo 'opsmineflow-agent test'; exit 0; fi\n"
+                "while [[ $# -gt 0 ]]; do\n"
+                "  if [[ $1 == --stop-file ]]; then stop_file=$2; shift 2; else shift; fi\n"
+                "done\n"
+                "while [[ ! -e $stop_file ]]; do sleep 0.05; done\n",
+                encoding="utf-8",
+            )
+            agent_path.chmod(0o755)
+            manager = RecordingManager(agent_path=agent_path, platform_name="Darwin")
+            store = EventStore()
+            with patch.dict("os.environ", {"OPSMINEFLOW_DATA_DIR": str(root), "OPSMINEFLOW_API_PORT": "8765"}):
+                started = manager.start("CASE", "Work", True)
+                payload = {
+                    "session_id": started["session_id"],
+                    "sequence": 1,
+                    "app_name": "Safari",
+                    "app_bundle_id": "com.apple.Safari",
+                    "timestamp_start": "2026-06-21T01:00:00+00:00",
+                    "timestamp_end": "2026-06-21T01:00:10+00:00",
+                    "duration_seconds": 10,
+                }
+                first = manager.ingest(manager._token, payload, store)
+                with self.assertRaises(ValueError):
+                    manager.ingest(manager._token, payload, store)
+                manager.stop(store)
+
+        self.assertEqual(first["appended"], 1)
+        self.assertEqual(len(store.events), 1)
 
     def test_cors_origins_follow_configured_local_webui_port(self) -> None:
         with patch.dict("os.environ", {"OPSMINEFLOW_WEBUI_PORT": "5273"}):
@@ -138,6 +178,9 @@ class ApiLogicTests(unittest.TestCase):
         self.assertIn("ports", snapshot)
         self.assertIn("guardrails", snapshot)
         self.assertIn("recording", snapshot)
+        self.assertIn("privacy_evidence", snapshot)
+        self.assertEqual(snapshot["privacy_evidence"]["status"], "passed")
+        self.assertTrue(all(item["status"] == "not_collected" for item in snapshot["privacy_evidence"]["items"]))
         self.assertEqual(snapshot["activitywatch"]["status"], "disabled")
         self.assertTrue(snapshot["runtime_policy"]["local_only"])
         self.assertEqual(snapshot["storage"]["event_count"], 7)

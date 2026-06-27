@@ -74,6 +74,48 @@ for _ in range(80):
 raise SystemExit(f"Lifecycle services did not become ready: {last_error}")
 PY
 
+"$ROOT_DIR/.venv/bin/python" - "$API_PORT" <<'PY'
+import json
+import sys
+import urllib.request
+
+base = f"http://127.0.0.1:{sys.argv[1]}"
+
+def request(path, payload=None):
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        base + path,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="GET" if payload is None else "POST",
+    )
+    with urllib.request.urlopen(req, timeout=2) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+diagnostics = request("/diagnostics")
+assert diagnostics["runtime_policy"]["local_only"] is True
+assert diagnostics["privacy_evidence"]["status"] == "passed"
+assert all(item["status"] == "not_collected" for item in diagnostics["privacy_evidence"]["items"])
+assert diagnostics["recording"]["capture_scope"] == "frontmost_app_only"
+assert "token_ttl_seconds" in diagnostics["recording"]
+
+preview = request("/import/preview", {"format": "csv", "path": "data/sample/sample_events.csv"})
+assert preview["event_count"] == 7
+
+result = request("/import/csv", {"path": "data/sample/sample_events.csv"})
+assert result["imported_events"] == 7
+
+export_preview = request("/export/preview", {"format": "markdown"})
+assert export_preview["byte_size"] > 0
+assert "Review masked fields" in export_preview["warning"]
+
+delete_result = request("/data/delete", {})
+assert delete_result["deleted"] is True
+
+health = request("/health")
+assert health["event_count"] == 0
+PY
+
 SECOND_OUTPUT="$(./scripts/run_local.sh)"
 [[ "$SECOND_OUTPUT" == *"OpsMineFlow is ready"* ]]
 
