@@ -118,6 +118,7 @@ class SettingsRequest(BaseModel):  # type: ignore[misc, valid-type]
 class AutomationReviewRequest(BaseModel):  # type: ignore[misc, valid-type]
     activity: str
     status: str
+    note: str = ""
 
 
 class ExportPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
@@ -170,7 +171,7 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     metrics = calculate_duration_metrics(events)
     process_map = build_directly_follows_graph(events)
     store_diagnostics = active_store.diagnostics()
-    automation_candidates = apply_automation_reviews(score_automation_candidates(events), active_store)
+    automation_candidates = apply_automation_reviews(score_automation_candidates(events), active_store, events)
     return {
         "health": {
             "status": "ok",
@@ -194,24 +195,166 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     }
 
 
-def apply_automation_reviews(candidates: list[dict[str, object]], store: EventStore) -> list[dict[str, object]]:
+def apply_automation_reviews(
+    candidates: list[dict[str, object]],
+    store: EventStore,
+    events: list[Any],
+) -> list[dict[str, object]]:
+    activity_profiles = _automation_activity_profiles(events)
     reviewed: list[dict[str, object]] = []
     for candidate in candidates:
         item = dict(candidate)
         activity = str(item.get("activity", ""))
+        item.update(_automation_portfolio_fields(item, activity_profiles.get(activity, {})))
         item["review_status"] = store.automation_reviews.get(activity, "unreviewed")
+        item["review_note"] = store.automation_review_notes.get(activity, "")
         reviewed.append(item)
     return reviewed
 
 
+def _automation_activity_profiles(events: list[Any]) -> dict[str, dict[str, object]]:
+    profiles: dict[str, dict[str, object]] = {}
+    for event in events:
+        activity = str(event.activity_raw)
+        profile = profiles.setdefault(activity, {"total_seconds": 0.0, "durations": [], "confidential_count": 0})
+        profile["total_seconds"] = float(profile["total_seconds"]) + float(event.duration_seconds)
+        durations = profile["durations"]
+        if isinstance(durations, list):
+            durations.append(float(event.duration_seconds))
+        if bool(event.confidential_flag):
+            profile["confidential_count"] = int(profile["confidential_count"]) + 1
+    return profiles
+
+
+def _automation_portfolio_fields(candidate: dict[str, object], profile: dict[str, object]) -> dict[str, object]:
+    classification = str(candidate.get("classification", "improvement_review"))
+    frequency = int(candidate.get("frequency", 0) or 0)
+    score = float(candidate.get("automation_score", 0.0) or 0.0)
+    component_scores = candidate.get("component_scores", {})
+    if not isinstance(component_scores, dict):
+        component_scores = {}
+    total_seconds = float(profile.get("total_seconds", 0.0) or 0.0)
+    confidential_count = int(profile.get("confidential_count", 0) or 0)
+    savings_ratio = _automation_savings_ratio(classification, component_scores)
+    estimated_minutes = round(total_seconds * savings_ratio / 60, 1)
+    impact_score = min(100, round(score * 100 + min(estimated_minutes, 30)))
+    difficulty_score = _automation_difficulty_score(classification, frequency, component_scores)
+    risk_score = _automation_risk_score(classification, confidential_count, component_scores)
+    return {
+        "impact_score": impact_score,
+        "estimated_time_savings_minutes": estimated_minutes,
+        "implementation_difficulty": _score_level(difficulty_score, low=45, high=70),
+        "implementation_difficulty_score": difficulty_score,
+        "risk_level": _score_level(risk_score, low=35, high=65),
+        "risk_score": risk_score,
+        "required_data": _automation_required_data(classification, component_scores),
+        "recommended_action": _automation_recommended_action(classification),
+        "portfolio_quadrant": _automation_quadrant(impact_score, difficulty_score),
+    }
+
+
+def _automation_savings_ratio(classification: str, component_scores: dict[object, object]) -> float:
+    if classification == "rpa":
+        return 0.45
+    if classification == "system_change":
+        return 0.35
+    if classification == "operations_rule_change":
+        return 0.25
+    if float(component_scores.get("manual_transfer_risk_score", 0.0) or 0.0) >= 1.0:
+        return 0.35
+    return 0.2
+
+
+def _automation_difficulty_score(classification: str, frequency: int, component_scores: dict[object, object]) -> int:
+    base_scores = {
+        "operations_rule_change": 30,
+        "improvement_review": 45,
+        "rpa": 60,
+        "system_change": 75,
+    }
+    score = base_scores.get(classification, 50)
+    if frequency <= 1:
+        score += 10
+    if float(component_scores.get("system_handover_score", 0.0) or 0.0) >= 1.0 and classification != "system_change":
+        score += 8
+    return min(score, 100)
+
+
+def _automation_risk_score(classification: str, confidential_count: int, component_scores: dict[object, object]) -> int:
+    base_scores = {
+        "operations_rule_change": 25,
+        "improvement_review": 35,
+        "rpa": 50,
+        "system_change": 65,
+    }
+    score = base_scores.get(classification, 40)
+    if confidential_count:
+        score += 20
+    if float(component_scores.get("manual_transfer_risk_score", 0.0) or 0.0) >= 1.0:
+        score += 10
+    return min(score, 100)
+
+
+def _score_level(score: int, low: int, high: int) -> str:
+    if score <= low:
+        return "low"
+    if score >= high:
+        return "high"
+    return "medium"
+
+
+def _automation_required_data(classification: str, component_scores: dict[object, object]) -> list[str]:
+    required = ["event_samples", "volume_frequency"]
+    if classification == "rpa" or float(component_scores.get("manual_transfer_risk_score", 0.0) or 0.0) >= 1.0:
+        required.append("source_destination_fields")
+    if classification == "system_change":
+        required.extend(["system_owner", "interface_constraints"])
+    if classification == "operations_rule_change":
+        required.append("current_rule")
+    required.append("exception_cases")
+    return required
+
+
+def _automation_recommended_action(classification: str) -> str:
+    actions = {
+        "rpa": "rpa_assessment",
+        "system_change": "system_integration_review",
+        "operations_rule_change": "standardize_rule",
+        "improvement_review": "process_review",
+    }
+    return actions.get(classification, "process_review")
+
+
+def _automation_quadrant(impact_score: int, difficulty_score: int) -> str:
+    if impact_score >= 70 and difficulty_score <= 50:
+        return "quick_win"
+    if impact_score >= 70:
+        return "strategic"
+    if difficulty_score <= 50:
+        return "low_effort"
+    return "evaluate_later"
+
+
 def append_automation_review_section(markdown: str, candidates: list[dict[str, object]]) -> str:
-    lines = [markdown.rstrip(), "", "## Automation Review Status"]
+    lines = [markdown.rstrip(), "", "## Automation Priority Portfolio"]
     if not candidates:
         lines.append("- No automation candidates found.")
+    else:
+        lines.append("| Activity | Review | Impact | Difficulty | Risk | Est. saved min | Recommended action | Note |")
+        lines.append("|---|---|---:|---|---|---:|---|---|")
+    for item in candidates[:10]:
+        lines.append(
+            f'| {item["activity"]} | {item["review_status"]} | {item["impact_score"]} | '
+            f'{item["implementation_difficulty"]} | {item["risk_level"]} | '
+            f'{item["estimated_time_savings_minutes"]} | {item["recommended_action"]} | '
+            f'{str(item.get("review_note", "")).replace("|", "/")} |'
+        )
+    lines.extend(["", "## Automation Review Status"])
     for item in candidates[:10]:
         lines.append(
             f'- {item["activity"]}: review {item["review_status"]}, '
-            f'score {float(item["automation_score"]):.2f}, frequency {item["frequency"]}'
+            f'score {float(item["automation_score"]):.2f}, frequency {item["frequency"]}, '
+            f'impact {item["impact_score"]}, difficulty {item["implementation_difficulty"]}, risk {item["risk_level"]}'
         )
     return "\n".join(lines) + "\n"
 
@@ -1102,7 +1245,7 @@ if app is not None:
     @app.post("/automation/review")
     def automation_review(request: AutomationReviewRequest) -> dict[str, str]:
         try:
-            return default_store().set_automation_review(request.activity, request.status)
+            return default_store().set_automation_review(request.activity, request.status, request.note)
         except ValueError as exc:
             raise _bad_request(str(exc))
 

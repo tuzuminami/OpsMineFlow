@@ -210,6 +210,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     default_store().set_automation_review(
                         str(payload.get("activity") or ""),
                         str(payload.get("status") or ""),
+                        str(payload.get("note") or ""),
                     )
                 )
                 return

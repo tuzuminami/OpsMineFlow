@@ -42,6 +42,7 @@ class EventStore:
     metadata: dict[str, str] = field(default_factory=dict)
     import_history: list[dict[str, object]] = field(default_factory=list)
     automation_reviews: dict[str, str] = field(default_factory=dict)
+    automation_review_notes: dict[str, str] = field(default_factory=dict)
     db_path: Path | None = None
 
     def __post_init__(self) -> None:
@@ -235,6 +236,7 @@ class EventStore:
         self.events = []
         self.manual_labels = {}
         self.automation_reviews = {}
+        self.automation_review_notes = {}
         if self.db_path is None:
             self.import_history = []
             return
@@ -247,27 +249,30 @@ class EventStore:
         self.import_history = []
         self.metadata["initialized"] = "true"
 
-    def set_automation_review(self, activity: str, status: str) -> dict[str, str]:
+    def set_automation_review(self, activity: str, status: str, note: str = "") -> dict[str, str]:
         normalized_activity = activity.strip()
         normalized_status = status.strip().casefold()
+        normalized_note = note.strip()
         if not normalized_activity:
             raise ValueError("Automation activity is required.")
         if normalized_status not in AUTOMATION_REVIEW_STATUSES:
             raise ValueError("Review status must be unreviewed, adopted, on_hold, or rejected.")
-        if normalized_status == "unreviewed":
+        if normalized_status == "unreviewed" and not normalized_note:
             self.automation_reviews.pop(normalized_activity, None)
+            self.automation_review_notes.pop(normalized_activity, None)
         else:
             self.automation_reviews[normalized_activity] = normalized_status
+            self.automation_review_notes[normalized_activity] = normalized_note
         if self.db_path is not None:
             with self._connect() as conn:
-                if normalized_status == "unreviewed":
+                if normalized_status == "unreviewed" and not normalized_note:
                     conn.execute("DELETE FROM automation_reviews WHERE activity = ?", (normalized_activity,))
                 else:
                     conn.execute(
-                        "INSERT OR REPLACE INTO automation_reviews(activity, status, updated_at) VALUES(?, ?, ?)",
-                        (normalized_activity, normalized_status, datetime.now(timezone.utc).isoformat()),
+                        "INSERT OR REPLACE INTO automation_reviews(activity, status, note, updated_at) VALUES(?, ?, ?, ?)",
+                        (normalized_activity, normalized_status, normalized_note, datetime.now(timezone.utc).isoformat()),
                     )
-        return {"activity": normalized_activity, "review_status": normalized_status}
+        return {"activity": normalized_activity, "review_status": normalized_status, "review_note": normalized_note}
 
     def get_settings(self) -> dict[str, object]:
         return dict(self.settings)
@@ -427,10 +432,14 @@ class EventStore:
                 CREATE TABLE IF NOT EXISTS automation_reviews (
                     activity TEXT PRIMARY KEY,
                     status TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(automation_reviews)").fetchall()}
+            if "note" not in columns:
+                conn.execute("ALTER TABLE automation_reviews ADD COLUMN note TEXT NOT NULL DEFAULT ''")
 
     def _load(self) -> None:
         with self._connect() as conn:
@@ -438,7 +447,7 @@ class EventStore:
             label_rows = conn.execute("SELECT event_id, label FROM manual_labels ORDER BY event_id").fetchall()
             setting_rows = conn.execute("SELECT key, value_json FROM settings ORDER BY key").fetchall()
             metadata_rows = conn.execute("SELECT key, value FROM metadata ORDER BY key").fetchall()
-            review_rows = conn.execute("SELECT activity, status FROM automation_reviews ORDER BY activity").fetchall()
+            review_rows = conn.execute("SELECT activity, status, note FROM automation_reviews ORDER BY activity").fetchall()
             import_rows = conn.execute(
                 "SELECT id, source, path, event_count, imported_at FROM import_history ORDER BY id"
             ).fetchall()
@@ -449,7 +458,12 @@ class EventStore:
             if key in DEFAULT_SETTINGS:
                 self.settings[str(key)] = json.loads(value_json)
         self.metadata = {str(key): str(value) for key, value in metadata_rows}
-        self.automation_reviews = {str(activity): str(status) for activity, status in review_rows}
+        self.automation_reviews = {str(activity): str(status) for activity, status, _note in review_rows}
+        self.automation_review_notes = {
+            str(activity): str(note)
+            for activity, _status, note in review_rows
+            if str(note).strip()
+        }
         self.import_history = [
             {
                 "id": int(row_id),
