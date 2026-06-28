@@ -20,6 +20,7 @@ export type EventRecord = {
   timestamp_end: string;
   duration_seconds: number;
   confidential_flag: boolean;
+  quality_review_status: string;
 };
 
 export type Summary = {
@@ -69,6 +70,43 @@ export type AutomationCandidate = {
 export type AppSwitching = {
   transition_ranking: Array<{ source_app: string; target_app: string; count: number }>;
   round_trips: Array<{ pattern: string; count: number }>;
+};
+
+export type EventQualityIssue = {
+  code: string;
+  severity: string;
+  label: string;
+  remediation: string;
+};
+
+export type EventQualityItem = {
+  event_id: string;
+  case_id: string;
+  activity: string;
+  app_name: string;
+  timestamp_start: string;
+  timestamp_end: string;
+  duration_seconds: number;
+  quality_review_status: string;
+  issues: EventQualityIssue[];
+  recommended_action: string;
+};
+
+export type EventQualityReport = {
+  summary: {
+    total_events: number;
+    affected_event_count: number;
+    issue_count: number;
+    approved_count: number;
+    missing_fields: number;
+    invalid_time: number;
+    zero_duration: number;
+    short_duration: number;
+    long_duration: number;
+    unlabeled: number;
+    low_confidence: number;
+  };
+  items: EventQualityItem[];
 };
 
 export type Diagnostics = {

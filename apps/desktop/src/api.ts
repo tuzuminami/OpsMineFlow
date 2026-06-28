@@ -7,6 +7,7 @@ import type {
   DiagnosticChecks,
   Diagnostics,
   EventRecord,
+  EventQualityReport,
   ExportFormat,
   ExportPreview,
   ExportSaveResult,
@@ -48,13 +49,14 @@ async function postJson<T>(path: string, payload: unknown = {}): Promise<T> {
 }
 
 export async function loadDashboardData() {
-  const [health, diagnostics, recording, settings, importHistory, events, summary, processMap, candidates, appSwitching, report] = await Promise.all([
+  const [health, diagnostics, recording, settings, importHistory, events, quality, summary, processMap, candidates, appSwitching, report] = await Promise.all([
     getJson<Health>("/health"),
     getJson<Diagnostics>("/diagnostics"),
     getJson<RecordingStatus>("/recording/status"),
     getJson<AppSettings>("/settings"),
     getJson<ImportHistoryEntry[]>("/import/history"),
     getJson<EventRecord[]>("/events"),
+    getJson<EventQualityReport>("/analytics/event-quality"),
     getJson<Summary>("/analytics/summary"),
     getJson<ProcessMap>("/analytics/process-map"),
     getJson<AutomationCandidate[]>("/analytics/automation-candidates"),
@@ -69,6 +71,7 @@ export async function loadDashboardData() {
     settings,
     importHistory,
     events,
+    quality,
     summary,
     processMap,
     candidates,
@@ -140,6 +143,10 @@ export async function updateEventActivity(eventId: string, activity: string) {
 
 export async function excludeEvent(eventId: string) {
   return postJson<{ excluded: boolean; event_id: string }>("/events/exclude", { event_id: eventId });
+}
+
+export async function approveEventQuality(eventId: string) {
+  return postJson<{ event_id: string; quality_review_status: string }>("/events/quality-review", { event_id: eventId, status: "approved" });
 }
 
 export async function splitEvent(eventId: string, splitAfterSeconds: number, firstActivity = "", secondActivity = "") {

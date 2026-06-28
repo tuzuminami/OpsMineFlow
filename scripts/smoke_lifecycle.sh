@@ -137,7 +137,11 @@ assert result["imported_events"] == 7
 
 events = request("/events")
 assert len(events) == 7
+quality = request("/analytics/event-quality")
+assert quality["summary"]["total_events"] == 7
 updated = request("/events/activity", {"event_id": events[0]["event_id"], "activity": "Lifecycle review"})
+quality_review = request("/events/quality-review", {"event_id": events[0]["event_id"], "status": "approved"})
+assert quality_review["quality_review_status"] == "approved"
 split = request(
     "/events/split",
     {

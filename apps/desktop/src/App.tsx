@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  approveEventQuality,
   deleteLocalData,
   excludeEvent,
   exportArtifact,
@@ -31,6 +32,7 @@ import type {
   DiagnosticChecks,
   Diagnostics,
   EventRecord,
+  EventQualityReport,
   ExportFormat,
   ExportPreview,
   Health,
@@ -41,7 +43,7 @@ import type {
   Summary
 } from "./types";
 
-type Tab = "home" | "dashboard" | "events" | "process" | "switching" | "candidates" | "reports" | "settings";
+type Tab = "home" | "dashboard" | "events" | "quality" | "process" | "switching" | "candidates" | "reports" | "settings";
 
 type DashboardData = {
   health: Health;
@@ -50,6 +52,7 @@ type DashboardData = {
   settings: AppSettings;
   importHistory: ImportHistoryEntry[];
   events: EventRecord[];
+  quality: EventQualityReport;
   summary: Summary;
   processMap: ProcessMap;
   candidates: AutomationCandidate[];
@@ -69,6 +72,7 @@ type AppActions = {
   saveAutomationReview: (activity: string, status: AutomationReviewStatus) => Promise<void>;
   updateEventActivity: (eventId: string, activity: string) => Promise<void>;
   excludeEvent: (eventId: string) => Promise<void>;
+  approveEventQuality: (eventId: string) => Promise<void>;
   splitEvent: (eventId: string, splitAfterSeconds: number, firstActivity?: string, secondActivity?: string) => Promise<void>;
   mergeEvents: (firstEventId: string, secondEventId: string, activity?: string) => Promise<void>;
   runDiagnosticChecks: () => Promise<DiagnosticChecks>;
@@ -83,6 +87,7 @@ const tabs: Array<{ id: Tab; label: TranslationKey }> = [
   { id: "home", label: "nav.home" },
   { id: "dashboard", label: "nav.dashboard" },
   { id: "events", label: "nav.events" },
+  { id: "quality", label: "nav.quality" },
   { id: "process", label: "nav.process" },
   { id: "switching", label: "nav.switching" },
   { id: "candidates", label: "nav.candidates" },
@@ -277,6 +282,11 @@ export function App() {
         await excludeEvent(eventId);
         return t("message.timelineEventExcluded");
       }),
+    approveEventQuality: (eventId) =>
+      runAction(async () => {
+        await approveEventQuality(eventId);
+        return t("message.qualityApproved");
+      }),
     splitEvent: (eventId, splitAfterSeconds, firstActivity = "", secondActivity = "") =>
       runAction(async () => {
         await splitEvent(eventId, splitAfterSeconds, firstActivity, secondActivity);
@@ -416,6 +426,7 @@ function View({
   if (tab === "home") return <HomeView data={data} actions={actions} working={working} onNavigate={onNavigate} />;
   if (data.events.length === 0 && tab !== "settings") return <EmptyDataView onStart={onStart} />;
   if (tab === "events") return <EventsView events={data.events} />;
+  if (tab === "quality") return <QualityView quality={data.quality} actions={actions} working={working} />;
   if (tab === "process") return <ProcessView processMap={data.processMap} events={data.events} />;
   if (tab === "switching") return <SwitchingView switching={data.appSwitching} />;
   if (tab === "candidates") return <CandidatesView candidates={data.candidates} actions={actions} working={working} />;
@@ -1457,6 +1468,114 @@ function EventsView({ events }: { events: EventRecord[] }) {
       </table>
     </section>
   );
+}
+
+function QualityView({
+  quality,
+  actions,
+  working
+}: {
+  quality: EventQualityReport;
+  actions: AppActions;
+  working: boolean;
+}) {
+  const { formatDateTime, t } = useI18n();
+  const unresolved = quality.items.filter((item) => item.quality_review_status !== "approved");
+  const [activityDrafts, setActivityDrafts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setActivityDrafts((current) => {
+      const next: Record<string, string> = {};
+      for (const item of quality.items) next[item.event_id] = current[item.event_id] ?? item.activity;
+      return next;
+    });
+  }, [quality.items]);
+
+  return (
+    <section className="quality-view">
+      <div className="quality-summary">
+        <Metric label={t("quality.totalEvents")} value={quality.summary.total_events.toString()} />
+        <Metric label={t("quality.affected")} value={quality.summary.affected_event_count.toString()} />
+        <Metric label={t("quality.issues")} value={quality.summary.issue_count.toString()} />
+        <Metric label={t("quality.approved")} value={quality.summary.approved_count.toString()} />
+      </div>
+      <div className="quality-issue-grid">
+        {(["missing_fields", "invalid_time", "zero_duration", "short_duration", "long_duration", "unlabeled", "low_confidence"] as const).map((key) => (
+          <div key={key}>
+            <span>{t(`quality.${key}` as TranslationKey)}</span>
+            <b>{quality.summary[key]}</b>
+          </div>
+        ))}
+      </div>
+      <section className="quality-list">
+        <div className="panel-heading">
+          <h2>{t("quality.title")}</h2>
+          <span>{unresolved.length > 0 ? t("quality.remaining", { count: unresolved.length }) : t("quality.clean")}</span>
+        </div>
+        {quality.items.length === 0 ? (
+          <div className="empty-panel">{t("quality.empty")}</div>
+        ) : (
+          quality.items.map((item) => {
+            const draft = activityDrafts[item.event_id] ?? item.activity;
+            const approved = item.quality_review_status === "approved";
+            return (
+              <article className={approved ? "quality-card is-approved" : "quality-card"} key={item.event_id}>
+                <div className="quality-card-main">
+                  <div className="quality-card-heading">
+                    <b>{item.activity || t("import.unknown")}</b>
+                    <span>{approved ? t("quality.statusApproved") : t("quality.statusNeedsReview")}</span>
+                  </div>
+                  <div className="quality-meta">
+                    <span>{item.case_id}</span>
+                    <span>{item.app_name || t("import.unknown")}</span>
+                    <span>{formatDateTime(item.timestamp_start)} - {formatDateTime(item.timestamp_end)}</span>
+                    <span>{formatElapsed(item.duration_seconds)}</span>
+                  </div>
+                  <div className="quality-issues">
+                    {item.issues.map((issue) => (
+                      <div className={`quality-issue severity-${issue.severity}`} key={`${item.event_id}-${issue.code}`}>
+                        <strong>{localizeQualityIssue(issue.code, t) || issue.label}</strong>
+                        <span>{issue.remediation}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="quality-actions">
+                  <label>
+                    <span>{t("timeline.activityLabel")}</span>
+                    <input value={draft} onChange={(event) => setActivityDrafts({ ...activityDrafts, [item.event_id]: event.target.value })} disabled={working} />
+                  </label>
+                  <button
+                    onClick={() => void actions.updateEventActivity(item.event_id, draft)}
+                    disabled={working || !draft.trim() || draft.trim() === item.activity}
+                  >
+                    {t("timeline.saveLabel")}
+                  </button>
+                  <button onClick={() => void actions.approveEventQuality(item.event_id)} disabled={working || approved}>
+                    {t("quality.approve")}
+                  </button>
+                  <button
+                    className="timeline-danger"
+                    onClick={() => {
+                      if (window.confirm(t("timeline.confirmExclude"))) void actions.excludeEvent(item.event_id);
+                    }}
+                    disabled={working}
+                  >
+                    {t("timeline.exclude")}
+                  </button>
+                </div>
+              </article>
+            );
+          })
+        )}
+      </section>
+    </section>
+  );
+}
+
+function localizeQualityIssue(code: string, t: (key: TranslationKey, params?: Record<string, string | number>) => string): string {
+  const key = `quality.issue.${code}` as TranslationKey;
+  return t(key);
 }
 
 function ProcessView({ processMap, events }: { processMap: ProcessMap; events: EventRecord[] }) {

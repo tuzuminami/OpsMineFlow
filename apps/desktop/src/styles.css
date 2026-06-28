@@ -1310,6 +1310,153 @@ th {
   top: 0;
 }
 
+.quality-view {
+  display: grid;
+  gap: 12px;
+}
+
+.quality-summary,
+.quality-issue-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.quality-summary {
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+}
+
+.quality-issue-grid {
+  grid-template-columns: repeat(7, minmax(100px, 1fr));
+}
+
+.quality-issue-grid > div {
+  background: #ffffff;
+  border: 1px solid #dce3e3;
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+}
+
+.quality-issue-grid span {
+  color: #68757d;
+  font-size: 12px;
+}
+
+.quality-issue-grid b {
+  color: #163235;
+  font-size: 22px;
+}
+
+.quality-list {
+  background: #ffffff;
+  border: 1px solid #dce3e3;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+
+.quality-card {
+  align-items: stretch;
+  background: #fbfcfc;
+  border: 1px solid #dce3e3;
+  border-left: 5px solid #c98c22;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 0.45fr);
+  padding: 12px;
+}
+
+.quality-card.is-approved {
+  border-left-color: #0f766e;
+  opacity: 0.82;
+}
+
+.quality-card-main,
+.quality-actions,
+.quality-issues {
+  display: grid;
+  gap: 8px;
+}
+
+.quality-card-heading,
+.quality-meta {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.quality-card-heading span {
+  background: #fff6e5;
+  border: 1px solid #eadfc7;
+  border-radius: 999px;
+  color: #664300;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.quality-card.is-approved .quality-card-heading span {
+  background: #e8f5f1;
+  border-color: #c9e4dc;
+  color: #0f766e;
+}
+
+.quality-meta span,
+.quality-issue span,
+.quality-actions label span {
+  color: #68757d;
+  font-size: 12px;
+}
+
+.quality-issue {
+  background: #ffffff;
+  border: 1px solid #edf1f1;
+  border-radius: 8px;
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+}
+
+.quality-issue.severity-high {
+  border-color: #e7b3ba;
+}
+
+.quality-issue.severity-medium {
+  border-color: #e6d8bb;
+}
+
+.quality-actions label {
+  display: grid;
+  gap: 5px;
+}
+
+.quality-actions input {
+  background: #ffffff;
+  border: 1px solid #c8d2d2;
+  border-radius: 8px;
+  min-height: 40px;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.quality-actions button {
+  background: #163235;
+  border: 1px solid #163235;
+  border-radius: 8px;
+  color: #ffffff;
+  min-height: 38px;
+  padding: 8px 10px;
+}
+
+.quality-actions button:disabled {
+  background: #d8dfdf;
+  border-color: #d8dfdf;
+  color: #6c777d;
+}
+
 .process-workspace {
   display: grid;
   gap: 12px;
@@ -1606,6 +1753,9 @@ th {
   }
 
   .view-grid,
+  .quality-summary,
+  .quality-issue-grid,
+  .quality-card,
   .home-grid,
   .split-view,
   .settings-workspace,
