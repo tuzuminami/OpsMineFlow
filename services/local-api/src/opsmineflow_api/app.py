@@ -15,6 +15,7 @@ from typing import Any
 
 from opsmineflow_drawio import build_drawio_xml
 from opsmineflow_mining import (
+    StandardEvent,
     analyze_variants,
     build_directly_follows_graph,
     calculate_duration_metrics,
@@ -95,6 +96,12 @@ class EventMergeRequest(BaseModel):  # type: ignore[misc, valid-type]
 
 
 class ActivityWatchImportRequest(BaseModel):  # type: ignore[misc, valid-type]
+    enabled: bool = False
+    base_url: str = "http://127.0.0.1:5600"
+    mode: str = "replace"
+
+
+class ActivityWatchPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
     enabled: bool = False
     base_url: str = "http://127.0.0.1:5600"
 
@@ -477,6 +484,126 @@ def import_path_into_store(
     return {"imported_events": len(events), "source": format_name}
 
 
+ACTIVITYWATCH_IMPORT_MODES = {"replace", "append", "skip_duplicates"}
+
+
+def create_activitywatch_preview(
+    enabled: bool,
+    base_url: str = "http://127.0.0.1:5600",
+    store: EventStore | None = None,
+) -> dict[str, Any]:
+    if not enabled:
+        return _activitywatch_preview_payload([], store or default_store(), False, base_url)
+    return _activitywatch_preview_payload(import_activitywatch_local(base_url), store or default_store(), True, base_url)
+
+
+def import_activitywatch_into_store(
+    enabled: bool,
+    base_url: str = "http://127.0.0.1:5600",
+    mode: str = "replace",
+    store: EventStore | None = None,
+) -> dict[str, Any]:
+    normalized_mode = _normalize_activitywatch_mode(mode)
+    if not enabled:
+        return {
+            "imported_events": 0,
+            "source": "activitywatch_local",
+            "mode": normalized_mode,
+            "message": "ActivityWatch import is disabled until explicitly enabled.",
+        }
+
+    active_store = store or default_store()
+    events = import_activitywatch_local(base_url)
+    preview = _activitywatch_preview_payload(events, active_store, True, base_url)
+    existing_ids = {event.event_id for event in active_store.events}
+    importable_events = active_store._filter_events(list(events))
+
+    if normalized_mode == "replace":
+        active_store.replace(events, import_source="activitywatch_local", import_path=base_url)
+        imported_events = len(active_store.events)
+        skipped_duplicates = 0
+    else:
+        imported_events = active_store.append(events)
+        skipped_duplicates = sum(1 for event in importable_events if event.event_id in existing_ids)
+        active_store.record_import(f"activitywatch_local_{normalized_mode}", base_url, imported_events)
+
+    return {
+        "imported_events": imported_events,
+        "source": "activitywatch_local",
+        "mode": normalized_mode,
+        "fetched_events": preview["event_count"],
+        "skipped_duplicates": skipped_duplicates,
+        "excluded_events": preview["excluded_event_count"],
+        "message": "",
+    }
+
+
+def _normalize_activitywatch_mode(mode: str) -> str:
+    normalized = (mode or "replace").strip().casefold()
+    if normalized not in ACTIVITYWATCH_IMPORT_MODES:
+        raise ValueError("ActivityWatch import mode must be replace, append, or skip_duplicates.")
+    return normalized
+
+
+def _activitywatch_preview_payload(
+    events: list[StandardEvent],
+    store: EventStore,
+    enabled: bool,
+    base_url: str,
+) -> dict[str, Any]:
+    filtered_events = store._filter_events(list(events))
+    existing_ids = {event.event_id for event in store.events}
+    duplicate_count = sum(1 for event in filtered_events if event.event_id in existing_ids)
+    period_start, period_end = _event_period(events)
+    return {
+        "enabled": enabled,
+        "local_only": True,
+        "base_url": base_url,
+        "event_count": len(events),
+        "importable_event_count": len(filtered_events),
+        "duplicate_count": duplicate_count,
+        "new_event_count": max(len(filtered_events) - duplicate_count, 0),
+        "excluded_event_count": max(len(events) - len(filtered_events), 0),
+        "confidential_count": sum(1 for event in events if event.confidential_flag),
+        "period_start": period_start,
+        "period_end": period_end,
+        "app_usage_seconds": _app_usage_seconds(events),
+        "sample_events": [
+            {
+                "case_id": event.case_id,
+                "activity": event.activity_raw,
+                "app_name": event.app_name,
+                "domain": event.domain,
+                "duration_seconds": event.duration_seconds,
+            }
+            for event in filtered_events[:5]
+        ],
+        "message": "" if enabled else "ActivityWatch import is disabled until explicitly enabled.",
+    }
+
+
+def _event_period(events: list[StandardEvent]) -> tuple[str, str]:
+    starts: list[datetime] = []
+    ends: list[datetime] = []
+    for event in events:
+        try:
+            starts.append(_parse_event_time(event.timestamp_start))
+            ends.append(_parse_event_time(event.timestamp_end))
+        except ValueError:
+            continue
+    if not starts or not ends:
+        return "", ""
+    return min(starts).isoformat(), max(ends).isoformat()
+
+
+def _app_usage_seconds(events: list[StandardEvent]) -> dict[str, float]:
+    usage: dict[str, float] = {}
+    for event in events:
+        app_name = event.app_name or "Unknown"
+        usage[app_name] = usage.get(app_name, 0.0) + float(event.duration_seconds)
+    return dict(sorted(usage.items(), key=lambda item: item[1], reverse=True)[:5])
+
+
 def create_export_artifact(format_name: str, store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
     snapshot = create_api_snapshot(active_store)
@@ -848,6 +975,13 @@ if app is not None:
         except ValueError as exc:
             raise _bad_request(str(exc))
 
+    @app.post("/import/activitywatch-preview")
+    def preview_activitywatch(request: ActivityWatchPreviewRequest) -> dict[str, Any]:
+        try:
+            return create_activitywatch_preview(request.enabled, request.base_url)
+        except ValueError as exc:
+            raise _bad_request(str(exc))
+
     @app.post("/settings")
     def update_settings(request: SettingsRequest) -> dict[str, object]:
         return default_store().update_settings(request.model_dump(exclude_none=True))
@@ -874,11 +1008,10 @@ if app is not None:
 
     @app.post("/import/activitywatch-local")
     def import_activitywatch(request: ActivityWatchImportRequest) -> dict[str, Any]:
-        if not request.enabled:
-            return {"imported_events": 0, "message": "ActivityWatch import is disabled until explicitly enabled."}
-        events = import_activitywatch_local(request.base_url)
-        default_store().replace(events, import_source="activitywatch_local", import_path=request.base_url)
-        return {"imported_events": len(events), "source": "activitywatch_local"}
+        try:
+            return import_activitywatch_into_store(request.enabled, request.base_url, request.mode)
+        except ValueError as exc:
+            raise _bad_request(str(exc))
 
     @app.get("/events")
     def events() -> list[dict[str, Any]]:

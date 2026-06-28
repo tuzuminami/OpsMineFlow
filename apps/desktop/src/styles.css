@@ -909,6 +909,35 @@ textarea {
   grid-template-columns: 72px minmax(0, 1fr) 100px 48px;
 }
 
+.activitywatch-flow {
+  background: #f8faf9;
+  border: 1px solid #edf1f1;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.activitywatch-flow p {
+  color: #4f5b62;
+  margin: 0;
+}
+
+.activitywatch-preview {
+  background: #fff;
+}
+
+.activitywatch-metrics {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.activitywatch-apps {
+  display: grid;
+  gap: 6px;
+}
+
 .history-row {
   grid-template-columns: 98px 48px minmax(0, 1fr);
 }
@@ -1788,6 +1817,7 @@ th {
   .danger-row,
   .csv-format-row,
   .csv-mapping-actions,
+  .activitywatch-metrics,
   .preview-row,
   .history-row,
   .process-toolbar,

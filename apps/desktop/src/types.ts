@@ -233,6 +233,31 @@ export type ImportPreview = {
   }>;
 };
 
+export type ActivityWatchImportMode = "replace" | "append" | "skip_duplicates";
+
+export type ActivityWatchPreview = {
+  enabled: boolean;
+  local_only: boolean;
+  base_url: string;
+  event_count: number;
+  importable_event_count: number;
+  duplicate_count: number;
+  new_event_count: number;
+  excluded_event_count: number;
+  confidential_count: number;
+  period_start: string;
+  period_end: string;
+  app_usage_seconds: Record<string, number>;
+  sample_events: Array<{
+    case_id: string;
+    activity: string;
+    app_name: string;
+    domain: string;
+    duration_seconds: number;
+  }>;
+  message: string;
+};
+
 export type ImportHistoryEntry = {
   id?: number;
   source: string;
