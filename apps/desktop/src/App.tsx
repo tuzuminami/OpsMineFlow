@@ -73,7 +73,7 @@ type AppActions = {
   exportArtifact: (format: ExportFormat) => Promise<void>;
   saveExport: (format: ExportFormat, path: string) => Promise<void>;
   saveSettings: (settings: Partial<AppSettings>) => Promise<void>;
-  saveAutomationReview: (activity: string, status: AutomationReviewStatus) => Promise<void>;
+  saveAutomationReview: (activity: string, status: AutomationReviewStatus, note?: string) => Promise<void>;
   updateEventActivity: (eventId: string, activity: string) => Promise<void>;
   excludeEvent: (eventId: string) => Promise<void>;
   approveEventQuality: (eventId: string) => Promise<void>;
@@ -284,9 +284,9 @@ export function App() {
         await saveSettings(settings);
         return t("message.settingsSaved");
       }),
-    saveAutomationReview: (activity, status) =>
+    saveAutomationReview: (activity, status, note = "") =>
       runAction(async () => {
-        const result = await saveAutomationReview(activity, status);
+        const result = await saveAutomationReview(activity, status, note);
         return t("message.reviewSaved", { activity: result.activity });
       }),
     updateEventActivity: (eventId, activity) =>
@@ -1783,7 +1783,7 @@ function SwitchingView({ switching }: { switching: AppSwitching }) {
   );
 }
 
-type CandidateSortKey = "score" | "frequency" | "classification" | "reason" | "status";
+type CandidateSortKey = "score" | "impact" | "savings" | "frequency" | "difficulty" | "risk" | "classification" | "reason" | "status";
 
 const reviewOptions: Array<{ label: TranslationKey; value: AutomationReviewStatus }> = [
   { label: "candidate.unreviewed", value: "unreviewed" },
@@ -1795,10 +1795,26 @@ const reviewOptions: Array<{ label: TranslationKey; value: AutomationReviewStatu
 function CandidatesView({ candidates, actions, working }: { candidates: AutomationCandidate[]; actions: AppActions; working: boolean }) {
   const { t } = useI18n();
   const [sortKey, setSortKey] = useState<CandidateSortKey>("score");
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setNoteDrafts((current) => {
+      const next = { ...current };
+      for (const candidate of candidates) {
+        if (next[candidate.activity] === undefined) next[candidate.activity] = candidate.review_note || "";
+      }
+      return next;
+    });
+  }, [candidates]);
+
   const sortedCandidates = useMemo(() => {
     const valueFor = (candidate: AutomationCandidate) => {
       if (sortKey === "score") return candidate.automation_score;
+      if (sortKey === "impact") return candidate.impact_score;
+      if (sortKey === "savings") return candidate.estimated_time_savings_minutes;
       if (sortKey === "frequency") return candidate.frequency;
+      if (sortKey === "difficulty") return candidate.implementation_difficulty_score;
+      if (sortKey === "risk") return candidate.risk_score;
       if (sortKey === "classification") return candidate.classification;
       if (sortKey === "reason") return candidate.reasons.join(", ");
       return candidate.review_status || "unreviewed";
@@ -1810,21 +1826,49 @@ function CandidatesView({ candidates, actions, working }: { candidates: Automati
       return String(first).localeCompare(String(second));
     });
   }, [candidates, sortKey]);
+  const portfolioGroups = useMemo(() => {
+    const groups: Record<AutomationCandidate["portfolio_quadrant"], AutomationCandidate[]> = {
+      quick_win: [],
+      strategic: [],
+      low_effort: [],
+      evaluate_later: []
+    };
+    for (const candidate of candidates) groups[candidate.portfolio_quadrant].push(candidate);
+    return groups;
+  }, [candidates]);
+  const quadrantOrder: Array<AutomationCandidate["portfolio_quadrant"]> = ["quick_win", "strategic", "low_effort", "evaluate_later"];
 
   return (
     <section className="candidate-workspace">
       <div className="candidate-toolbar">
         <select value={sortKey} onChange={(event) => setSortKey(event.target.value as CandidateSortKey)}>
           <option value="score">{t("candidate.sortScore")}</option>
+          <option value="impact">{t("candidate.sortImpact")}</option>
+          <option value="savings">{t("candidate.sortSavings")}</option>
           <option value="frequency">{t("candidate.sortFrequency")}</option>
+          <option value="difficulty">{t("candidate.sortDifficulty")}</option>
+          <option value="risk">{t("candidate.sortRisk")}</option>
           <option value="classification">{t("candidate.sortClassification")}</option>
           <option value="reason">{t("candidate.sortReason")}</option>
           <option value="status">{t("candidate.sortStatus")}</option>
         </select>
       </div>
+      <section className="portfolio-grid">
+        {quadrantOrder.map((quadrant) => {
+          const group = portfolioGroups[quadrant];
+          return (
+            <article className={`portfolio-cell ${quadrant}`} key={quadrant}>
+              <strong>{localizePortfolioQuadrant(quadrant, t)}</strong>
+              <span>{t("candidate.portfolioCount", { count: group.length })}</span>
+              <p>{group.slice(0, 3).map((candidate) => candidate.activity).join(", ") || t("common.noItems")}</p>
+            </article>
+          );
+        })}
+      </section>
       <section className="candidate-list">
         {sortedCandidates.map((candidate) => {
           const status = candidate.review_status || "unreviewed";
+          const noteDraft = noteDrafts[candidate.activity] ?? candidate.review_note ?? "";
           return (
             <article className="candidate-card" key={candidate.activity}>
               <div>
@@ -1836,17 +1880,39 @@ function CandidatesView({ candidates, actions, working }: { candidates: Automati
                 <span>{candidate.frequency}x</span>
               </div>
               <span>{localizeClassification(candidate.classification, t)}</span>
+              <div className="candidate-portfolio">
+                <DetailStat label={t("candidate.impact")} value={candidate.impact_score.toString()} />
+                <DetailStat label={t("candidate.estimatedSavings")} value={t("unit.minutesShort", { count: candidate.estimated_time_savings_minutes })} />
+                <DetailStat label={t("candidate.difficulty")} value={localizeDifficulty(candidate.implementation_difficulty, t)} />
+                <DetailStat label={t("candidate.risk")} value={localizeRisk(candidate.risk_level, t)} />
+              </div>
+              <div className="candidate-guidance">
+                <p><b>{t("candidate.recommendedAction")}</b> {localizeRecommendedAction(candidate.recommended_action, t)}</p>
+                <p><b>{t("candidate.requiredData")}</b> {candidate.required_data.map((item) => localizeRequiredData(item, t)).join(", ")}</p>
+              </div>
               <div className="review-controls">
                 {reviewOptions.map((option) => (
                   <button
                     key={option.value}
                     className={option.value === status ? "is-active" : ""}
-                    onClick={() => void actions.saveAutomationReview(candidate.activity, option.value)}
-                    disabled={working || option.value === status}
+                    onClick={() => void actions.saveAutomationReview(candidate.activity, option.value, noteDraft)}
+                    disabled={working || (option.value === status && noteDraft === candidate.review_note)}
                   >
                     {t(option.label)}
                   </button>
                 ))}
+                <textarea
+                  value={noteDraft}
+                  onChange={(event) => setNoteDrafts({ ...noteDrafts, [candidate.activity]: event.target.value })}
+                  placeholder={t("candidate.reviewNote")}
+                  disabled={working}
+                />
+                <button
+                  onClick={() => void actions.saveAutomationReview(candidate.activity, status, noteDraft)}
+                  disabled={working || noteDraft === candidate.review_note}
+                >
+                  {t("candidate.saveNote")}
+                </button>
               </div>
             </article>
           );
@@ -2083,6 +2149,67 @@ const reasonKeys: Partial<Record<TranslationKey, true>> = {
   "candidate.reason.manual transfer risk": true,
   "candidate.reason.system handover": true,
   "candidate.reason.low-volume hypothesis": true
+};
+
+function localizeDifficulty(value: string, t: Translate): string {
+  const key = `candidate.difficulty.${value}` as TranslationKey;
+  return key in difficultyKeys ? t(key) : value;
+}
+
+const difficultyKeys: Partial<Record<TranslationKey, true>> = {
+  "candidate.difficulty.low": true,
+  "candidate.difficulty.medium": true,
+  "candidate.difficulty.high": true
+};
+
+function localizeRisk(value: string, t: Translate): string {
+  const key = `candidate.risk.${value}` as TranslationKey;
+  return key in riskKeys ? t(key) : value;
+}
+
+const riskKeys: Partial<Record<TranslationKey, true>> = {
+  "candidate.risk.low": true,
+  "candidate.risk.medium": true,
+  "candidate.risk.high": true
+};
+
+function localizePortfolioQuadrant(value: string, t: Translate): string {
+  const key = `candidate.quadrant.${value}` as TranslationKey;
+  return key in quadrantKeys ? t(key) : value;
+}
+
+const quadrantKeys: Partial<Record<TranslationKey, true>> = {
+  "candidate.quadrant.quick_win": true,
+  "candidate.quadrant.strategic": true,
+  "candidate.quadrant.low_effort": true,
+  "candidate.quadrant.evaluate_later": true
+};
+
+function localizeRecommendedAction(value: string, t: Translate): string {
+  const key = `candidate.action.${value}` as TranslationKey;
+  return key in actionKeys ? t(key) : value;
+}
+
+const actionKeys: Partial<Record<TranslationKey, true>> = {
+  "candidate.action.rpa_assessment": true,
+  "candidate.action.system_integration_review": true,
+  "candidate.action.standardize_rule": true,
+  "candidate.action.process_review": true
+};
+
+function localizeRequiredData(value: string, t: Translate): string {
+  const key = `candidate.data.${value}` as TranslationKey;
+  return key in requiredDataKeys ? t(key) : value;
+}
+
+const requiredDataKeys: Partial<Record<TranslationKey, true>> = {
+  "candidate.data.event_samples": true,
+  "candidate.data.volume_frequency": true,
+  "candidate.data.source_destination_fields": true,
+  "candidate.data.system_owner": true,
+  "candidate.data.interface_constraints": true,
+  "candidate.data.current_rule": true,
+  "candidate.data.exception_cases": true
 };
 
 function localizeStatus(status: string, t: Translate): string {

@@ -143,8 +143,8 @@ export async function runDiagnosticChecks() {
   return postJson<DiagnosticChecks>("/diagnostics/checks");
 }
 
-export async function saveAutomationReview(activity: string, status: AutomationReviewStatus) {
-  return postJson<{ activity: string; review_status: AutomationReviewStatus }>("/automation/review", { activity, status });
+export async function saveAutomationReview(activity: string, status: AutomationReviewStatus, note = "") {
+  return postJson<{ activity: string; review_status: AutomationReviewStatus; review_note: string }>("/automation/review", { activity, status, note });
 }
 
 export async function updateEventActivity(eventId: string, activity: string) {

@@ -64,7 +64,17 @@ export type AutomationCandidate = {
   frequency: number;
   classification: string;
   reasons: string[];
+  impact_score: number;
+  estimated_time_savings_minutes: number;
+  implementation_difficulty: "low" | "medium" | "high";
+  implementation_difficulty_score: number;
+  risk_level: "low" | "medium" | "high";
+  risk_score: number;
+  required_data: string[];
+  recommended_action: string;
+  portfolio_quadrant: "quick_win" | "strategic" | "low_effort" | "evaluate_later";
   review_status: AutomationReviewStatus;
+  review_note: string;
 };
 
 export type AppSwitching = {

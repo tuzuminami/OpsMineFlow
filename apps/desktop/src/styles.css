@@ -1632,11 +1632,46 @@ th {
   gap: 10px;
 }
 
+.portfolio-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.portfolio-cell {
+  background: #ffffff;
+  border: 1px solid #dce3e3;
+  border-left: 4px solid #0f766e;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  min-height: 108px;
+  padding: 12px;
+}
+
+.portfolio-cell.strategic {
+  border-left-color: #2563eb;
+}
+
+.portfolio-cell.low_effort {
+  border-left-color: #b45309;
+}
+
+.portfolio-cell.evaluate_later {
+  border-left-color: #64748b;
+}
+
+.portfolio-cell span,
+.portfolio-cell p {
+  color: #68757d;
+  margin: 0;
+}
+
 .candidate-card {
-  align-items: center;
+  align-items: start;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(0, 1fr) 72px 170px minmax(280px, auto);
+  grid-template-columns: minmax(0, 1.4fr) 72px 150px minmax(260px, 1.2fr);
   padding: 14px;
 }
 
@@ -1645,7 +1680,7 @@ th {
   margin: 0;
 }
 
-.candidate-card b {
+.candidate-metrics b {
   color: #0f766e;
   font-size: 22px;
 }
@@ -1669,10 +1704,25 @@ th {
   padding: 6px 10px;
 }
 
+.candidate-portfolio {
+  display: grid;
+  gap: 8px;
+  grid-column: 1 / 4;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.candidate-guidance {
+  display: grid;
+  gap: 6px;
+  grid-column: 1 / 4;
+}
+
 .review-controls {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  grid-column: 4;
+  grid-row: 1 / span 3;
   justify-content: flex-end;
 }
 
@@ -1695,6 +1745,11 @@ th {
 .review-controls button:disabled {
   cursor: default;
   opacity: 0.9;
+}
+
+.review-controls textarea {
+  flex-basis: 100%;
+  min-height: 86px;
 }
 
 .report-preview {
@@ -1786,6 +1841,7 @@ th {
   .quality-issue-grid,
   .quality-card,
   .home-grid,
+  .portfolio-grid,
   .split-view,
   .settings-workspace,
   .settings-grid {
@@ -1797,6 +1853,17 @@ th {
   }
 
   .candidate-card {
+    grid-template-columns: 1fr;
+  }
+
+  .candidate-portfolio,
+  .candidate-guidance,
+  .review-controls {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .candidate-portfolio {
     grid-template-columns: 1fr;
   }
 
