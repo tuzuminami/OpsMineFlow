@@ -117,10 +117,18 @@ export type RecordingStatus = {
   token_ttl_seconds: number;
   rate_limit_per_minute: number;
   active: boolean;
+  paused: boolean;
   session_id: string;
   case_id: string;
   activity_label: string;
   started_at: string;
+  paused_at: string;
+  pause_reason: string;
+  pause_intervals: Array<{
+    started_at: string;
+    ended_at: string;
+    reason: string;
+  }>;
   current_app: string;
   recorded_events: number;
   last_heartbeat_at: string;

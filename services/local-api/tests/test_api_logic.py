@@ -132,6 +132,58 @@ class ApiLogicTests(unittest.TestCase):
         self.assertEqual(first["appended"], 1)
         self.assertEqual(len(store.events), 1)
 
+    def test_recording_manager_pause_resume_excludes_paused_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            agent_path = root / "fake-agent.sh"
+            agent_path.write_text(
+                "#!/bin/bash\n"
+                "if [[ ${1:-} == --version ]]; then echo 'opsmineflow-agent test'; exit 0; fi\n"
+                "while [[ $# -gt 0 ]]; do\n"
+                "  if [[ $1 == --stop-file ]]; then stop_file=$2; shift 2; else shift; fi\n"
+                "done\n"
+                "while [[ ! -e $stop_file ]]; do sleep 0.05; done\n",
+                encoding="utf-8",
+            )
+            agent_path.chmod(0o755)
+            manager = RecordingManager(agent_path=agent_path, platform_name="Darwin")
+            store = EventStore()
+            with patch.dict("os.environ", {"OPSMINEFLOW_DATA_DIR": str(root), "OPSMINEFLOW_API_PORT": "8765"}):
+                started = manager.start("CASE", "Work", True)
+                base_payload = {
+                    "session_id": started["session_id"],
+                    "app_name": "Safari",
+                    "app_bundle_id": "com.apple.Safari",
+                    "timestamp_start": "2026-06-21T01:00:00+00:00",
+                    "timestamp_end": "2026-06-21T01:00:10+00:00",
+                    "duration_seconds": 10,
+                }
+                first = manager.ingest(manager._token, {**base_payload, "sequence": 1}, store)
+                paused = manager.pause("break")
+                skipped = manager.ingest(manager._token, {**base_payload, "sequence": 2}, store)
+                resumed = manager.resume()
+                third = manager.ingest(
+                    manager._token,
+                    {
+                        **base_payload,
+                        "sequence": 3,
+                        "timestamp_start": "2026-06-21T01:00:20+00:00",
+                        "timestamp_end": "2026-06-21T01:00:30+00:00",
+                    },
+                    store,
+                )
+                stopped = manager.stop(store)
+
+        self.assertEqual(first["appended"], 1)
+        self.assertTrue(paused["paused"])
+        self.assertEqual(skipped["appended"], 0)
+        self.assertTrue(skipped["paused"])
+        self.assertFalse(resumed["paused"])
+        self.assertEqual(len(resumed["pause_intervals"]), 1)
+        self.assertEqual(third["appended"], 1)
+        self.assertFalse(stopped["active"])
+        self.assertEqual(len(store.events), 2)
+
     def test_cors_origins_follow_configured_local_webui_port(self) -> None:
         with patch.dict("os.environ", {"OPSMINEFLOW_WEBUI_PORT": "5273"}):
             origins = allowed_webui_origins()

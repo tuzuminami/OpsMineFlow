@@ -87,6 +87,8 @@ assert diagnostics["recording"]["capture_scope"] == "frontmost_app_only"
 recording = request("/recording/status")
 assert isinstance(recording, dict)
 assert recording["active"] is False
+assert recording["paused"] is False
+assert recording["pause_intervals"] == []
 assert recording["capture_scope"] == "frontmost_app_only"
 
 mapped_path = f"{base_dir}/mapped-client.csv"

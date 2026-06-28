@@ -67,6 +67,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             if path == "/recording/stop":
                 self._send_json(recording_manager.stop(default_store()))
                 return
+            if path == "/recording/pause":
+                self._send_json(recording_manager.pause(str(payload.get("reason") or "")))
+                return
+            if path == "/recording/resume":
+                self._send_json(recording_manager.resume())
+                return
             if path == "/recording/events":
                 self._send_json(
                     recording_manager.ingest(
