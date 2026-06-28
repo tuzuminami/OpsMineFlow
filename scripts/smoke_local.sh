@@ -98,6 +98,30 @@ result = request("/import/csv", {"path": "data/sample/sample_events.csv"})
 assert isinstance(result, dict)
 assert result["imported_events"] == 7
 
+events = request("/events")
+assert len(events) == 7
+updated = request("/events/activity", {"event_id": events[0]["event_id"], "activity": "Smoke review"})
+split = request(
+    "/events/split",
+    {
+        "event_id": updated["event"]["event_id"],
+        "split_after_seconds": 60,
+        "first_activity": "Smoke review start",
+        "second_activity": "Smoke review finish",
+    },
+)
+merged = request(
+    "/events/merge",
+    {
+        "first_event_id": split["events"][0]["event_id"],
+        "second_event_id": split["events"][1]["event_id"],
+        "activity": "Smoke review merged",
+    },
+)
+excluded = request("/events/exclude", {"event_id": merged["event"]["event_id"]})
+assert excluded["excluded"] is True
+assert len(request("/events")) == 6
+
 history = request("/import/history")
 assert isinstance(history, list)
 assert history and history[0]["source"] == "csv"

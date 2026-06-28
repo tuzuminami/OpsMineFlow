@@ -110,6 +110,48 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json({"event_id": payload.get("event_id"), "label": payload.get("label")})
                 return
+            if path == "/events/activity":
+                try:
+                    event = default_store().update_event_activity(
+                        str(payload.get("event_id") or ""),
+                        str(payload.get("activity") or ""),
+                    )
+                except KeyError:
+                    self._send_json({"error": "Event was not found"}, status=404)
+                    return
+                self._send_json({"event": event})
+                return
+            if path == "/events/exclude":
+                try:
+                    self._send_json(default_store().exclude_event(str(payload.get("event_id") or "")))
+                except KeyError:
+                    self._send_json({"error": "Event was not found"}, status=404)
+                return
+            if path == "/events/split":
+                try:
+                    self._send_json(
+                        default_store().split_event(
+                            str(payload.get("event_id") or ""),
+                            float(payload.get("split_after_seconds") or 0),
+                            str(payload.get("first_activity") or ""),
+                            str(payload.get("second_activity") or ""),
+                        )
+                    )
+                except KeyError:
+                    self._send_json({"error": "Event was not found"}, status=404)
+                return
+            if path == "/events/merge":
+                try:
+                    self._send_json(
+                        default_store().merge_adjacent_events(
+                            str(payload.get("first_event_id") or ""),
+                            str(payload.get("second_event_id") or ""),
+                            str(payload.get("activity") or ""),
+                        )
+                    )
+                except KeyError:
+                    self._send_json({"error": "Event was not found"}, status=404)
+                return
             if path == "/settings":
                 self._send_json(default_store().update_settings(payload))
                 return

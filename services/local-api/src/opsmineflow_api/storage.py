@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from dataclasses import replace
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from opsmineflow_mining import load_events_from_csv
 from opsmineflow_mining.models import StandardEvent
+from opsmineflow_mining.privacy import extract_domain, looks_confidential, mask_url, mask_window_title
 
 
 DEFAULT_SETTINGS: dict[str, object] = {
@@ -78,15 +80,7 @@ class EventStore:
         if not new_events:
             return 0
         self.events.extend(new_events)
-        self.events.sort(key=lambda event: (event.timestamp_start, event.event_id))
-        if self.db_path is not None:
-            with self._connect() as conn:
-                conn.executemany(
-                    "INSERT OR IGNORE INTO events(event_id, payload_json) VALUES(?, ?)",
-                    [(event.event_id, json.dumps(event.to_dict(), ensure_ascii=False)) for event in new_events],
-                )
-                conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)", ("initialized", "true"))
-        self.metadata["initialized"] = "true"
+        self._persist_events()
         return len(new_events)
 
     def set_label(self, event_id: str, label: str) -> None:
@@ -100,6 +94,126 @@ class EventStore:
                 "INSERT OR REPLACE INTO manual_labels(event_id, label) VALUES(?, ?)",
                 (event_id, label),
             )
+
+    def update_event_activity(self, event_id: str, activity: str) -> dict[str, object]:
+        normalized_activity = activity.strip()
+        if not normalized_activity:
+            raise ValueError("Activity label is required.")
+        index = self._find_event_index(event_id)
+        self.events[index] = _replace_event(
+            self.events[index],
+            activity_raw=normalized_activity,
+            activity_normalized=_normalize_activity(normalized_activity),
+            confidential_flag=looks_confidential(
+                self.events[index].window_title,
+                self.events[index].url,
+                normalized_activity,
+            ),
+            metadata_json=_edited_metadata(self.events[index], "activity_update"),
+        )
+        self._persist_events()
+        return self.events[index].to_dict()
+
+    def exclude_event(self, event_id: str) -> dict[str, object]:
+        index = self._find_event_index(event_id)
+        removed = self.events.pop(index)
+        self.manual_labels.pop(event_id, None)
+        self._persist_events()
+        return {"excluded": True, "event_id": removed.event_id}
+
+    def split_event(
+        self,
+        event_id: str,
+        split_after_seconds: float,
+        first_activity: str = "",
+        second_activity: str = "",
+    ) -> dict[str, object]:
+        index = self._find_event_index(event_id)
+        event = self.events[index]
+        start, end, duration = _event_time_bounds(event)
+        split_after = float(split_after_seconds)
+        if duration <= 1:
+            raise ValueError("Event is too short to split.")
+        if split_after <= 0 or split_after >= duration:
+            raise ValueError("Split point must be inside the event duration.")
+
+        split_at = start + timedelta(seconds=split_after)
+        first_label = first_activity.strip() or event.activity_raw
+        second_label = second_activity.strip() or event.activity_raw
+        first = _replace_event(
+            event,
+            event_id=_derived_event_id(event.event_id, "split1"),
+            source_event_id=f"{event.source_event_id}:split1",
+            timestamp_start=_to_iso(start),
+            timestamp_end=_to_iso(split_at),
+            duration_seconds=split_after,
+            activity_raw=first_label,
+            activity_normalized=_normalize_activity(first_label),
+            metadata_json=_edited_metadata(event, "split", part=1),
+        )
+        second = _replace_event(
+            event,
+            event_id=_derived_event_id(event.event_id, "split2"),
+            source_event_id=f"{event.source_event_id}:split2",
+            timestamp_start=_to_iso(split_at),
+            timestamp_end=_to_iso(end),
+            duration_seconds=max(duration - split_after, 0.0),
+            activity_raw=second_label,
+            activity_normalized=_normalize_activity(second_label),
+            metadata_json=_edited_metadata(event, "split", part=2),
+        )
+        self.events[index : index + 1] = [first, second]
+        self.manual_labels.pop(event_id, None)
+        self._persist_events()
+        return {"split": True, "events": [first.to_dict(), second.to_dict()]}
+
+    def merge_adjacent_events(self, first_event_id: str, second_event_id: str, activity: str = "") -> dict[str, object]:
+        first_index = self._find_event_index(first_event_id)
+        second_index = self._find_event_index(second_event_id)
+        ordered = sorted(
+            [(first_index, self.events[first_index]), (second_index, self.events[second_index])],
+            key=lambda item: (item[1].timestamp_start, item[1].event_id),
+        )
+        left_index, left = ordered[0]
+        right_index, right = ordered[1]
+        timeline = sorted(enumerate(self.events), key=lambda item: (item[1].case_id, item[1].timestamp_start, item[1].event_id))
+        positions = {event.event_id: position for position, (_, event) in enumerate(timeline)}
+        if left.case_id != right.case_id or abs(positions[left.event_id] - positions[right.event_id]) != 1:
+            raise ValueError("Only adjacent events in the same case can be merged.")
+
+        start = _parse_iso(left.timestamp_start)
+        end = _parse_iso(right.timestamp_end)
+        merged_activity = activity.strip() or (left.activity_raw if left.activity_raw == right.activity_raw else f"{left.activity_raw} + {right.activity_raw}")
+        merged_app = left.app_name if left.app_name == right.app_name else f"{left.app_name or 'Unknown'} + {right.app_name or 'Unknown'}"
+        merged_bundle = left.app_bundle_id if left.app_bundle_id == right.app_bundle_id else ""
+        merged_url = left.url if left.url == right.url else ""
+        merged_window = left.window_title if left.window_title == right.window_title else ""
+        merged = _replace_event(
+            left,
+            event_id=_derived_event_id(left.event_id, f"merge-{right.event_id}"),
+            source_event_id=f"{left.source_event_id}+{right.source_event_id}",
+            app_name=merged_app,
+            app_bundle_id=merged_bundle,
+            window_title=merged_window,
+            window_title_masked=mask_window_title(merged_window),
+            url=merged_url,
+            url_masked=mask_url(merged_url),
+            domain=extract_domain(merged_url),
+            activity_raw=merged_activity,
+            activity_normalized=_normalize_activity(merged_activity),
+            timestamp_start=_to_iso(start),
+            timestamp_end=_to_iso(end),
+            duration_seconds=max((end - start).total_seconds(), 0.0),
+            confidential_flag=looks_confidential(merged_window, merged_url, merged_activity),
+            metadata_json=_edited_metadata(left, "merge", merged_event_ids=[left.event_id, right.event_id]),
+        )
+        for remove_index in sorted([left_index, right_index], reverse=True):
+            self.events.pop(remove_index)
+        self.events.append(merged)
+        self.manual_labels.pop(left.event_id, None)
+        self.manual_labels.pop(right.event_id, None)
+        self._persist_events()
+        return {"merged": True, "event": merged.to_dict()}
 
     def clear(self) -> None:
         self.events = []
@@ -205,6 +319,32 @@ class EventStore:
                 continue
             filtered.append(event)
         return filtered
+
+    def _find_event_index(self, event_id: str) -> int:
+        for index, event in enumerate(self.events):
+            if event.event_id == event_id:
+                return index
+        raise KeyError(event_id)
+
+    def _persist_events(self) -> None:
+        self.events.sort(key=lambda event: (event.case_id, event.timestamp_start, event.event_id))
+        live_event_ids = {event.event_id for event in self.events}
+        self.manual_labels = {event_id: label for event_id, label in self.manual_labels.items() if event_id in live_event_ids}
+        if self.db_path is not None:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM events")
+                conn.executemany(
+                    "INSERT OR REPLACE INTO events(event_id, payload_json) VALUES(?, ?)",
+                    [(event.event_id, json.dumps(event.to_dict(), ensure_ascii=False)) for event in self.events],
+                )
+                conn.execute(
+                    f"DELETE FROM manual_labels WHERE event_id NOT IN ({','.join('?' for _ in live_event_ids)})"
+                    if live_event_ids
+                    else "DELETE FROM manual_labels",
+                    tuple(live_event_ids),
+                )
+                conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)", ("initialized", "true"))
+        self.metadata["initialized"] = "true"
 
     def diagnostics(self) -> dict[str, object]:
         return {
@@ -346,3 +486,56 @@ def _normalize_setting(key: str, value: object) -> object:
                 seen.add(key_value)
         return normalized
     return value
+
+
+def _replace_event(event: StandardEvent, **changes: object) -> StandardEvent:
+    return replace(event, **changes)
+
+
+def _parse_iso(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _to_iso(value: datetime) -> str:
+    return value.isoformat()
+
+
+def _event_time_bounds(event: StandardEvent) -> tuple[datetime, datetime, float]:
+    start = _parse_iso(event.timestamp_start)
+    end = _parse_iso(event.timestamp_end)
+    duration = max((end - start).total_seconds(), float(event.duration_seconds))
+    if end <= start and duration > 0:
+        end = start + timedelta(seconds=duration)
+    return start, end, duration
+
+
+def _normalize_activity(activity: str) -> str:
+    return " ".join((activity or "unlabeled activity").strip().lower().split())
+
+
+def _derived_event_id(event_id: str, suffix: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256(f"{event_id}:{suffix}".encode("utf-8")).hexdigest()
+    return f"evt_{digest[:20]}"
+
+
+def _edited_metadata(event: StandardEvent, action: str, **extra: object) -> str:
+    try:
+        metadata = json.loads(event.metadata_json) if event.metadata_json else {}
+        if not isinstance(metadata, dict):
+            metadata = {"previous_metadata": metadata}
+    except json.JSONDecodeError:
+        metadata = {"previous_metadata_json": event.metadata_json}
+    metadata.update(
+        {
+            "timeline_edit_action": action,
+            "timeline_edit_source_event_id": event.event_id,
+            "timeline_edited_at": datetime.now(timezone.utc).isoformat(),
+            **extra,
+        }
+    )
+    return json.dumps(metadata, ensure_ascii=False, sort_keys=True)
