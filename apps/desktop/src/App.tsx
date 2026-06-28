@@ -9,6 +9,7 @@ import {
   loadDashboardData,
   mergeEvents,
   pauseRecording,
+  previewActivityWatchLocal,
   previewImport,
   previewExport,
   resumeRecording,
@@ -26,6 +27,8 @@ import type { TranslationKey } from "./i18n";
 import type {
   AppSwitching,
   AppSettings,
+  ActivityWatchImportMode,
+  ActivityWatchPreview,
   AutomationCandidate,
   AutomationReviewStatus,
   CsvMapping,
@@ -64,7 +67,8 @@ type AppActions = {
   refresh: () => Promise<void>;
   previewImport: (format: "csv" | "json", path: string, mapping?: CsvMapping, dateFormat?: string, timezone?: string) => Promise<ImportPreview>;
   importEvents: (format: "csv" | "json", path: string, mapping?: CsvMapping, dateFormat?: string, timezone?: string) => Promise<void>;
-  importActivityWatch: () => Promise<void>;
+  previewActivityWatch: (enabled: boolean) => Promise<ActivityWatchPreview>;
+  importActivityWatch: (enabled: boolean, mode: ActivityWatchImportMode) => Promise<void>;
   previewExport: (format: ExportFormat) => Promise<ExportPreview>;
   exportArtifact: (format: ExportFormat) => Promise<void>;
   saveExport: (format: ExportFormat, path: string) => Promise<void>;
@@ -228,10 +232,23 @@ export function App() {
         const result = await importEvents(format, path, mapping, dateFormat, timezone);
         return t("message.imported", { count: result.imported_events, source: result.source || format });
       }),
-    importActivityWatch: () =>
+    previewActivityWatch: async (enabled) => {
+      setWorking(true);
+      setError("");
+      setActionMessage("");
+      try {
+        return await previewActivityWatchLocal(enabled);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : t("message.previewFailed"));
+        throw err;
+      } finally {
+        setWorking(false);
+      }
+    },
+    importActivityWatch: (enabled, mode) =>
       runAction(async () => {
-        const result = await importActivityWatchLocal(true);
-        return t("message.activityImported", { count: result.imported_events });
+        const result = await importActivityWatchLocal(enabled, mode);
+        return t("message.activityImported", { count: result.imported_events, skipped: result.skipped_duplicates || 0 });
       }),
     previewExport: async (format) => {
       setWorking(true);
@@ -492,6 +509,8 @@ function HomeView({
   const [format, setFormat] = useState<"csv" | "json">("csv");
   const [path, setPath] = useState("");
   const [activityWatchEnabled, setActivityWatchEnabled] = useState(false);
+  const [activityWatchMode, setActivityWatchMode] = useState<ActivityWatchImportMode>("skip_duplicates");
+  const [activityWatchPreview, setActivityWatchPreview] = useState<ActivityWatchPreview | null>(null);
   const [collectionOpen, setCollectionOpen] = useState(data.events.length === 0);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(data.settings);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
@@ -538,6 +557,10 @@ function HomeView({
     const dateFormat = format === "csv" ? csvDateFormat : "";
     const timezone = format === "csv" ? csvTimezone : "UTC";
     void actions.importEvents(format, path, mapping, dateFormat, timezone);
+  };
+
+  const previewActivityWatch = () => {
+    void actions.previewActivityWatch(activityWatchEnabled).then(setActivityWatchPreview);
   };
 
   return (
@@ -672,14 +695,78 @@ function HomeView({
           <input
             type="checkbox"
             checked={activityWatchEnabled}
-            onChange={(event) => setActivityWatchEnabled(event.target.checked)}
+            onChange={(event) => {
+              setActivityWatchEnabled(event.target.checked);
+              setActivityWatchPreview(null);
+            }}
             disabled={working}
           />
           <span>{t("import.activityConsent")}</span>
         </label>
-        <button onClick={() => void actions.importActivityWatch()} disabled={working || !activityWatchEnabled}>
-          {t("import.activityButton")}
-        </button>
+        <div className="activitywatch-flow">
+          <div className="inline-fields">
+            <button onClick={previewActivityWatch} disabled={working || !activityWatchEnabled}>
+              {t("import.activityPreviewButton")}
+            </button>
+            <select value={activityWatchMode} onChange={(event) => setActivityWatchMode(event.target.value as ActivityWatchImportMode)} disabled={working}>
+              <option value="skip_duplicates">{t("import.activityModeSkip")}</option>
+              <option value="append">{t("import.activityModeAppend")}</option>
+              <option value="replace">{t("import.activityModeReplace")}</option>
+            </select>
+            <button
+              onClick={() => void actions.importActivityWatch(activityWatchEnabled, activityWatchMode)}
+              disabled={working || !activityWatchEnabled || !activityWatchPreview}
+            >
+              {t("import.activityButton")}
+            </button>
+          </div>
+          <p>{t("import.activitySafety")}</p>
+          {activityWatchPreview ? (
+            <div className="preview-panel activitywatch-preview">
+              <div className="preview-summary">
+                <b>{t("import.activityPreviewTitle")}</b>
+                <span>{activityWatchPreview.local_only ? t("status.localOnly") : activityWatchPreview.base_url}</span>
+              </div>
+              <div className="activitywatch-metrics">
+                <DetailStat label={t("import.events", { count: activityWatchPreview.event_count })} value={t("import.activityImportable", { count: activityWatchPreview.importable_event_count })} />
+                <DetailStat label={t("import.activityNew")} value={activityWatchPreview.new_event_count.toString()} />
+                <DetailStat label={t("import.activityDuplicates")} value={activityWatchPreview.duplicate_count.toString()} />
+                <DetailStat label={t("import.activityExcluded")} value={activityWatchPreview.excluded_event_count.toString()} />
+                <DetailStat label={t("import.confidential", { count: activityWatchPreview.confidential_count })} value={activityWatchPreview.confidential_count.toString()} />
+                <DetailStat
+                  label={t("import.activityPeriod")}
+                  value={
+                    activityWatchPreview.period_start && activityWatchPreview.period_end
+                      ? `${formatDateTime(activityWatchPreview.period_start)} - ${formatDateTime(activityWatchPreview.period_end)}`
+                      : "-"
+                  }
+                />
+              </div>
+              {Object.keys(activityWatchPreview.app_usage_seconds).length > 0 ? (
+                <div className="activitywatch-apps">
+                  <strong>{t("import.activityTopApps")}</strong>
+                  {Object.entries(activityWatchPreview.app_usage_seconds).map(([appName, seconds]) => (
+                    <div className="history-row" key={appName}>
+                      <span>{appName}</span>
+                      <b>{t("unit.minutesShort", { count: Math.round(seconds / 60) })}</b>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              <div className="preview-list">
+                {activityWatchPreview.sample_events.map((event, index) => (
+                  <div className="preview-row" key={`${event.case_id}-${event.activity}-${index}`}>
+                    <span>{event.case_id}</span>
+                    <b>{event.activity}</b>
+                    <span>{event.app_name || t("import.unknown")}</span>
+                    <span>{t("unit.secondsShort", { count: Math.round(event.duration_seconds) })}</span>
+                  </div>
+                ))}
+              </div>
+              {activityWatchPreview.message ? <p>{activityWatchPreview.message}</p> : null}
+            </div>
+          ) : null}
+        </div>
         {data.importHistory.length > 0 ? (
           <div className="history-list">
             <strong>{t("import.history")}</strong>

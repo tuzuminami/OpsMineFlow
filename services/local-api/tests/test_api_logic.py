@@ -9,10 +9,12 @@ from unittest.mock import patch
 from opsmineflow_api.app import (
     allowed_webui_origins,
     create_api_snapshot,
+    create_activitywatch_preview,
     create_diagnostics,
     create_event_quality_report,
     create_export_artifact,
     create_import_preview,
+    import_activitywatch_into_store,
     import_path_into_store,
     run_diagnostic_checks,
     save_export_artifact,
@@ -338,6 +340,45 @@ class ApiLogicTests(unittest.TestCase):
         self.assertEqual(result["imported_events"], 1)
         self.assertEqual(store.events[0].case_id, "C-1")
         self.assertEqual(store.events[0].domain, "127.0.0.1")
+
+    def test_activitywatch_preview_requires_explicit_enable(self) -> None:
+        with patch("opsmineflow_api.app.import_activitywatch_local") as mocked_import:
+            preview = create_activitywatch_preview(False, store=EventStore())
+
+        mocked_import.assert_not_called()
+        self.assertFalse(preview["enabled"])
+        self.assertEqual(preview["event_count"], 0)
+        self.assertIn("disabled", preview["message"])
+
+    def test_activitywatch_preview_summarizes_duplicates_and_filters(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        store = EventStore(events=[events[0]])
+        store.update_settings({"excluded_apps": [events[1].app_name]})
+
+        with patch("opsmineflow_api.app.import_activitywatch_local", return_value=events[:3]):
+            preview = create_activitywatch_preview(True, store=store)
+
+        self.assertTrue(preview["enabled"])
+        self.assertEqual(preview["event_count"], 3)
+        self.assertEqual(preview["importable_event_count"], 2)
+        self.assertEqual(preview["duplicate_count"], 1)
+        self.assertEqual(preview["new_event_count"], 1)
+        self.assertEqual(preview["excluded_event_count"], 1)
+        self.assertEqual(preview["app_usage_seconds"][events[0].app_name], events[0].duration_seconds)
+        self.assertTrue(preview["period_start"])
+        self.assertTrue(preview["period_end"])
+
+    def test_activitywatch_skip_duplicates_appends_and_records_history(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        store = EventStore(events=[events[0]])
+
+        with patch("opsmineflow_api.app.import_activitywatch_local", return_value=events[:3]):
+            result = import_activitywatch_into_store(True, mode="skip_duplicates", store=store)
+
+        self.assertEqual(result["imported_events"], 2)
+        self.assertEqual(result["skipped_duplicates"], 1)
+        self.assertEqual(len(store.events), 3)
+        self.assertEqual(store.list_import_history()[0]["source"], "activitywatch_local_skip_duplicates")
 
     def test_clear_persists_initialized_empty_state(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")

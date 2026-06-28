@@ -6,14 +6,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
-from .activitywatch import import_activitywatch_local
 from .app import (
     allowed_webui_origins,
     create_api_snapshot,
+    create_activitywatch_preview,
     create_diagnostics,
     create_event_quality_report,
     create_export_artifact,
     create_import_preview,
+    import_activitywatch_into_store,
     import_path_into_store,
     run_diagnostic_checks,
     save_export_artifact,
@@ -104,6 +105,14 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     )
                 )
                 return
+            if path == "/import/activitywatch-preview":
+                self._send_json(
+                    create_activitywatch_preview(
+                        bool(payload.get("enabled")),
+                        str(payload.get("base_url") or "http://127.0.0.1:5600"),
+                    )
+                )
+                return
             if path == "/import/csv":
                 self._send_json(
                     import_path_into_store(
@@ -119,12 +128,13 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 self._send_json(import_path_into_store("json", str(payload.get("path") or "")))
                 return
             if path == "/import/activitywatch-local":
-                if not payload.get("enabled"):
-                    self._send_json({"imported_events": 0, "message": "ActivityWatch import is disabled until explicitly enabled."})
-                    return
-                events = import_activitywatch_local(str(payload.get("base_url") or "http://127.0.0.1:5600"))
-                default_store().replace(events, import_source="activitywatch_local", import_path=str(payload.get("base_url") or "http://127.0.0.1:5600"))
-                self._send_json({"imported_events": len(events), "source": "activitywatch_local"})
+                self._send_json(
+                    import_activitywatch_into_store(
+                        bool(payload.get("enabled")),
+                        str(payload.get("base_url") or "http://127.0.0.1:5600"),
+                        str(payload.get("mode") or "replace"),
+                    )
+                )
                 return
             if path == "/events/label":
                 try:

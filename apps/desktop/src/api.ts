@@ -1,6 +1,8 @@
 import type {
   AppSwitching,
   AppSettings,
+  ActivityWatchImportMode,
+  ActivityWatchPreview,
   AutomationCandidate,
   AutomationReviewStatus,
   CsvMapping,
@@ -99,6 +101,10 @@ export async function resumeRecording() {
 export type ImportResult = {
   imported_events: number;
   source?: string;
+  mode?: ActivityWatchImportMode;
+  fetched_events?: number;
+  skipped_duplicates?: number;
+  excluded_events?: number;
   message?: string;
 };
 
@@ -121,8 +127,12 @@ export async function previewImport(format: "csv" | "json", path: string, mappin
   });
 }
 
-export async function importActivityWatchLocal(enabled: boolean) {
-  return postJson<ImportResult>("/import/activitywatch-local", { enabled, base_url: "http://127.0.0.1:5600" });
+export async function previewActivityWatchLocal(enabled: boolean) {
+  return postJson<ActivityWatchPreview>("/import/activitywatch-preview", { enabled, base_url: "http://127.0.0.1:5600" });
+}
+
+export async function importActivityWatchLocal(enabled: boolean, mode: ActivityWatchImportMode = "replace") {
+  return postJson<ImportResult>("/import/activitywatch-local", { enabled, mode, base_url: "http://127.0.0.1:5600" });
 }
 
 export async function saveSettings(settings: Partial<AppSettings>) {
