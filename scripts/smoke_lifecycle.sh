@@ -77,7 +77,9 @@ PY
 "$ROOT_DIR/.venv/bin/python" - "$API_PORT" <<'PY'
 import json
 import sys
+import tempfile
 import urllib.request
+from pathlib import Path
 
 base = f"http://127.0.0.1:{sys.argv[1]}"
 
@@ -98,6 +100,32 @@ assert diagnostics["privacy_evidence"]["status"] == "passed"
 assert all(item["status"] == "not_collected" for item in diagnostics["privacy_evidence"]["items"])
 assert diagnostics["recording"]["capture_scope"] == "frontmost_app_only"
 assert "token_ttl_seconds" in diagnostics["recording"]
+
+with tempfile.TemporaryDirectory() as temp_dir:
+    mapped_path = Path(temp_dir) / "mapped-client.csv"
+    mapped_path.write_text(
+        "案件,作業,開始,終了,担当者,利用アプリ\n"
+        "L-1,契約確認,2026/06/01 09:00,2026/06/01 09:05,佐藤,Chrome\n",
+        encoding="utf-8",
+    )
+    mapped_payload = {
+        "path": str(mapped_path),
+        "mapping": {
+            "case_id": "案件",
+            "activity": "作業",
+            "timestamp_start": "開始",
+            "timestamp_end": "終了",
+            "user": "担当者",
+            "app_name": "利用アプリ",
+        },
+        "date_format": "%Y/%m/%d %H:%M",
+        "timezone": "Asia/Tokyo",
+    }
+    mapped_preview = request("/import/preview", {"format": "csv", **mapped_payload})
+    assert mapped_preview["columns"] == ["案件", "作業", "開始", "終了", "担当者", "利用アプリ"]
+    assert mapped_preview["event_count"] == 1
+    mapped_result = request("/import/csv", mapped_payload)
+    assert mapped_result["imported_events"] == 1
 
 preview = request("/import/preview", {"format": "csv", "path": "data/sample/sample_events.csv"})
 assert preview["event_count"] == 7

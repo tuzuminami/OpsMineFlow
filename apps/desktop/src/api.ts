@@ -3,6 +3,7 @@ import type {
   AppSettings,
   AutomationCandidate,
   AutomationReviewStatus,
+  CsvMapping,
   DiagnosticChecks,
   Diagnostics,
   EventRecord,
@@ -90,12 +91,23 @@ export type ImportResult = {
   message?: string;
 };
 
-export async function importEvents(format: "csv" | "json", path: string) {
-  return postJson<ImportResult>(`/import/${format}`, { path });
+function importPayload(path: string, mapping?: CsvMapping, dateFormat = "", timezone = "UTC") {
+  const payload: { path: string; mapping?: CsvMapping; date_format?: string; timezone?: string } = { path };
+  if (mapping && Object.values(mapping).some((value) => value.trim())) payload.mapping = mapping;
+  if (dateFormat.trim()) payload.date_format = dateFormat;
+  if (timezone.trim()) payload.timezone = timezone;
+  return payload;
 }
 
-export async function previewImport(format: "csv" | "json", path: string) {
-  return postJson<ImportPreview>("/import/preview", { format, path });
+export async function importEvents(format: "csv" | "json", path: string, mapping?: CsvMapping, dateFormat = "", timezone = "UTC") {
+  return postJson<ImportResult>(`/import/${format}`, importPayload(path, format === "csv" ? mapping : undefined, dateFormat, timezone));
+}
+
+export async function previewImport(format: "csv" | "json", path: string, mapping?: CsvMapping, dateFormat = "", timezone = "UTC") {
+  return postJson<ImportPreview>("/import/preview", {
+    format,
+    ...importPayload(path, format === "csv" ? mapping : undefined, dateFormat, timezone)
+  });
 }
 
 export async function importActivityWatchLocal(enabled: boolean) {

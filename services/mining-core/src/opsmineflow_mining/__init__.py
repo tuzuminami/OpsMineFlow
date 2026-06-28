@@ -1,4 +1,11 @@
-from .importers import build_native_app_event, load_events_from_csv, load_events_from_json
+from .importers import (
+    build_native_app_event,
+    inspect_csv_columns,
+    load_events_from_csv,
+    load_events_from_csv_with_mapping,
+    load_events_from_json,
+    suggest_csv_mapping,
+)
 from .models import StandardEvent
 from .pipeline import (
     analyze_variants,
@@ -30,8 +37,10 @@ __all__ = [
     "detect_repeated_patterns",
     "export_markdown_report",
     "export_mermaid",
+    "inspect_csv_columns",
     "load_events",
     "load_events_from_csv",
+    "load_events_from_csv_with_mapping",
     "load_events_from_json",
     "mask_sensitive_fields",
     "mask_url",
@@ -39,4 +48,5 @@ __all__ = [
     "normalize_events",
     "score_automation_candidates",
     "sessionize_events",
+    "suggest_csv_mapping",
 ]

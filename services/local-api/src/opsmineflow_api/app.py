@@ -20,9 +20,12 @@ from opsmineflow_mining import (
     detect_bottlenecks,
     export_markdown_report,
     export_mermaid,
+    inspect_csv_columns,
     load_events_from_csv,
+    load_events_from_csv_with_mapping,
     load_events_from_json,
     score_automation_candidates,
+    suggest_csv_mapping,
 )
 from opsmineflow_mining.pipeline import metrics_to_dict
 
@@ -44,11 +47,17 @@ except ModuleNotFoundError:
 
 class PathImportRequest(BaseModel):  # type: ignore[misc, valid-type]
     path: str
+    mapping: dict[str, str] | None = None
+    date_format: str = ""
+    timezone: str = "UTC"
 
 
 class ImportPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
     format: str
     path: str
+    mapping: dict[str, str] | None = None
+    date_format: str = ""
+    timezone: str = "UTC"
 
 
 class LabelRequest(BaseModel):  # type: ignore[misc, valid-type]
@@ -197,24 +206,66 @@ def event_to_api_dict(event: Any, settings: dict[str, object]) -> dict[str, obje
     return payload
 
 
-def load_events_for_import(format_name: str, path: Path) -> list[Any]:
+def load_events_for_import(
+    format_name: str,
+    path: Path,
+    mapping: dict[str, str] | None = None,
+    date_format: str = "",
+    timezone_name: str = "UTC",
+) -> list[Any]:
     if not path.exists():
         raise FileNotFoundError(f"{format_name.upper()} file was not found")
     if format_name == "csv":
+        if mapping is not None and any(value.strip() for value in mapping.values()):
+            return load_events_from_csv_with_mapping(path, mapping, date_format=date_format, timezone_name=timezone_name)
         return load_events_from_csv(path)
     if format_name == "json":
         return load_events_from_json(path)
     raise ValueError("Import format must be csv or json.")
 
 
-def create_import_preview(format_name: str, path_value: str) -> dict[str, Any]:
+def create_import_preview(
+    format_name: str,
+    path_value: str,
+    mapping: dict[str, str] | None = None,
+    date_format: str = "",
+    timezone_name: str = "UTC",
+) -> dict[str, Any]:
     path = Path(path_value)
-    events = load_events_for_import(format_name, path)
+    columns: list[str] = []
+    sample_rows: list[dict[str, str]] = []
+    suggested_mapping: dict[str, str] = {}
+    mapping_warnings: list[str] = []
+    effective_mapping = mapping
+    if format_name == "csv":
+        inspection = inspect_csv_columns(path)
+        columns = [str(column) for column in inspection["columns"]]
+        sample_rows = [
+            {str(key): str(value) for key, value in row.items()}
+            for row in inspection["sample_rows"]  # type: ignore[union-attr]
+        ]
+        suggested_mapping = suggest_csv_mapping(columns)
+        if mapping is None or not any(value.strip() for value in mapping.values()):
+            effective_mapping = suggested_mapping
+    try:
+        events = load_events_for_import(format_name, path, effective_mapping, date_format, timezone_name)
+    except ValueError as exc:
+        if format_name != "csv":
+            raise
+        events = []
+        mapping_warnings.append(str(exc))
     return {
         "format": format_name,
         "path": str(path),
         "event_count": len(events),
         "confidential_count": sum(1 for event in events if event.confidential_flag),
+        "columns": columns,
+        "sample_rows": sample_rows,
+        "suggested_mapping": suggested_mapping,
+        "mapping": effective_mapping or {},
+        "mapping_warnings": mapping_warnings,
+        "date_format": date_format,
+        "timezone": timezone_name,
         "sample_events": [
             {
                 "case_id": event.case_id,
@@ -228,9 +279,16 @@ def create_import_preview(format_name: str, path_value: str) -> dict[str, Any]:
     }
 
 
-def import_path_into_store(format_name: str, path_value: str, store: EventStore | None = None) -> dict[str, Any]:
+def import_path_into_store(
+    format_name: str,
+    path_value: str,
+    store: EventStore | None = None,
+    mapping: dict[str, str] | None = None,
+    date_format: str = "",
+    timezone_name: str = "UTC",
+) -> dict[str, Any]:
     path = Path(path_value)
-    events = load_events_for_import(format_name, path)
+    events = load_events_for_import(format_name, path, mapping, date_format, timezone_name)
     active_store = store or default_store()
     active_store.replace(events, import_source=format_name, import_path=str(path))
     return {"imported_events": len(events), "source": format_name}
@@ -581,7 +639,13 @@ if app is not None:
     @app.post("/import/preview")
     def import_preview(request: ImportPreviewRequest) -> dict[str, Any]:
         try:
-            return create_import_preview(request.format, request.path)
+            return create_import_preview(
+                request.format,
+                request.path,
+                request.mapping,
+                request.date_format,
+                request.timezone,
+            )
         except FileNotFoundError as exc:
             raise _not_found(str(exc))
         except ValueError as exc:
@@ -594,7 +658,13 @@ if app is not None:
     @app.post("/import/csv")
     def import_csv(request: PathImportRequest) -> dict[str, Any]:
         try:
-            return import_path_into_store("csv", request.path)
+            return import_path_into_store(
+                "csv",
+                request.path,
+                mapping=request.mapping,
+                date_format=request.date_format,
+                timezone_name=request.timezone,
+            )
         except FileNotFoundError as exc:
             raise _not_found(str(exc))
 

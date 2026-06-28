@@ -823,6 +823,124 @@ textarea {
   padding-bottom: 0;
 }
 
+.csv-mapping-panel {
+  background: #f8faf9;
+  border: 1px solid #dce3e3;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.csv-mapping-heading {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.csv-mapping-heading h3 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.csv-mapping-heading p {
+  color: #58646b;
+  margin: 3px 0 0;
+}
+
+.csv-mapping-heading > span {
+  background: #edf3f2;
+  border: 1px solid #c8d2d2;
+  border-radius: 999px;
+  color: #163235;
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 9px;
+}
+
+.csv-raw-preview {
+  display: grid;
+  gap: 6px;
+}
+
+.csv-raw-preview strong {
+  font-size: 12px;
+}
+
+.csv-raw-table {
+  border: 1px solid #edf1f1;
+  border-radius: 8px;
+  overflow: auto;
+}
+
+.csv-raw-row {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(110px, 1fr));
+  min-width: 660px;
+}
+
+.csv-raw-row span {
+  border-right: 1px solid #edf1f1;
+  color: #58646b;
+  font-size: 12px;
+  overflow: hidden;
+  padding: 7px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.csv-raw-row span:last-child {
+  border-right: 0;
+}
+
+.csv-raw-header span {
+  background: #eef5f3;
+  color: #163235;
+  font-weight: 700;
+}
+
+.csv-mapping-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.csv-mapping-grid label,
+.csv-format-row label {
+  display: grid;
+  gap: 5px;
+}
+
+.csv-mapping-grid label > span,
+.csv-format-row label > span {
+  align-items: center;
+  color: #58646b;
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+}
+
+.csv-mapping-grid b {
+  background: #fff4d5;
+  border-radius: 999px;
+  color: #7b4b00;
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
+.csv-format-row,
+.csv-mapping-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.csv-mapping-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .check-row,
 .number-row,
 .text-row {
@@ -1354,6 +1472,7 @@ th {
 
   .recording-heading,
   .timeline-heading,
+  .csv-mapping-heading,
   .recording-scope {
     align-items: stretch;
     flex-direction: column;
@@ -1421,6 +1540,8 @@ th {
   .inline-fields,
   .input-with-button,
   .danger-row,
+  .csv-format-row,
+  .csv-mapping-actions,
   .preview-row,
   .history-row,
   .process-toolbar,
