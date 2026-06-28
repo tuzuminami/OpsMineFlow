@@ -121,6 +121,22 @@ class EventStore:
         self._persist_events()
         return {"excluded": True, "event_id": removed.event_id}
 
+    def set_event_quality_review(self, event_id: str, status: str) -> dict[str, object]:
+        normalized_status = status.strip().casefold() or "approved"
+        if normalized_status not in {"approved", "unreviewed"}:
+            raise ValueError("Quality review status must be approved or unreviewed.")
+        index = self._find_event_index(event_id)
+        self.events[index] = _replace_event(
+            self.events[index],
+            metadata_json=_edited_metadata(
+                self.events[index],
+                "quality_review",
+                quality_review_status=normalized_status,
+            ),
+        )
+        self._persist_events()
+        return {"event_id": event_id, "quality_review_status": normalized_status}
+
     def split_event(
         self,
         event_id: str,

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import platform
 import shutil
 import socket
 import subprocess
 import sys
+from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -72,6 +74,11 @@ class EventActivityUpdateRequest(BaseModel):  # type: ignore[misc, valid-type]
 
 class EventExcludeRequest(BaseModel):  # type: ignore[misc, valid-type]
     event_id: str
+
+
+class EventQualityReviewRequest(BaseModel):  # type: ignore[misc, valid-type]
+    event_id: str
+    status: str = "approved"
 
 
 class EventSplitRequest(BaseModel):  # type: ignore[misc, valid-type]
@@ -170,6 +177,7 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
         "summary": metrics_to_dict(metrics),
         "app_switching": detect_app_switches(events),
         "automation_candidates": automation_candidates,
+        "event_quality": create_event_quality_report(active_store),
         "process_map": process_map,
         "variants": analyze_variants(events),
         "bottlenecks": detect_bottlenecks(events),
@@ -201,8 +209,179 @@ def append_automation_review_section(markdown: str, candidates: list[dict[str, o
     return "\n".join(lines) + "\n"
 
 
+def create_event_quality_report(store: EventStore | None = None) -> dict[str, Any]:
+    active_store = store or default_store()
+    items: list[dict[str, Any]] = []
+    issue_totals = {
+        "missing_fields": 0,
+        "invalid_time": 0,
+        "zero_duration": 0,
+        "short_duration": 0,
+        "long_duration": 0,
+        "unlabeled": 0,
+        "low_confidence": 0,
+    }
+    approved_count = 0
+    for event in active_store.events:
+        status = _event_quality_status(event)
+        if status == "approved":
+            approved_count += 1
+        issues = _event_quality_issues(event)
+        for issue in issues:
+            code = str(issue["code"])
+            if code in issue_totals:
+                issue_totals[code] += 1
+        if issues:
+            items.append(
+                {
+                    "event_id": event.event_id,
+                    "case_id": event.case_id,
+                    "activity": event.activity_raw,
+                    "app_name": event.app_name,
+                    "timestamp_start": event.timestamp_start,
+                    "timestamp_end": event.timestamp_end,
+                    "duration_seconds": event.duration_seconds,
+                    "quality_review_status": status,
+                    "issues": issues,
+                    "recommended_action": _quality_recommended_action(issues),
+                }
+            )
+    unresolved_items = [item for item in items if item["quality_review_status"] != "approved"]
+    return {
+        "summary": {
+            "total_events": len(active_store.events),
+            "affected_event_count": len(unresolved_items),
+            "issue_count": sum(len(item["issues"]) for item in unresolved_items),
+            "approved_count": approved_count,
+            **issue_totals,
+        },
+        "items": items,
+    }
+
+
+def _event_quality_issues(event: Any) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    missing = []
+    if not event.case_id.strip():
+        missing.append("case_id")
+    if not event.activity_raw.strip():
+        missing.append("activity")
+    if not event.timestamp_start.strip() or not event.timestamp_end.strip():
+        missing.append("timestamp")
+    if not event.app_name.strip():
+        missing.append("app_name")
+    if missing:
+        issues.append(
+            {
+                "code": "missing_fields",
+                "severity": "high",
+                "label": f"Missing fields: {', '.join(missing)}",
+                "remediation": "Edit the event label or exclude the interval before analysis.",
+            }
+        )
+
+    try:
+        start = _parse_event_time(event.timestamp_start)
+        end = _parse_event_time(event.timestamp_end)
+        if end < start:
+            issues.append(
+                {
+                    "code": "invalid_time",
+                    "severity": "high",
+                    "label": "End time is before start time.",
+                    "remediation": "Split, merge, or exclude this interval.",
+                }
+            )
+    except ValueError:
+        issues.append(
+            {
+                "code": "invalid_time",
+                "severity": "high",
+                "label": "Timestamp format could not be parsed.",
+                "remediation": "Fix the source data and import again, or exclude this interval.",
+            }
+        )
+
+    duration = float(event.duration_seconds)
+    if duration <= 0:
+        issues.append(
+            {
+                "code": "zero_duration",
+                "severity": "high",
+                "label": "Duration is zero or negative.",
+                "remediation": "Exclude this interval or fix the source timestamps.",
+            }
+        )
+    elif duration < 3:
+        issues.append(
+            {
+                "code": "short_duration",
+                "severity": "medium",
+                "label": "Duration is very short.",
+                "remediation": "Merge with a neighboring interval if it is noise.",
+            }
+        )
+    elif duration >= 30 * 60:
+        issues.append(
+            {
+                "code": "long_duration",
+                "severity": "medium",
+                "label": "Duration is unusually long.",
+                "remediation": "Split it or exclude it as a break if it was not work.",
+            }
+        )
+
+    normalized_activity = " ".join(event.activity_raw.strip().casefold().split())
+    if normalized_activity in {"", "unlabeled activity", "unknown"}:
+        issues.append(
+            {
+                "code": "unlabeled",
+                "severity": "high",
+                "label": "Work label is missing or generic.",
+                "remediation": "Enter a business-friendly work label.",
+            }
+        )
+    elif event.activity_raw == event.app_name or event.activity_raw.endswith(f" / {event.app_name}"):
+        issues.append(
+            {
+                "code": "low_confidence",
+                "severity": "low",
+                "label": "Work label may still be app-based.",
+                "remediation": "Rename it to the actual business activity if needed.",
+            }
+        )
+    return issues
+
+
+def _quality_recommended_action(issues: list[dict[str, str]]) -> str:
+    codes = {issue["code"] for issue in issues}
+    if "missing_fields" in codes or "unlabeled" in codes or "low_confidence" in codes:
+        return "edit_label"
+    if "long_duration" in codes or "zero_duration" in codes or "invalid_time" in codes:
+        return "split_or_exclude"
+    return "review"
+
+
+def _event_quality_status(event: Any) -> str:
+    try:
+        metadata = json.loads(event.metadata_json) if event.metadata_json else {}
+    except json.JSONDecodeError:
+        return "unreviewed"
+    if not isinstance(metadata, dict):
+        return "unreviewed"
+    return str(metadata.get("quality_review_status") or "unreviewed")
+
+
+def _parse_event_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def event_to_api_dict(event: Any, settings: dict[str, object]) -> dict[str, object]:
     payload = event.to_dict()
+    payload["quality_review_status"] = _event_quality_status(event)
     if not settings.get("mask_window_titles", True):
         payload["window_title_masked"] = payload["window_title"]
     if not settings.get("mask_url_paths", True):
@@ -729,6 +908,15 @@ if app is not None:
         except KeyError:
             raise _not_found("Event was not found")
 
+    @app.post("/events/quality-review")
+    def review_event_quality(request: EventQualityReviewRequest) -> dict[str, Any]:
+        try:
+            return default_store().set_event_quality_review(request.event_id, request.status)
+        except KeyError:
+            raise _not_found("Event was not found")
+        except ValueError as exc:
+            raise _bad_request(str(exc))
+
     @app.post("/events/split")
     def split_event(request: EventSplitRequest) -> dict[str, Any]:
         try:
@@ -773,6 +961,10 @@ if app is not None:
     @app.get("/analytics/automation-candidates")
     def analytics_automation_candidates() -> list[dict[str, Any]]:
         return create_api_snapshot()["automation_candidates"]
+
+    @app.get("/analytics/event-quality")
+    def analytics_event_quality() -> dict[str, Any]:
+        return create_event_quality_report()
 
     @app.post("/automation/review")
     def automation_review(request: AutomationReviewRequest) -> dict[str, str]:

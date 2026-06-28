@@ -11,6 +11,7 @@ from .app import (
     allowed_webui_origins,
     create_api_snapshot,
     create_diagnostics,
+    create_event_quality_report,
     create_export_artifact,
     create_import_preview,
     import_path_into_store,
@@ -43,6 +44,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             "/analytics/summary": snapshot["summary"],
             "/analytics/app-switching": snapshot["app_switching"],
             "/analytics/automation-candidates": snapshot["automation_candidates"],
+            "/analytics/event-quality": create_event_quality_report(),
             "/analytics/process-map": snapshot["process_map"],
             "/reports/markdown": {"markdown": snapshot["markdown_report"]},
         }
@@ -148,6 +150,19 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     self._send_json(default_store().exclude_event(str(payload.get("event_id") or "")))
                 except KeyError:
                     self._send_json({"error": "Event was not found"}, status=404)
+                return
+            if path == "/events/quality-review":
+                try:
+                    self._send_json(
+                        default_store().set_event_quality_review(
+                            str(payload.get("event_id") or ""),
+                            str(payload.get("status") or "approved"),
+                        )
+                    )
+                except KeyError:
+                    self._send_json({"error": "Event was not found"}, status=404)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
                 return
             if path == "/events/split":
                 try:

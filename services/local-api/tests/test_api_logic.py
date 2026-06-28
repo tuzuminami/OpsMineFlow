@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from opsmineflow_api.app import (
     allowed_webui_origins,
     create_api_snapshot,
     create_diagnostics,
+    create_event_quality_report,
     create_export_artifact,
     create_import_preview,
     import_path_into_store,
@@ -201,6 +203,36 @@ class ApiLogicTests(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["total_events"], 7)
         self.assertIn("flowchart LR", snapshot["mermaid"])
         self.assertIn("<mxfile", snapshot["drawio"])
+
+    def test_event_quality_report_flags_and_approves_issues(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        unlabeled = replace(
+            events[0],
+            event_id="evt-quality-unlabeled",
+            activity_raw="Unlabeled activity",
+            activity_normalized="unlabeled activity",
+            duration_seconds=0,
+        )
+        reversed_time = replace(
+            events[1],
+            event_id="evt-quality-time",
+            timestamp_start="2026-06-21T02:00:00+00:00",
+            timestamp_end="2026-06-21T01:00:00+00:00",
+        )
+        long_event = replace(events[2], event_id="evt-quality-long", duration_seconds=3600)
+        store = EventStore(events=[unlabeled, reversed_time, long_event])
+
+        report = create_event_quality_report(store)
+        store.set_event_quality_review("evt-quality-unlabeled", "approved")
+        reviewed_report = create_event_quality_report(store)
+
+        self.assertEqual(report["summary"]["affected_event_count"], 3)
+        self.assertGreaterEqual(report["summary"]["zero_duration"], 1)
+        self.assertGreaterEqual(report["summary"]["invalid_time"], 1)
+        self.assertGreaterEqual(report["summary"]["long_duration"], 1)
+        self.assertGreaterEqual(report["summary"]["unlabeled"], 1)
+        self.assertEqual(reviewed_report["summary"]["approved_count"], 1)
+        self.assertEqual(reviewed_report["summary"]["affected_event_count"], 2)
 
     def test_sqlite_store_persists_events_labels_and_settings(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
