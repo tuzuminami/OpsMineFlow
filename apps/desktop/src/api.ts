@@ -114,6 +114,31 @@ export async function saveAutomationReview(activity: string, status: AutomationR
   return postJson<{ activity: string; review_status: AutomationReviewStatus }>("/automation/review", { activity, status });
 }
 
+export async function updateEventActivity(eventId: string, activity: string) {
+  return postJson<{ event: EventRecord }>("/events/activity", { event_id: eventId, activity });
+}
+
+export async function excludeEvent(eventId: string) {
+  return postJson<{ excluded: boolean; event_id: string }>("/events/exclude", { event_id: eventId });
+}
+
+export async function splitEvent(eventId: string, splitAfterSeconds: number, firstActivity = "", secondActivity = "") {
+  return postJson<{ split: boolean; events: EventRecord[] }>("/events/split", {
+    event_id: eventId,
+    split_after_seconds: splitAfterSeconds,
+    first_activity: firstActivity,
+    second_activity: secondActivity
+  });
+}
+
+export async function mergeEvents(firstEventId: string, secondEventId: string, activity = "") {
+  return postJson<{ merged: boolean; event: EventRecord }>("/events/merge", {
+    first_event_id: firstEventId,
+    second_event_id: secondEventId,
+    activity
+  });
+}
+
 export async function deleteLocalData() {
   return postJson<{ deleted: boolean }>("/data/delete");
 }

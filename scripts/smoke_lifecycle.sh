@@ -105,6 +105,30 @@ assert preview["event_count"] == 7
 result = request("/import/csv", {"path": "data/sample/sample_events.csv"})
 assert result["imported_events"] == 7
 
+events = request("/events")
+assert len(events) == 7
+updated = request("/events/activity", {"event_id": events[0]["event_id"], "activity": "Lifecycle review"})
+split = request(
+    "/events/split",
+    {
+        "event_id": updated["event"]["event_id"],
+        "split_after_seconds": 60,
+        "first_activity": "Lifecycle review start",
+        "second_activity": "Lifecycle review finish",
+    },
+)
+merged = request(
+    "/events/merge",
+    {
+        "first_event_id": split["events"][0]["event_id"],
+        "second_event_id": split["events"][1]["event_id"],
+        "activity": "Lifecycle review merged",
+    },
+)
+excluded = request("/events/exclude", {"event_id": merged["event"]["event_id"]})
+assert excluded["excluded"] is True
+assert len(request("/events")) == 6
+
 export_preview = request("/export/preview", {"format": "markdown"})
 assert export_preview["byte_size"] > 0
 assert "Review masked fields" in export_preview["warning"]

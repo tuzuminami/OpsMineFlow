@@ -1,18 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   deleteLocalData,
+  excludeEvent,
   exportArtifact,
   importActivityWatchLocal,
   importEvents,
   loadDashboardData,
+  mergeEvents,
   previewImport,
   previewExport,
   runDiagnosticChecks,
   saveAutomationReview,
   saveExport,
   saveSettings,
+  splitEvent,
   startRecording,
-  stopRecording
+  stopRecording,
+  updateEventActivity
 } from "./api";
 import { useI18n } from "./i18n";
 import type { TranslationKey } from "./i18n";
@@ -60,6 +64,10 @@ type AppActions = {
   saveExport: (format: ExportFormat, path: string) => Promise<void>;
   saveSettings: (settings: Partial<AppSettings>) => Promise<void>;
   saveAutomationReview: (activity: string, status: AutomationReviewStatus) => Promise<void>;
+  updateEventActivity: (eventId: string, activity: string) => Promise<void>;
+  excludeEvent: (eventId: string) => Promise<void>;
+  splitEvent: (eventId: string, splitAfterSeconds: number, firstActivity?: string, secondActivity?: string) => Promise<void>;
+  mergeEvents: (firstEventId: string, secondEventId: string, activity?: string) => Promise<void>;
   runDiagnosticChecks: () => Promise<DiagnosticChecks>;
   deleteData: () => Promise<void>;
   startRecording: (caseId: string, activityLabel: string, clearSample: boolean) => Promise<void>;
@@ -206,6 +214,26 @@ export function App() {
       runAction(async () => {
         const result = await saveAutomationReview(activity, status);
         return t("message.reviewSaved", { activity: result.activity });
+      }),
+    updateEventActivity: (eventId, activity) =>
+      runAction(async () => {
+        await updateEventActivity(eventId, activity);
+        return t("message.timelineActivityUpdated");
+      }),
+    excludeEvent: (eventId) =>
+      runAction(async () => {
+        await excludeEvent(eventId);
+        return t("message.timelineEventExcluded");
+      }),
+    splitEvent: (eventId, splitAfterSeconds, firstActivity = "", secondActivity = "") =>
+      runAction(async () => {
+        await splitEvent(eventId, splitAfterSeconds, firstActivity, secondActivity);
+        return t("message.timelineEventSplit");
+      }),
+    mergeEvents: (firstEventId, secondEventId, activity = "") =>
+      runAction(async () => {
+        await mergeEvents(firstEventId, secondEventId, activity);
+        return t("message.timelineEventsMerged");
       }),
     runDiagnosticChecks: async () => {
       setWorking(true);
@@ -856,8 +884,130 @@ function RecordingPanel({ data, actions, working }: { data: DashboardData; actio
         <strong>{t("recording.scopeTitle")}</strong>
         <span>{t("recording.scopeBody")}</span>
       </div>
+      <RecordingTimeline events={data.events} actions={actions} working={working} />
       {!status.available ? <div className="api-warning">{status.remediation || t("recording.unavailable")}</div> : null}
       {status.last_error ? <div className="api-warning">{status.last_error}</div> : null}
+    </section>
+  );
+}
+
+function RecordingTimeline({ events, actions, working }: { events: EventRecord[]; actions: AppActions; working: boolean }) {
+  const { formatDateTime, t } = useI18n();
+  const orderedEvents = useMemo(
+    () => [...events].sort((a, b) => `${a.case_id}|${a.timestamp_start}|${a.event_id}`.localeCompare(`${b.case_id}|${b.timestamp_start}|${b.event_id}`)),
+    [events]
+  );
+  const [activityDrafts, setActivityDrafts] = useState<Record<string, string>>({});
+  const [splitDrafts, setSplitDrafts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setActivityDrafts((current) => {
+      const next: Record<string, string> = {};
+      for (const event of orderedEvents) next[event.event_id] = current[event.event_id] ?? event.activity_raw;
+      return next;
+    });
+    setSplitDrafts((current) => {
+      const next: Record<string, string> = {};
+      for (const event of orderedEvents) {
+        next[event.event_id] = current[event.event_id] ?? Math.max(1, Math.floor(event.duration_seconds / 2)).toString();
+      }
+      return next;
+    });
+  }, [orderedEvents]);
+
+  if (orderedEvents.length === 0) {
+    return (
+      <section className="recording-timeline">
+        <div className="timeline-heading">
+          <div>
+            <strong>{t("timeline.title")}</strong>
+            <p>{t("timeline.empty")}</p>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="recording-timeline" aria-label={t("timeline.title")}>
+      <div className="timeline-heading">
+        <div>
+          <strong>{t("timeline.title")}</strong>
+          <p>{t("timeline.body")}</p>
+        </div>
+        <span>{t("timeline.count", { count: orderedEvents.length })}</span>
+      </div>
+      <div className="timeline-list">
+        {orderedEvents.map((event, index) => {
+          const previousEvent = index > 0 && orderedEvents[index - 1].case_id === event.case_id ? orderedEvents[index - 1] : null;
+          const activityDraft = activityDrafts[event.event_id] ?? event.activity_raw;
+          const splitDraft = splitDrafts[event.event_id] ?? Math.max(1, Math.floor(event.duration_seconds / 2)).toString();
+          return (
+            <article className="timeline-row" key={event.event_id}>
+              <div className="timeline-dot" aria-hidden="true" />
+              <div className="timeline-main">
+                <div className="timeline-meta">
+                  <b>{event.app_name || t("import.unknown")}</b>
+                  <span>{formatDateTime(event.timestamp_start)} - {formatDateTime(event.timestamp_end)}</span>
+                  <span>{t("unit.secondsShort", { count: Math.round(event.duration_seconds) })}</span>
+                </div>
+                <label className="timeline-label-edit">
+                  <span>{t("timeline.activityLabel")}</span>
+                  <input
+                    value={activityDraft}
+                    onChange={(changeEvent) => setActivityDrafts({ ...activityDrafts, [event.event_id]: changeEvent.target.value })}
+                    disabled={working}
+                  />
+                </label>
+              </div>
+              <div className="timeline-actions">
+                <button
+                  onClick={() => void actions.updateEventActivity(event.event_id, activityDraft)}
+                  disabled={working || !activityDraft.trim() || activityDraft.trim() === event.activity_raw}
+                >
+                  {t("timeline.saveLabel")}
+                </button>
+                <label className="split-control">
+                  <span>{t("timeline.splitAfter")}</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max={Math.max(1, Math.floor(event.duration_seconds - 1))}
+                    value={splitDraft}
+                    onChange={(changeEvent) => setSplitDrafts({ ...splitDrafts, [event.event_id]: changeEvent.target.value })}
+                    disabled={working || event.duration_seconds <= 1}
+                  />
+                </label>
+                <button
+                  onClick={() => {
+                    const splitSeconds = Number(splitDraft);
+                    if (!Number.isFinite(splitSeconds)) {
+                      window.alert(t("timeline.invalidSplit"));
+                      return;
+                    }
+                    void actions.splitEvent(event.event_id, splitSeconds, activityDraft, activityDraft);
+                  }}
+                  disabled={working || event.duration_seconds <= 1}
+                >
+                  {t("timeline.split")}
+                </button>
+                <button onClick={() => previousEvent ? void actions.mergeEvents(previousEvent.event_id, event.event_id) : undefined} disabled={working || !previousEvent}>
+                  {t("timeline.mergePrevious")}
+                </button>
+                <button
+                  className="timeline-danger"
+                  onClick={() => {
+                    if (window.confirm(t("timeline.confirmExclude"))) void actions.excludeEvent(event.event_id);
+                  }}
+                  disabled={working}
+                >
+                  {t("timeline.exclude")}
+                </button>
+              </div>
+            </article>
+          );
+        })}
+      </div>
     </section>
   );
 }

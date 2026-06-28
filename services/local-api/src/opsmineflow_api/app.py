@@ -56,6 +56,28 @@ class LabelRequest(BaseModel):  # type: ignore[misc, valid-type]
     label: str
 
 
+class EventActivityUpdateRequest(BaseModel):  # type: ignore[misc, valid-type]
+    event_id: str
+    activity: str
+
+
+class EventExcludeRequest(BaseModel):  # type: ignore[misc, valid-type]
+    event_id: str
+
+
+class EventSplitRequest(BaseModel):  # type: ignore[misc, valid-type]
+    event_id: str
+    split_after_seconds: float
+    first_activity: str = ""
+    second_activity: str = ""
+
+
+class EventMergeRequest(BaseModel):  # type: ignore[misc, valid-type]
+    first_event_id: str
+    second_event_id: str
+    activity: str = ""
+
+
 class ActivityWatchImportRequest(BaseModel):  # type: ignore[misc, valid-type]
     enabled: bool = False
     base_url: str = "http://127.0.0.1:5600"
@@ -602,6 +624,49 @@ if app is not None:
         except KeyError:
             raise _not_found("Event was not found")
         return {"event_id": request.event_id, "label": request.label}
+
+    @app.post("/events/activity")
+    def update_event_activity(request: EventActivityUpdateRequest) -> dict[str, Any]:
+        try:
+            return {"event": default_store().update_event_activity(request.event_id, request.activity)}
+        except KeyError:
+            raise _not_found("Event was not found")
+        except ValueError as exc:
+            raise _bad_request(str(exc))
+
+    @app.post("/events/exclude")
+    def exclude_event(request: EventExcludeRequest) -> dict[str, Any]:
+        try:
+            return default_store().exclude_event(request.event_id)
+        except KeyError:
+            raise _not_found("Event was not found")
+
+    @app.post("/events/split")
+    def split_event(request: EventSplitRequest) -> dict[str, Any]:
+        try:
+            return default_store().split_event(
+                request.event_id,
+                request.split_after_seconds,
+                request.first_activity,
+                request.second_activity,
+            )
+        except KeyError:
+            raise _not_found("Event was not found")
+        except ValueError as exc:
+            raise _bad_request(str(exc))
+
+    @app.post("/events/merge")
+    def merge_events(request: EventMergeRequest) -> dict[str, Any]:
+        try:
+            return default_store().merge_adjacent_events(
+                request.first_event_id,
+                request.second_event_id,
+                request.activity,
+            )
+        except KeyError:
+            raise _not_found("Event was not found")
+        except ValueError as exc:
+            raise _bad_request(str(exc))
 
     @app.post("/data/delete")
     def delete_data() -> dict[str, Any]:

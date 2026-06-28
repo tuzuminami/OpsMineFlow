@@ -168,6 +168,25 @@ class ApiLogicTests(unittest.TestCase):
         self.assertEqual(reopened.get_settings()["retention_days"], 14)
         self.assertEqual(reopened.list_import_history()[0]["event_count"], 7)
 
+    def test_timeline_edit_operations_update_persistent_events(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            store = EventStore(events=events, db_path=db_path)
+            first_event_id = store.events[0].event_id
+
+            updated = store.update_event_activity(first_event_id, "請求レビュー")
+            split = store.split_event(str(updated["event_id"]), 120, "請求レビュー前半", "請求レビュー後半")
+            split_ids = [str(item["event_id"]) for item in split["events"]]
+            reopened = EventStore(db_path=db_path)
+            merged = reopened.merge_adjacent_events(split_ids[0], split_ids[1], "請求レビュー統合")
+            reopened.exclude_event(str(merged["event"]["event_id"]))
+            final_store = EventStore(db_path=db_path)
+
+        self.assertEqual(len(final_store.events), 6)
+        self.assertNotIn("請求レビュー統合", {event.activity_raw for event in final_store.events})
+        self.assertEqual(create_api_snapshot(final_store)["summary"]["total_events"], 6)
+
     def test_diagnostics_exposes_storage_and_local_only_policy(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
         snapshot = create_diagnostics(EventStore(events=events))
