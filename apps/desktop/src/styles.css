@@ -1494,11 +1494,12 @@ th {
 .process-toolbar {
   display: grid;
   gap: 8px;
-  grid-template-columns: minmax(0, 1fr) 220px;
+  grid-template-columns: minmax(0, 1fr) 220px 180px;
 }
 
 .process-toolbar input,
-.process-toolbar select {
+.process-toolbar select,
+.zoom-control {
   background: #ffffff;
   border: 1px solid #c8d2d2;
   border-radius: 8px;
@@ -1507,12 +1508,35 @@ th {
   padding: 8px 10px;
 }
 
-.process-canvas {
+.zoom-control {
+  align-items: center;
   display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 6px;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.zoom-control span {
+  color: #68757d;
+  font-size: 12px;
+}
+
+.process-canvas {
+  background: #ffffff;
+  border: 1px solid #dce3e3;
+  border-radius: 8px;
   max-height: 420px;
   overflow: auto;
+  padding: 12px;
+}
+
+.process-graph {
+  background:
+    linear-gradient(#edf1f1 1px, transparent 1px),
+    linear-gradient(90deg, #edf1f1 1px, transparent 1px);
+  background-size: 56px 56px;
+  border-radius: 8px;
+  min-width: 900px;
+  position: relative;
 }
 
 .process-node {
@@ -1523,9 +1547,15 @@ th {
   cursor: pointer;
   display: grid;
   gap: 4px;
+  left: 0;
   min-height: 106px;
   padding: 12px;
+  position: absolute;
   text-align: left;
+  top: 0;
+  transform: translate(-50%, -50%);
+  width: 184px;
+  z-index: 2;
 }
 
 .process-node.is-bottleneck {
@@ -1540,6 +1570,35 @@ th {
 .process-node.is-selected {
   outline: 3px solid #163235;
   outline-offset: 2px;
+}
+
+.process-edges {
+  color: #0f766e;
+  height: 100%;
+  inset: 0;
+  overflow: visible;
+  position: absolute;
+  width: 100%;
+  z-index: 1;
+}
+
+.process-edge {
+  opacity: 0.58;
+  vector-effect: non-scaling-stroke;
+}
+
+.process-edge.is-linked {
+  opacity: 0.95;
+}
+
+.process-edge-label {
+  fill: #172026;
+  font-size: 3px;
+  paint-order: stroke;
+  stroke: #ffffff;
+  stroke-width: 1px;
+  text-anchor: middle;
+  vector-effect: non-scaling-stroke;
 }
 
 .process-detail {
@@ -1889,6 +1948,10 @@ th {
   .history-row,
   .process-toolbar,
   .process-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .zoom-control {
     grid-template-columns: 1fr;
   }
 }

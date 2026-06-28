@@ -1669,6 +1669,7 @@ function ProcessView({ processMap, events }: { processMap: ProcessMap; events: E
   const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [appFilter, setAppFilter] = useState("all");
+  const [zoom, setZoom] = useState(1);
   const [selectedActivity, setSelectedActivity] = useState("");
   const activityApps = useMemo(() => {
     const mapping = new Map<string, Set<string>>();
@@ -1692,6 +1693,29 @@ function ProcessView({ processMap, events }: { processMap: ProcessMap; events: E
   const selectedNode = visibleNodes.find((node) => node.activity === selectedActivity) || visibleNodes[0] || null;
   const selectedEvents = selectedNode ? events.filter((event) => event.activity_raw === selectedNode.activity) : [];
   const selectedApps = selectedNode ? Array.from(activityApps.get(selectedNode.activity) || []).sort() : [];
+  const graphNodes = useMemo(() => {
+    const columns = Math.max(2, Math.ceil(Math.sqrt(Math.max(visibleNodes.length, 1))));
+    const rows = Math.max(1, Math.ceil(visibleNodes.length / columns));
+    return visibleNodes.map((node, index) => {
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      const x = columns === 1 ? 50 : 12 + column * (76 / Math.max(columns - 1, 1));
+      const y = rows === 1 ? 50 : 16 + row * (68 / Math.max(rows - 1, 1));
+      return { node, x, y };
+    });
+  }, [visibleNodes]);
+  const nodePositions = useMemo(() => new Map(graphNodes.map((item) => [item.node.activity, item])), [graphNodes]);
+  const maxEdgeFrequency = Math.max(...visibleEdges.map((edge) => edge.frequency), 1);
+  const maxTransitionSeconds = Math.max(...visibleEdges.map((edge) => edge.average_transition_seconds), 1);
+  const relatedEdges = selectedNode
+    ? visibleEdges.filter((edge) => edge.source === selectedNode.activity || edge.target === selectedNode.activity)
+    : [];
+  const suggestedImprovement = selectedNode
+    ? [
+        selectedNode.automation_candidate ? t("process.improvementAutomation") : "",
+        selectedNode.bottleneck ? t("process.improvementBottleneck") : ""
+      ].filter(Boolean).join(", ") || t("process.improvementReview")
+    : t("process.none");
 
   return (
     <section className="process-workspace">
@@ -1705,26 +1729,78 @@ function ProcessView({ processMap, events }: { processMap: ProcessMap; events: E
             </option>
           ))}
         </select>
+        <label className="zoom-control">
+          <span>{t("process.zoom")}</span>
+          <input
+            type="range"
+            min="0.8"
+            max="1.8"
+            step="0.1"
+            value={zoom}
+            onChange={(event) => setZoom(Number(event.target.value))}
+          />
+        </label>
       </div>
       <section className="process-canvas">
-        {visibleNodes.map((node) => (
-          <button
-            key={node.activity}
-            className={[
-              "process-node",
-              node.activity === selectedNode?.activity ? "is-selected" : "",
-              node.bottleneck ? "is-bottleneck" : "",
-              node.automation_candidate ? "is-automation" : ""
-            ].join(" ")}
-            onClick={() => setSelectedActivity(node.activity)}
+        {visibleNodes.length === 0 ? (
+          <p className="empty">{t("process.noNodes")}</p>
+        ) : (
+          <div
+            className="process-graph"
+            style={{ minHeight: `${Math.round(460 * zoom)}px`, minWidth: `${Math.round(900 * zoom)}px` }}
           >
-            <strong>{node.activity}</strong>
-            <span>{t("process.frequency")} {node.frequency}</span>
-            <span>{t("process.avgSeconds")} {t("unit.secondsShort", { count: node.average_duration_seconds.toFixed(0) })}</span>
-            <span>{t("process.startEnd", { start: processMap.start_activities[node.activity] || 0, end: processMap.end_activities[node.activity] || 0 })}</span>
-          </button>
-        ))}
-        {visibleNodes.length === 0 ? <p className="empty">{t("process.noNodes")}</p> : null}
+            <svg className="process-edges" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              <defs>
+                <marker id="process-arrow" markerHeight="5" markerWidth="5" orient="auto" refX="5" refY="2.5">
+                  <path d="M0,0 L5,2.5 L0,5 Z" fill="currentColor" />
+                </marker>
+              </defs>
+              {visibleEdges.map((edge) => {
+                const source = nodePositions.get(edge.source);
+                const target = nodePositions.get(edge.target);
+                if (!source || !target) return null;
+                const linked = selectedNode && (edge.source === selectedNode.activity || edge.target === selectedNode.activity);
+                const strokeWidth = 0.3 + (edge.frequency / maxEdgeFrequency) * 1.4;
+                const slowRatio = edge.average_transition_seconds / maxTransitionSeconds;
+                return (
+                  <g key={`${edge.source}-${edge.target}`}>
+                    <line
+                      className={linked ? "process-edge is-linked" : "process-edge"}
+                      x1={source.x}
+                      y1={source.y}
+                      x2={target.x}
+                      y2={target.y}
+                      stroke={slowRatio > 0.66 ? "#b45309" : "#0f766e"}
+                      strokeWidth={strokeWidth}
+                      markerEnd="url(#process-arrow)"
+                    />
+                    <text className="process-edge-label" x={(source.x + target.x) / 2} y={(source.y + target.y) / 2}>
+                      {edge.frequency}x
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+            {graphNodes.map(({ node, x, y }) => (
+              <button
+                key={node.activity}
+                className={[
+                  "process-node",
+                  node.activity === selectedNode?.activity ? "is-selected" : "",
+                  node.bottleneck ? "is-bottleneck" : "",
+                  node.automation_candidate ? "is-automation" : ""
+                ].join(" ")}
+                style={{ left: `${x}%`, top: `${y}%` }}
+                onClick={() => setSelectedActivity(node.activity)}
+              >
+                <strong>{node.activity}</strong>
+                <span>{t("process.frequency")} {node.frequency}</span>
+                <span>{t("process.avgSeconds")} {t("unit.secondsShort", { count: node.average_duration_seconds.toFixed(0) })}</span>
+                <span>{t("process.startEnd", { start: processMap.start_activities[node.activity] || 0, end: processMap.end_activities[node.activity] || 0 })}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </section>
       <section className="process-detail">
         <div>
@@ -1739,6 +1815,8 @@ function ProcessView({ processMap, events }: { processMap: ProcessMap; events: E
             <DetailStat label={t("process.endCount")} value={(processMap.end_activities[selectedNode.activity] || 0).toString()} />
             <DetailStat label={t("process.events")} value={selectedEvents.length.toString()} />
             <DetailStat label={t("process.signals")} value={[selectedNode.bottleneck ? t("process.bottleneck") : "", selectedNode.automation_candidate ? t("process.automation") : ""].filter(Boolean).join(", ") || t("process.none")} />
+            <DetailStat label={t("process.relatedTransitions")} value={relatedEdges.length.toString()} />
+            <DetailStat label={t("process.suggestedImprovement")} value={suggestedImprovement} />
           </div>
         ) : null}
       </section>
