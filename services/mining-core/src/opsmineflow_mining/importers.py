@@ -6,15 +6,112 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .models import StandardEvent
 from .privacy import extract_domain, looks_confidential, mask_url, mask_window_title
+
+CSV_MAPPING_TARGETS = (
+    "case_id",
+    "activity",
+    "timestamp_start",
+    "timestamp_end",
+    "duration_seconds",
+    "user",
+    "app_name",
+    "app_bundle_id",
+    "window_title",
+    "url",
+    "memo",
+    "source_event_id",
+    "event_type",
+)
+
+CSV_COLUMN_SYNONYMS = {
+    "case_id": ("case_id", "case", "case id", "案件", "案件id", "ケース", "ケースid"),
+    "activity": ("activity", "activity_raw", "task", "work", "operation", "作業", "業務", "活動", "内容"),
+    "timestamp_start": ("timestamp_start", "start", "started_at", "begin", "開始", "開始時刻", "開始時間"),
+    "timestamp_end": ("timestamp_end", "end", "ended_at", "finish", "終了", "終了時刻", "終了時間"),
+    "duration_seconds": ("duration_seconds", "duration", "seconds", "秒数", "滞在秒", "時間秒"),
+    "user": ("user", "user_alias", "operator", "member", "担当者", "ユーザー", "利用者"),
+    "app_name": ("app_name", "app", "application", "アプリ", "アプリ名", "利用アプリ"),
+    "app_bundle_id": ("app_bundle_id", "bundle", "bundle_id", "bundle identifier"),
+    "window_title": ("window_title", "title", "window", "画面名", "ウィンドウ", "ウィンドウタイトル"),
+    "url": ("url", "uri", "link", "リンク"),
+    "memo": ("memo", "note", "notes", "description", "メモ", "備考", "説明"),
+    "source_event_id": ("source_event_id", "id", "event_id", "イベントid", "ログid"),
+    "event_type": ("event_type", "type", "種別"),
+}
 
 
 def load_events_from_csv(path: str | Path, source: str = "csv") -> list[StandardEvent]:
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
     return [_event_from_csv_row(row, index, source) for index, row in enumerate(rows, start=1)]
+
+
+def inspect_csv_columns(path: str | Path, sample_size: int = 5) -> dict[str, object]:
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        columns = list(reader.fieldnames or [])
+        sample_rows = [
+            {column: str(row.get(column) or "") for column in columns}
+            for _, row in zip(range(sample_size), reader)
+        ]
+    return {"columns": columns, "sample_rows": sample_rows}
+
+
+def suggest_csv_mapping(columns: Iterable[str]) -> dict[str, str]:
+    column_list = list(columns)
+    normalized_columns = {_normalize_column_name(column): column for column in column_list}
+    used_columns: set[str] = set()
+    mapping: dict[str, str] = {}
+    for target in CSV_MAPPING_TARGETS:
+        match = ""
+        for synonym in CSV_COLUMN_SYNONYMS[target]:
+            normalized_synonym = _normalize_column_name(synonym)
+            if normalized_synonym in normalized_columns and normalized_columns[normalized_synonym] not in used_columns:
+                match = normalized_columns[normalized_synonym]
+                break
+        if not match:
+            for column in column_list:
+                normalized_column = _normalize_column_name(column)
+                if column in used_columns:
+                    continue
+                if any(_normalize_column_name(synonym) in normalized_column for synonym in CSV_COLUMN_SYNONYMS[target]):
+                    match = column
+                    break
+        if match:
+            mapping[target] = match
+            used_columns.add(match)
+    return mapping
+
+
+def load_events_from_csv_with_mapping(
+    path: str | Path,
+    mapping: dict[str, str],
+    *,
+    date_format: str = "",
+    timezone_name: str = "UTC",
+    source: str = "csv_mapped",
+) -> list[StandardEvent]:
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        columns = set(reader.fieldnames or [])
+    cleaned_mapping = {
+        target: column
+        for target, column in mapping.items()
+        if target in CSV_MAPPING_TARGETS and column in columns
+    }
+    if "activity" not in cleaned_mapping:
+        raise ValueError("CSV mapping requires an activity column.")
+    if "timestamp_start" not in cleaned_mapping:
+        raise ValueError("CSV mapping requires a start timestamp column.")
+    return [
+        _event_from_mapped_csv_row(row, index, cleaned_mapping, date_format, timezone_name, source)
+        for index, row in enumerate(rows, start=1)
+    ]
 
 
 def load_events_from_json(path: str | Path, source: str = "json") -> list[StandardEvent]:
@@ -91,6 +188,52 @@ def _event_from_csv_row(row: dict[str, str], index: int, source: str) -> Standar
         duration_seconds=duration,
         idle_flag=_to_bool(row.get("idle_flag")),
         metadata={"memo": row.get("memo") or ""},
+    )
+
+
+def _event_from_mapped_csv_row(
+    row: dict[str, str],
+    index: int,
+    mapping: dict[str, str],
+    date_format: str,
+    timezone_name: str,
+    source: str,
+) -> StandardEvent:
+    def value(target: str) -> str:
+        column = mapping.get(target, "")
+        return str(row.get(column) or "").strip() if column else ""
+
+    start = _parse_mapped_datetime(value("timestamp_start"), date_format, timezone_name)
+    end_value = value("timestamp_end")
+    duration_value = value("duration_seconds")
+    duration = float(duration_value) if duration_value else 0.0
+    end = _parse_mapped_datetime(end_value, date_format, timezone_name) if end_value else start + timedelta(seconds=duration)
+    duration = max(float(duration_value) if duration_value else (end - start).total_seconds(), 0.0)
+    activity = value("activity") or value("memo") or "Unlabeled activity"
+    url = value("url")
+    window_title = value("window_title") or value("memo") or activity
+    source_event_id = value("source_event_id") or str(index)
+    return _build_event(
+        source=source,
+        source_event_id=source_event_id,
+        case_id=value("case_id") or _fallback_case_id(url, activity, index),
+        user_alias=value("user") or "unknown",
+        app_name=value("app_name"),
+        app_bundle_id=value("app_bundle_id"),
+        window_title=window_title,
+        url=url,
+        activity_raw=activity,
+        event_type=value("event_type") or "work_activity",
+        timestamp_start=start,
+        timestamp_end=end,
+        duration_seconds=duration,
+        idle_flag=False,
+        metadata={
+            "memo": value("memo"),
+            "csv_mapping": mapping,
+            "date_format": date_format,
+            "timezone": timezone_name,
+        },
     )
 
 
@@ -218,6 +361,23 @@ def _parse_datetime(value: str) -> datetime:
     return parsed
 
 
+def _parse_mapped_datetime(value: str, date_format: str, timezone_name: str) -> datetime:
+    if not value:
+        raise ValueError("timestamp is required")
+    if date_format.strip():
+        parsed = datetime.strptime(value, date_format.strip())
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=_timezone_from_name(timezone_name))
+        return parsed
+    try:
+        return _parse_datetime(value)
+    except ValueError:
+        parsed = datetime.fromisoformat(value.replace("/", "-"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=_timezone_from_name(timezone_name))
+        return parsed
+
+
 def _to_iso(value: datetime) -> str:
     return value.isoformat()
 
@@ -238,6 +398,25 @@ def _stable_id(*parts: str) -> str:
 
 def _normalize_activity(activity: str) -> str:
     return " ".join((activity or "unlabeled activity").strip().lower().split())
+
+
+def _normalize_column_name(value: str) -> str:
+    return "".join(character for character in value.casefold() if character.isalnum())
+
+
+def _timezone_from_name(value: str) -> timezone | ZoneInfo:
+    cleaned = value.strip() or "UTC"
+    if cleaned.upper() in {"UTC", "Z"}:
+        return timezone.utc
+    if len(cleaned) == 6 and cleaned[0] in "+-" and cleaned[3] == ":":
+        sign = 1 if cleaned[0] == "+" else -1
+        hours = int(cleaned[1:3])
+        minutes = int(cleaned[4:6])
+        return timezone(sign * timedelta(hours=hours, minutes=minutes))
+    try:
+        return ZoneInfo(cleaned)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"Unknown timezone: {cleaned}") from exc
 
 
 def _fallback_case_id(url: str, activity: str, index: int) -> str:

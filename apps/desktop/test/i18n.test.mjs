@@ -40,6 +40,8 @@ test("beginner workflow labels are explicit in both languages", () => {
   assert.equal(ja["recording.saveTemplate"], "保存");
   assert.equal(ja["timeline.title"], "記録タイムライン");
   assert.match(ja["timeline.body"], /除外.*作業名修正.*分割.*結合/);
+  assert.equal(ja["csvMapping.title"], "CSV列マッピング");
+  assert.match(ja["csvMapping.body"], /列名が違う場合/);
   assert.match(ja["onboarding.body"], /サンプル確認.*実際の記録.*出力/);
   assert.match(ja["recording.scopeBody"], /前面アプリ名.*ウィンドウタイトル.*取得しない/);
   assert.match(ja["privacyEvidence.title"], /取得しないデータ/);
@@ -47,6 +49,8 @@ test("beginner workflow labels are explicit in both languages", () => {
   assert.match(appSource, /t\("confirm\.deleteData"\)/);
   assert.match(appSource, /<EmptyDataView onStart=\{onStart\}/);
   assert.match(appSource, /RECORDING_TEMPLATES_KEY/);
+  assert.match(appSource, /CSV_MAPPING_KEY/);
+  assert.match(appSource, /CsvMappingWizard/);
   assert.match(appSource, /RecordingTimeline/);
   assert.match(appSource, /actions\.splitEvent/);
   assert.match(appSource, /PrivacyEvidencePanel/);

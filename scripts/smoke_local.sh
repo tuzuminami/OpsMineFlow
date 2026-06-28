@@ -89,6 +89,31 @@ assert isinstance(recording, dict)
 assert recording["active"] is False
 assert recording["capture_scope"] == "frontmost_app_only"
 
+mapped_path = f"{base_dir}/mapped-client.csv"
+with open(mapped_path, "w", encoding="utf-8") as handle:
+    handle.write("案件,作業,開始,終了,担当者,利用アプリ\n")
+    handle.write("S-1,契約確認,2026/06/01 09:00,2026/06/01 09:05,佐藤,Chrome\n")
+mapped_payload = {
+    "path": mapped_path,
+    "mapping": {
+        "case_id": "案件",
+        "activity": "作業",
+        "timestamp_start": "開始",
+        "timestamp_end": "終了",
+        "user": "担当者",
+        "app_name": "利用アプリ",
+    },
+    "date_format": "%Y/%m/%d %H:%M",
+    "timezone": "Asia/Tokyo",
+}
+mapped_preview = request("/import/preview", {"format": "csv", **mapped_payload})
+assert isinstance(mapped_preview, dict)
+assert mapped_preview["columns"] == ["案件", "作業", "開始", "終了", "担当者", "利用アプリ"]
+assert mapped_preview["event_count"] == 1
+mapped_result = request("/import/csv", mapped_payload)
+assert isinstance(mapped_result, dict)
+assert mapped_result["imported_events"] == 1
+
 preview = request("/import/preview", {"format": "csv", "path": "data/sample/sample_events.csv"})
 assert isinstance(preview, dict)
 assert preview["event_count"] == 7

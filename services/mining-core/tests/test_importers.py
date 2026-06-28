@@ -5,7 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from opsmineflow_mining import load_events_from_csv, load_events_from_json
+from opsmineflow_mining import (
+    inspect_csv_columns,
+    load_events_from_csv,
+    load_events_from_csv_with_mapping,
+    load_events_from_json,
+    suggest_csv_mapping,
+)
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -51,6 +57,31 @@ class ImporterTests(unittest.TestCase):
 
         self.assertEqual(events[0].case_id, "CASE-X")
         self.assertEqual(events[0].duration_seconds, 300)
+
+    def test_loads_arbitrary_csv_with_mapping_and_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "client.csv"
+            path.write_text(
+                "案件,作業,開始,終了,担当者,利用アプリ,備考\n"
+                "A-1,申請確認,2026/06/01 09:00,2026/06/01 09:07,佐藤,Chrome,申請画面\n",
+                encoding="utf-8",
+            )
+            inspection = inspect_csv_columns(path)
+            suggested = suggest_csv_mapping(inspection["columns"])  # type: ignore[arg-type]
+            events = load_events_from_csv_with_mapping(
+                path,
+                suggested,
+                date_format="%Y/%m/%d %H:%M",
+                timezone_name="Asia/Tokyo",
+            )
+
+        self.assertEqual(suggested["case_id"], "案件")
+        self.assertEqual(suggested["activity"], "作業")
+        self.assertEqual(events[0].case_id, "A-1")
+        self.assertEqual(events[0].activity_raw, "申請確認")
+        self.assertEqual(events[0].app_name, "Chrome")
+        self.assertEqual(events[0].duration_seconds, 420)
+        self.assertTrue(events[0].timestamp_start.endswith("+09:00"))
 
 
 if __name__ == "__main__":

@@ -164,11 +164,20 @@ export type AppSettings = {
   excluded_domains: string[];
 };
 
+export type CsvMapping = Record<string, string>;
+
 export type ImportPreview = {
   format: string;
   path: string;
   event_count: number;
   confidential_count: number;
+  columns: string[];
+  sample_rows: Array<Record<string, string>>;
+  suggested_mapping: CsvMapping;
+  mapping: CsvMapping;
+  mapping_warnings: string[];
+  date_format: string;
+  timezone: string;
   sample_events: Array<{
     case_id: string;
     activity: string;

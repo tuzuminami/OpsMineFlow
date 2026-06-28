@@ -25,6 +25,7 @@ import type {
   AppSettings,
   AutomationCandidate,
   AutomationReviewStatus,
+  CsvMapping,
   DiagnosticChecks,
   Diagnostics,
   EventRecord,
@@ -56,8 +57,8 @@ type DashboardData = {
 
 type AppActions = {
   refresh: () => Promise<void>;
-  previewImport: (format: "csv" | "json", path: string) => Promise<ImportPreview>;
-  importEvents: (format: "csv" | "json", path: string) => Promise<void>;
+  previewImport: (format: "csv" | "json", path: string, mapping?: CsvMapping, dateFormat?: string, timezone?: string) => Promise<ImportPreview>;
+  importEvents: (format: "csv" | "json", path: string, mapping?: CsvMapping, dateFormat?: string, timezone?: string) => Promise<void>;
   importActivityWatch: () => Promise<void>;
   previewExport: (format: ExportFormat) => Promise<ExportPreview>;
   exportArtifact: (format: ExportFormat) => Promise<void>;
@@ -86,6 +87,29 @@ const tabs: Array<{ id: Tab; label: TranslationKey }> = [
 ];
 
 const RECORDING_TEMPLATES_KEY = "opsmineflow.recordingTemplates";
+const CSV_MAPPING_KEY = "opsmineflow.csvMappingPreset";
+
+const csvMappingFields: Array<{ key: string; label: TranslationKey; required?: boolean }> = [
+  { key: "case_id", label: "csvMapping.caseId" },
+  { key: "activity", label: "csvMapping.activity", required: true },
+  { key: "timestamp_start", label: "csvMapping.start", required: true },
+  { key: "timestamp_end", label: "csvMapping.end" },
+  { key: "duration_seconds", label: "csvMapping.duration" },
+  { key: "user", label: "csvMapping.user" },
+  { key: "app_name", label: "csvMapping.app" },
+  { key: "app_bundle_id", label: "csvMapping.bundle" },
+  { key: "window_title", label: "csvMapping.window" },
+  { key: "url", label: "csvMapping.url" },
+  { key: "memo", label: "csvMapping.memo" },
+  { key: "source_event_id", label: "csvMapping.sourceEventId" },
+  { key: "event_type", label: "csvMapping.eventType" }
+];
+
+type CsvMappingPreset = {
+  mapping: CsvMapping;
+  dateFormat: string;
+  timezone: string;
+};
 
 function loadRecordingTemplates(): string[] {
   try {
@@ -102,6 +126,30 @@ function saveRecordingTemplates(templates: string[]) {
     window.localStorage.setItem(RECORDING_TEMPLATES_KEY, JSON.stringify(templates.slice(0, 8)));
   } catch {
     // The template list is a browser convenience; recording still works without localStorage.
+  }
+}
+
+function loadCsvMappingPreset(): CsvMappingPreset | null {
+  try {
+    const raw = window.localStorage.getItem(CSV_MAPPING_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CsvMappingPreset>;
+    if (!parsed.mapping || typeof parsed.mapping !== "object") return null;
+    return {
+      mapping: Object.fromEntries(Object.entries(parsed.mapping).filter(([, value]) => typeof value === "string")),
+      dateFormat: typeof parsed.dateFormat === "string" ? parsed.dateFormat : "",
+      timezone: typeof parsed.timezone === "string" ? parsed.timezone : "UTC"
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveCsvMappingPreset(preset: CsvMappingPreset) {
+  try {
+    window.localStorage.setItem(CSV_MAPPING_KEY, JSON.stringify(preset));
+  } catch {
+    // Mapping presets are a browser convenience; imports still work without localStorage.
   }
 }
 
@@ -153,12 +201,12 @@ export function App() {
 
   const actions: AppActions = {
     refresh,
-    previewImport: async (format, path) => {
+    previewImport: async (format, path, mapping, dateFormat, timezone) => {
       setWorking(true);
       setError("");
       setActionMessage("");
       try {
-        return await previewImport(format, path);
+        return await previewImport(format, path, mapping, dateFormat, timezone);
       } catch (err) {
         setError(err instanceof Error ? err.message : t("message.previewFailed"));
         throw err;
@@ -166,9 +214,9 @@ export function App() {
         setWorking(false);
       }
     },
-    importEvents: (format, path) =>
+    importEvents: (format, path, mapping, dateFormat, timezone) =>
       runAction(async () => {
-        const result = await importEvents(format, path);
+        const result = await importEvents(format, path, mapping, dateFormat, timezone);
         return t("message.imported", { count: result.imported_events, source: result.source || format });
       }),
     importActivityWatch: () =>
@@ -422,6 +470,10 @@ function HomeView({
   const [collectionOpen, setCollectionOpen] = useState(data.events.length === 0);
   const [settingsDraft, setSettingsDraft] = useState<AppSettings>(data.settings);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [csvMapping, setCsvMapping] = useState<CsvMapping>({});
+  const [csvDateFormat, setCsvDateFormat] = useState("");
+  const [csvTimezone, setCsvTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+  const [csvMappingPreset, setCsvMappingPreset] = useState<CsvMappingPreset | null>(loadCsvMappingPreset);
   const [exportFormat, setExportFormat] = useState<ExportFormat>("markdown");
   const [exportPath, setExportPath] = useState(defaultExportPath("markdown"));
   const [exportPreview, setExportPreview] = useState<ExportPreview | null>(null);
@@ -434,6 +486,34 @@ function HomeView({
   useEffect(() => {
     if (data.events.length === 0) setCollectionOpen(true);
   }, [data.events.length]);
+
+  useEffect(() => {
+    if (!preview || preview.format !== "csv") return;
+    setCsvMapping((current) => {
+      if (Object.values(current).some((value) => value.trim())) return current;
+      return csvMappingPreset?.mapping || preview.mapping || preview.suggested_mapping || {};
+    });
+    if (!csvDateFormat && (csvMappingPreset?.dateFormat || preview.date_format)) {
+      setCsvDateFormat(csvMappingPreset?.dateFormat || preview.date_format);
+    }
+    if (csvMappingPreset?.timezone && csvTimezone === "UTC") {
+      setCsvTimezone(csvMappingPreset.timezone);
+    }
+  }, [preview]);
+
+  const previewCurrentImport = () => {
+    const mapping = format === "csv" ? csvMapping : undefined;
+    const dateFormat = format === "csv" ? csvDateFormat : "";
+    const timezone = format === "csv" ? csvTimezone : "UTC";
+    void actions.previewImport(format, path, mapping, dateFormat, timezone).then(setPreview);
+  };
+
+  const importCurrentFile = () => {
+    const mapping = format === "csv" ? csvMapping : undefined;
+    const dateFormat = format === "csv" ? csvDateFormat : "";
+    const timezone = format === "csv" ? csvTimezone : "UTC";
+    void actions.importEvents(format, path, mapping, dateFormat, timezone);
+  };
 
   return (
     <section className="home-grid">
@@ -488,21 +568,30 @@ function HomeView({
           <span>{t("import.loaded", { count: data.events.length })}</span>
         </div>
         <div className="inline-fields">
-          <select value={format} onChange={(event) => setFormat(event.target.value as "csv" | "json")} disabled={working}>
+          <select
+            value={format}
+            onChange={(event) => {
+              setFormat(event.target.value as "csv" | "json");
+              setPreview(null);
+            }}
+            disabled={working}
+          >
             <option value="csv">CSV</option>
             <option value="json">JSON</option>
           </select>
           <input
             value={path}
-            onChange={(event) => setPath(event.target.value)}
+            onChange={(event) => {
+              setPath(event.target.value);
+              setPreview(null);
+              setCsvMapping({});
+            }}
             disabled={working}
             placeholder={t("import.path")}
             aria-label={t("import.path")}
           />
           <button
-            onClick={() => {
-              void actions.previewImport(format, path).then(setPreview);
-            }}
+            onClick={previewCurrentImport}
             disabled={working || path.trim() === ""}
           >
             {t("action.preview")}
@@ -526,7 +615,32 @@ function HomeView({
             </div>
           </div>
         ) : null}
-        <button onClick={() => void actions.importEvents(format, path)} disabled={working || path.trim() === ""}>
+        {preview && preview.format === "csv" ? (
+          <CsvMappingWizard
+            preview={preview}
+            mapping={csvMapping}
+            dateFormat={csvDateFormat}
+            timezone={csvTimezone}
+            preset={csvMappingPreset}
+            onMappingChange={setCsvMapping}
+            onDateFormatChange={setCsvDateFormat}
+            onTimezoneChange={setCsvTimezone}
+            onPreview={previewCurrentImport}
+            onSavePreset={() => {
+              const preset = { mapping: csvMapping, dateFormat: csvDateFormat, timezone: csvTimezone };
+              setCsvMappingPreset(preset);
+              saveCsvMappingPreset(preset);
+            }}
+            onApplyPreset={() => {
+              if (!csvMappingPreset) return;
+              setCsvMapping(csvMappingPreset.mapping);
+              setCsvDateFormat(csvMappingPreset.dateFormat);
+              setCsvTimezone(csvMappingPreset.timezone);
+            }}
+            working={working}
+          />
+        ) : null}
+        <button onClick={importCurrentFile} disabled={working || path.trim() === ""}>
           {t("import.previewed")}
         </button>
         <label className="check-row">
@@ -771,6 +885,122 @@ function OnboardingPanel({
         <button onClick={onExport} disabled={!hasEvents}>
           <b>{t("onboarding.exportTitle")}</b>
           <span>{hasEvents ? t("onboarding.exportBody") : t("onboarding.exportDisabled")}</span>
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function CsvMappingWizard({
+  preview,
+  mapping,
+  dateFormat,
+  timezone,
+  preset,
+  onMappingChange,
+  onDateFormatChange,
+  onTimezoneChange,
+  onPreview,
+  onSavePreset,
+  onApplyPreset,
+  working
+}: {
+  preview: ImportPreview;
+  mapping: CsvMapping;
+  dateFormat: string;
+  timezone: string;
+  preset: CsvMappingPreset | null;
+  onMappingChange: (mapping: CsvMapping) => void;
+  onDateFormatChange: (value: string) => void;
+  onTimezoneChange: (value: string) => void;
+  onPreview: () => void;
+  onSavePreset: () => void;
+  onApplyPreset: () => void;
+  working: boolean;
+}) {
+  const { t } = useI18n();
+  const visibleColumns = preview.columns.slice(0, 6);
+  const hasPreset = Boolean(preset && Object.values(preset.mapping).some((value) => value.trim()));
+
+  return (
+    <section className="csv-mapping-panel" aria-label={t("csvMapping.title")}>
+      <div className="csv-mapping-heading">
+        <div>
+          <h3>{t("csvMapping.title")}</h3>
+          <p>{t("csvMapping.body")}</p>
+        </div>
+        <span>{t("csvMapping.columns", { count: preview.columns.length })}</span>
+      </div>
+      {preview.mapping_warnings.length > 0 ? (
+        <div className="api-warning">
+          {preview.mapping_warnings.map((warning) => (
+            <div key={warning}>{warning}</div>
+          ))}
+        </div>
+      ) : null}
+      {preview.sample_rows.length > 0 ? (
+        <div className="csv-raw-preview">
+          <strong>{t("csvMapping.rawPreview")}</strong>
+          <div className="csv-raw-table">
+            <div className="csv-raw-row csv-raw-header">
+              {visibleColumns.map((column) => (
+                <span key={column}>{column}</span>
+              ))}
+            </div>
+            {preview.sample_rows.slice(0, 3).map((row, index) => (
+              <div className="csv-raw-row" key={`sample-${index}`}>
+                {visibleColumns.map((column) => (
+                  <span key={column}>{row[column] || "-"}</span>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      <div className="csv-mapping-grid">
+        {csvMappingFields.map((field) => {
+          const selected = mapping[field.key] ?? preview.mapping[field.key] ?? preview.suggested_mapping[field.key] ?? "";
+          return (
+            <label key={field.key}>
+              <span>
+                {t(field.label)}
+                {field.required ? <b>{t("csvMapping.required")}</b> : null}
+              </span>
+              <select
+                value={selected}
+                onChange={(event) => onMappingChange({ ...mapping, [field.key]: event.target.value })}
+                disabled={working}
+              >
+                <option value="">{t("csvMapping.unmapped")}</option>
+                {preview.columns.map((column) => (
+                  <option key={column} value={column}>
+                    {column}
+                  </option>
+                ))}
+              </select>
+            </label>
+          );
+        })}
+      </div>
+      <div className="csv-format-row">
+        <label>
+          <span>{t("csvMapping.dateFormat")}</span>
+          <input value={dateFormat} onChange={(event) => onDateFormatChange(event.target.value)} placeholder={t("csvMapping.dateFormatPlaceholder")} disabled={working} />
+        </label>
+        <label>
+          <span>{t("csvMapping.timezone")}</span>
+          <input value={timezone} onChange={(event) => onTimezoneChange(event.target.value)} placeholder="Asia/Tokyo" disabled={working} />
+        </label>
+      </div>
+      <div className="csv-mapping-actions">
+        <button type="button" onClick={onPreview} disabled={working}>
+          {t("csvMapping.previewWithMapping")}
+        </button>
+        <button type="button" onClick={onSavePreset} disabled={working}>
+          {t("csvMapping.savePreset")}
+        </button>
+        <button type="button" onClick={onApplyPreset} disabled={working || !hasPreset}>
+          {t("csvMapping.applyPreset")}
         </button>
       </div>
     </section>

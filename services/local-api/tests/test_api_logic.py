@@ -219,6 +219,42 @@ class ApiLogicTests(unittest.TestCase):
         self.assertEqual(result["imported_events"], 7)
         self.assertEqual(store.list_import_history()[0]["source"], "csv")
 
+    def test_csv_import_preview_accepts_column_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "client.csv"
+            path.write_text(
+                "案件,作業,開始,終了,担当者,利用アプリ,URL\n"
+                "C-1,契約確認,2026/06/01 09:00,2026/06/01 09:10,佐藤,Chrome,http://127.0.0.1/detail\n",
+                encoding="utf-8",
+            )
+            mapping = {
+                "case_id": "案件",
+                "activity": "作業",
+                "timestamp_start": "開始",
+                "timestamp_end": "終了",
+                "user": "担当者",
+                "app_name": "利用アプリ",
+                "url": "URL",
+            }
+            preview = create_import_preview("csv", str(path), mapping, "%Y/%m/%d %H:%M", "Asia/Tokyo")
+            store = EventStore()
+            result = import_path_into_store(
+                "csv",
+                str(path),
+                store=store,
+                mapping=mapping,
+                date_format="%Y/%m/%d %H:%M",
+                timezone_name="Asia/Tokyo",
+            )
+
+        self.assertEqual(preview["columns"], ["案件", "作業", "開始", "終了", "担当者", "利用アプリ", "URL"])
+        self.assertEqual(preview["sample_rows"][0]["作業"], "契約確認")
+        self.assertEqual(preview["event_count"], 1)
+        self.assertEqual(preview["sample_events"][0]["duration_seconds"], 600)
+        self.assertEqual(result["imported_events"], 1)
+        self.assertEqual(store.events[0].case_id, "C-1")
+        self.assertEqual(store.events[0].domain, "127.0.0.1")
+
     def test_clear_persists_initialized_empty_state(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
         with tempfile.TemporaryDirectory() as temp_dir:

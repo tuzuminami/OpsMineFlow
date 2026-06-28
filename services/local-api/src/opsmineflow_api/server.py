@@ -86,10 +86,26 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 )
                 return
             if path == "/import/preview":
-                self._send_json(create_import_preview(str(payload.get("format") or ""), str(payload.get("path") or "")))
+                self._send_json(
+                    create_import_preview(
+                        str(payload.get("format") or ""),
+                        str(payload.get("path") or ""),
+                        payload.get("mapping") if isinstance(payload.get("mapping"), dict) else None,
+                        str(payload.get("date_format") or ""),
+                        str(payload.get("timezone") or "UTC"),
+                    )
+                )
                 return
             if path == "/import/csv":
-                self._send_json(import_path_into_store("csv", str(payload.get("path") or "")))
+                self._send_json(
+                    import_path_into_store(
+                        "csv",
+                        str(payload.get("path") or ""),
+                        mapping=payload.get("mapping") if isinstance(payload.get("mapping"), dict) else None,
+                        date_format=str(payload.get("date_format") or ""),
+                        timezone_name=str(payload.get("timezone") or "UTC"),
+                    )
+                )
                 return
             if path == "/import/json":
                 self._send_json(import_path_into_store("json", str(payload.get("path") or "")))
