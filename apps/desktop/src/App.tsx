@@ -7,8 +7,10 @@ import {
   importEvents,
   loadDashboardData,
   mergeEvents,
+  pauseRecording,
   previewImport,
   previewExport,
+  resumeRecording,
   runDiagnosticChecks,
   saveAutomationReview,
   saveExport,
@@ -73,6 +75,8 @@ type AppActions = {
   deleteData: () => Promise<void>;
   startRecording: (caseId: string, activityLabel: string, clearSample: boolean) => Promise<void>;
   stopRecording: () => Promise<void>;
+  pauseRecording: (reason: string) => Promise<void>;
+  resumeRecording: () => Promise<void>;
 };
 
 const tabs: Array<{ id: Tab; label: TranslationKey }> = [
@@ -313,6 +317,16 @@ export function App() {
       runAction(async () => {
         const result = await stopRecording();
         return t("message.recordingStopped", { count: result.recorded_events });
+      }),
+    pauseRecording: (reason) =>
+      runAction(async () => {
+        await pauseRecording(reason);
+        return t("message.recordingPaused");
+      }),
+    resumeRecording: () =>
+      runAction(async () => {
+        await resumeRecording();
+        return t("message.recordingResumed");
       })
   };
 
@@ -1012,6 +1026,7 @@ function RecordingPanel({ data, actions, working }: { data: DashboardData; actio
   const [caseId, setCaseId] = useState(() => `WORK-${new Date().toISOString().slice(0, 10)}`);
   const [activityLabel, setActivityLabel] = useState("");
   const [consent, setConsent] = useState(false);
+  const [pauseReason, setPauseReason] = useState("");
   const [clock, setClock] = useState(Date.now());
   const [templates, setTemplates] = useState<string[]>(loadRecordingTemplates);
   const status = data.recording;
@@ -1026,16 +1041,19 @@ function RecordingPanel({ data, actions, working }: { data: DashboardData; actio
   const elapsedSeconds = status.active && status.started_at
     ? Math.max(Math.floor((clock - new Date(status.started_at).getTime()) / 1000), 0)
     : 0;
+  const recordingTitle = status.paused ? t("recording.pausedTitle") : status.active ? t("recording.activeTitle") : t("recording.title");
+  const recordingBody = status.paused ? t("recording.pausedBody") : status.active ? t("recording.activeBody") : t("recording.body");
+  const recordingState = status.paused ? t("recording.paused") : status.active ? t("recording.active") : t("recording.stopped");
 
   return (
-    <section id="record-work" className={status.active ? "recording-panel is-recording" : "recording-panel"} aria-live="polite">
+    <section id="record-work" className={status.paused ? "recording-panel is-paused" : status.active ? "recording-panel is-recording" : "recording-panel"} aria-live="polite">
       <div className="recording-heading">
         <div>
           <span className="recording-kicker">{t("recording.kicker")}</span>
-          <h2>{status.active ? t("recording.activeTitle") : t("recording.title")}</h2>
-          <p>{status.active ? t("recording.activeBody") : t("recording.body")}</p>
+          <h2>{recordingTitle}</h2>
+          <p>{recordingBody}</p>
         </div>
-        <strong className="recording-state">{status.active ? t("recording.active") : t("recording.stopped")}</strong>
+        <strong className="recording-state">{recordingState}</strong>
       </div>
 
       {status.active ? (
@@ -1045,6 +1063,36 @@ function RecordingPanel({ data, actions, working }: { data: DashboardData; actio
           <DetailStat label={t("recording.eventsRecorded")} value={status.recorded_events.toString()} />
           <DetailStat label={t("recording.caseName")} value={status.case_id} />
           <DetailStat label={t("recording.workLabel")} value={status.activity_label} />
+          <DetailStat label={t("recording.pauseIntervals")} value={t("recording.pauseIntervalsCount", { count: status.pause_intervals.length })} />
+          {status.paused && status.paused_at ? <DetailStat label={t("recording.pausedSince")} value={formatElapsed(Math.max(Math.floor((clock - new Date(status.paused_at).getTime()) / 1000), 0))} /> : null}
+          <div className="pause-control">
+            <label>
+              <span>{t("recording.pauseReason")}</span>
+              <input
+                value={pauseReason}
+                onChange={(event) => setPauseReason(event.target.value)}
+                placeholder={t("recording.pauseReasonPlaceholder")}
+                disabled={working || status.paused}
+              />
+            </label>
+            {status.paused ? (
+              <button
+                className="resume-recording-button"
+                onClick={() => void actions.resumeRecording()}
+                disabled={working}
+              >
+                {t("recording.resume")}
+              </button>
+            ) : (
+              <button
+                className="pause-recording-button"
+                onClick={() => void actions.pauseRecording(pauseReason)}
+                disabled={working}
+              >
+                {t("recording.pause")}
+              </button>
+            )}
+          </div>
           <button className="stop-recording-button" onClick={() => void actions.stopRecording()} disabled={working}>
             {t("recording.stop")}
           </button>
@@ -1127,6 +1175,7 @@ function RecordingTimeline({ events, actions, working }: { events: EventRecord[]
     () => [...events].sort((a, b) => `${a.case_id}|${a.timestamp_start}|${a.event_id}`.localeCompare(`${b.case_id}|${b.timestamp_start}|${b.event_id}`)),
     [events]
   );
+  const breakCandidates = useMemo(() => findBreakCandidates(orderedEvents), [orderedEvents]);
   const [activityDrafts, setActivityDrafts] = useState<Record<string, string>>({});
   const [splitDrafts, setSplitDrafts] = useState<Record<string, string>>({});
 
@@ -1166,6 +1215,32 @@ function RecordingTimeline({ events, actions, working }: { events: EventRecord[]
           <p>{t("timeline.body")}</p>
         </div>
         <span>{t("timeline.count", { count: orderedEvents.length })}</span>
+      </div>
+      <div className="break-candidates">
+        <div>
+          <strong>{t("timeline.breakTitle")}</strong>
+          <span>{breakCandidates.length > 0 ? t("timeline.breakBody", { count: breakCandidates.length }) : t("timeline.noBreakCandidates")}</span>
+        </div>
+        {breakCandidates.slice(0, 5).map((candidate) => {
+          const eventId = candidate.eventId;
+          return (
+            <div className="break-candidate-row" key={candidate.id}>
+              <span>{candidate.kind === "long_event" ? t("timeline.longEvent") : t("timeline.gapCandidate")}</span>
+              <b>{candidate.label}</b>
+              <span>{formatElapsed(candidate.seconds)}</span>
+              {eventId ? (
+                <button
+                  onClick={() => {
+                    if (window.confirm(t("timeline.confirmExclude"))) void actions.excludeEvent(eventId);
+                  }}
+                  disabled={working}
+                >
+                  {t("timeline.markBreak")}
+                </button>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
       <div className="timeline-list">
         {orderedEvents.map((event, index) => {
@@ -1240,6 +1315,46 @@ function RecordingTimeline({ events, actions, working }: { events: EventRecord[]
       </div>
     </section>
   );
+}
+
+type BreakCandidate = {
+  id: string;
+  kind: "long_event" | "gap";
+  label: string;
+  seconds: number;
+  eventId?: string;
+};
+
+function findBreakCandidates(events: EventRecord[]): BreakCandidate[] {
+  const candidates: BreakCandidate[] = [];
+  for (const event of events) {
+    if (event.duration_seconds >= 30 * 60) {
+      candidates.push({
+        id: `long-${event.event_id}`,
+        kind: "long_event",
+        label: `${event.app_name || event.activity_raw} / ${event.activity_raw}`,
+        seconds: event.duration_seconds,
+        eventId: event.event_id
+      });
+    }
+  }
+  for (let index = 1; index < events.length; index += 1) {
+    const previous = events[index - 1];
+    const current = events[index];
+    if (previous.case_id !== current.case_id) continue;
+    const previousEnd = new Date(previous.timestamp_end).getTime();
+    const currentStart = new Date(current.timestamp_start).getTime();
+    const gapSeconds = Math.floor((currentStart - previousEnd) / 1000);
+    if (Number.isFinite(gapSeconds) && gapSeconds >= 15 * 60) {
+      candidates.push({
+        id: `gap-${previous.event_id}-${current.event_id}`,
+        kind: "gap",
+        label: `${previous.activity_raw} -> ${current.activity_raw}`,
+        seconds: gapSeconds
+      });
+    }
+  }
+  return candidates.sort((a, b) => b.seconds - a.seconds);
 }
 
 function RecordingDiagnosticDetails({ status }: { status: RecordingStatus }) {

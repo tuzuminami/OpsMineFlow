@@ -85,6 +85,14 @@ export async function stopRecording() {
   return postJson<RecordingStatus>("/recording/stop");
 }
 
+export async function pauseRecording(reason = "") {
+  return postJson<RecordingStatus>("/recording/pause", { reason });
+}
+
+export async function resumeRecording() {
+  return postJson<RecordingStatus>("/recording/resume");
+}
+
 export type ImportResult = {
   imported_events: number;
   source?: string;

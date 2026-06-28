@@ -302,6 +302,11 @@ textarea {
   border-color: #4f9487;
 }
 
+.recording-panel.is-paused {
+  background: #fff8e5;
+  border-color: #b98428;
+}
+
 .recording-heading {
   align-items: start;
   display: flex;
@@ -337,6 +342,11 @@ textarea {
 .is-recording .recording-state {
   background: #d7eee7;
   color: #0b5e54;
+}
+
+.is-paused .recording-state {
+  background: #ffe8ae;
+  color: #6f4300;
 }
 
 .recording-setup {
@@ -420,11 +430,22 @@ textarea {
   color: #ffffff;
 }
 
+.pause-recording-button {
+  background: #f2b84b;
+  border-color: #a96d08 !important;
+  color: #1f2527;
+}
+
+.resume-recording-button {
+  background: #163235;
+  color: #ffffff;
+}
+
 .recording-live-grid {
   align-items: stretch;
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(5, minmax(120px, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(120px, 1fr)) minmax(220px, 1.4fr) auto;
 }
 
 .recording-live-grid .detail-stat {
@@ -432,6 +453,35 @@ textarea {
   border: 1px solid #d5e4e0;
   border-radius: 8px;
   padding: 9px 10px;
+}
+
+.pause-control {
+  background: #ffffff;
+  border: 1px solid #d5e4e0;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 9px 10px;
+}
+
+.pause-control label {
+  display: grid;
+  gap: 5px;
+}
+
+.pause-control span {
+  color: #58646b;
+  font-size: 12px;
+}
+
+.pause-control input {
+  background: #fbfcfc;
+  border: 1px solid #a9b9b8;
+  border-radius: 8px;
+  min-height: 38px;
+  min-width: 0;
+  padding: 8px 10px;
+  width: 100%;
 }
 
 .recording-scope {
@@ -477,6 +527,52 @@ textarea {
   flex: 0 0 auto;
   font-weight: 700;
   padding: 5px 9px;
+}
+
+.break-candidates {
+  background: #f7f2e8;
+  border: 1px solid #e6d8bb;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.break-candidates > div:first-child {
+  align-items: baseline;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.break-candidates > div:first-child span {
+  color: #665b4a;
+  font-size: 12px;
+}
+
+.break-candidate-row {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #eadfc7;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(90px, 0.5fr) minmax(180px, 1fr) minmax(80px, 0.3fr) auto;
+  padding: 8px;
+}
+
+.break-candidate-row span {
+  color: #665b4a;
+  font-size: 12px;
+}
+
+.break-candidate-row button {
+  background: #fff6e5;
+  border: 1px solid #c98c22;
+  border-radius: 8px;
+  color: #664300;
+  min-height: 34px;
+  padding: 6px 10px;
 }
 
 .timeline-list {

@@ -100,6 +100,8 @@ assert diagnostics["privacy_evidence"]["status"] == "passed"
 assert all(item["status"] == "not_collected" for item in diagnostics["privacy_evidence"]["items"])
 assert diagnostics["recording"]["capture_scope"] == "frontmost_app_only"
 assert "token_ttl_seconds" in diagnostics["recording"]
+assert diagnostics["recording"]["paused"] is False
+assert diagnostics["recording"]["pause_intervals"] == []
 
 with tempfile.TemporaryDirectory() as temp_dir:
     mapped_path = Path(temp_dir) / "mapped-client.csv"

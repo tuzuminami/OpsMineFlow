@@ -100,10 +100,14 @@ class RecordingManager:
                 return {
                     **availability,
                     "active": False,
+                    "paused": False,
                     "session_id": "",
                     "case_id": "",
                     "activity_label": "",
                     "started_at": "",
+                    "paused_at": "",
+                    "pause_reason": "",
+                    "pause_intervals": [],
                     "current_app": "",
                     "recorded_events": 0,
                     "last_heartbeat_at": "",
@@ -163,17 +167,44 @@ class RecordingManager:
                 "case_id": normalized_case[:200],
                 "activity_label": normalized_activity[:200],
                 "started_at": _now_iso(),
+                "paused": False,
+                "paused_at": "",
+                "pause_reason": "",
+                "pause_intervals": [],
                 "current_app": "",
                 "recorded_events": 0,
                 "last_heartbeat_at": "",
             }
             return self.status()
 
+    def pause(self, reason: str = "") -> dict[str, Any]:
+        with self._lock:
+            self._refresh_process_state()
+            if self._session is None or not self._session.get("active"):
+                raise ValueError("No recording session is active.")
+            if self._session.get("paused"):
+                return self.status()
+            self._session["paused"] = True
+            self._session["paused_at"] = _now_iso()
+            self._session["pause_reason"] = reason.strip()[:200] or "manual_pause"
+            self._session["current_app"] = ""
+            return self.status()
+
+    def resume(self) -> dict[str, Any]:
+        with self._lock:
+            self._refresh_process_state()
+            if self._session is None or not self._session.get("active"):
+                raise ValueError("No recording session is active.")
+            if not self._session.get("paused"):
+                return self.status()
+            self._close_pause_interval()
+            return self.status()
+
     def heartbeat(self, token: str, session_id: str, current_app: str) -> dict[str, Any]:
         with self._lock:
             self._authorize(token, session_id)
             assert self._session is not None
-            self._session["current_app"] = current_app.strip()[:200]
+            self._session["current_app"] = "" if self._session.get("paused") else current_app.strip()[:200]
             self._session["last_heartbeat_at"] = _now_iso()
             return {"accepted": True}
 
@@ -186,6 +217,10 @@ class RecordingManager:
             sequence = int(payload.get("sequence") or 0)
             if sequence in self._seen_sequences:
                 raise ValueError("Recording event sequence was already accepted.")
+            if self._session.get("paused"):
+                self._seen_sequences.add(sequence)
+                self._session["last_heartbeat_at"] = _now_iso()
+                return {"accepted": True, "appended": 0, "paused": True, "event_id": ""}
             event = native_event_from_payload(payload, self._session)
             self._seen_sequences.add(sequence)
             active_store = store or default_store()
@@ -215,6 +250,8 @@ class RecordingManager:
         with self._lock:
             if self._session is None:
                 return self.status()
+            if self._session.get("paused"):
+                self._close_pause_interval()
             recorded_events = int(self._session.get("recorded_events", 0))
             if recorded_events > 0:
                 (store or default_store()).record_import("native_recording", str(self._session["case_id"]), recorded_events)
@@ -255,9 +292,28 @@ class RecordingManager:
         if self._session and self._session.get("active"):
             self._session["active"] = False
             self._session["current_app"] = ""
+            if self._session.get("paused"):
+                self._close_pause_interval()
             if self._process.returncode != 0:
                 self._last_error = f"Recording agent exited with code {self._process.returncode}."
         self._cleanup_process()
+
+    def _close_pause_interval(self) -> None:
+        assert self._session is not None
+        paused_at = str(self._session.get("paused_at") or "")
+        if paused_at:
+            intervals = self._session.setdefault("pause_intervals", [])
+            if isinstance(intervals, list):
+                intervals.append(
+                    {
+                        "started_at": paused_at,
+                        "ended_at": _now_iso(),
+                        "reason": str(self._session.get("pause_reason") or "manual_pause"),
+                    }
+                )
+        self._session["paused"] = False
+        self._session["paused_at"] = ""
+        self._session["pause_reason"] = ""
 
     def _cleanup_process(self) -> None:
         self._process = None

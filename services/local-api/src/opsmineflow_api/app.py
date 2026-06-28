@@ -121,6 +121,10 @@ class RecordingStartRequest(BaseModel):  # type: ignore[misc, valid-type]
     consent: bool = False
 
 
+class RecordingPauseRequest(BaseModel):  # type: ignore[misc, valid-type]
+    reason: str = ""
+
+
 class RecordingEventRequest(BaseModel):  # type: ignore[misc, valid-type]
     session_id: str
     sequence: int
@@ -613,6 +617,20 @@ if app is not None:
     @app.post("/recording/stop")
     def recording_stop() -> dict[str, Any]:
         return recording_manager.stop(default_store())
+
+    @app.post("/recording/pause")
+    def recording_pause(request: RecordingPauseRequest) -> dict[str, Any]:
+        try:
+            return recording_manager.pause(request.reason)
+        except ValueError as exc:
+            raise _bad_request(str(exc))
+
+    @app.post("/recording/resume")
+    def recording_resume() -> dict[str, Any]:
+        try:
+            return recording_manager.resume()
+        except ValueError as exc:
+            raise _bad_request(str(exc))
 
     @app.post("/recording/events")
     def recording_events(
