@@ -4,6 +4,8 @@
 
 OpsMineFlow is a local-first task mining and process mining assistant for macOS consultants. It helps with As-Is discovery, work inventory, process visualization, bottleneck analysis, automation candidate discovery, and consulting report drafts without requiring commercial SaaS contracts.
 
+CI status, required checks, and the repository protection procedure are documented in [CI / main branch quality gate](docs/operations/CI.md).
+
 ## Why OpsMineFlow
 
 Consulting teams often need to understand real work before proposing BPR, RPA, system renewal, or operating model changes. OpsMineFlow focuses on consent-based, local-only analysis that can be explained to client security, legal, and business teams.
