@@ -28,10 +28,10 @@ source_files() {
     -not -path '*/dist/*' \
     -not -path '*/src-tauri/target/*' \
     -not -path '*/src-tauri/gen/*' \
-    -not -path '*/src-tauri/icons/*' | sort
+    -not -path '*/src-tauri/icons/*' -print0
 }
 
-while IFS= read -r file; do
+while IFS= read -r -d '' file; do
   while IFS= read -r match; do
     value="${match#*:}"
     if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == "scripts/bootstrap_mac.sh" ]] || is_scan_metadata "$file"; then
@@ -61,7 +61,7 @@ PROHIBITED_TERMS=(
 )
 
 for term in "${PROHIBITED_TERMS[@]}"; do
-  while IFS= read -r file; do
+  while IFS= read -r -d '' file; do
     while IFS= read -r match; do
       if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == "scripts/bootstrap_mac.sh" ]] || is_scan_metadata "$file"; then
         continue
@@ -72,7 +72,7 @@ for term in "${PROHIBITED_TERMS[@]}"; do
   done < <(source_files "${SCAN_PATHS[@]}")
 done
 
-while IFS= read -r file; do
+while IFS= read -r -d '' file; do
   if grep -E -n -I -- '"dangerousRemoteDomainIpcAccess"|externalBin|allowlist.*all|0\.0\.0\.0' "$file" 2>/dev/null; then
     echo "Potential unsafe network or Tauri configuration found in $file."
     FAILED=1

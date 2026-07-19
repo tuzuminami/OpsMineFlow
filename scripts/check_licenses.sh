@@ -41,7 +41,7 @@ PROHIBITED_PACKAGES=(
   segment
 )
 
-while IFS= read -r manifest; do
+while IFS= read -r -d '' manifest; do
   for package in "${PROHIBITED_PACKAGES[@]}"; do
     if grep -E -n -i -- "(^|[\"' =_-])${package}([\"' <>=_-]|$)" "$manifest" >"$MATCH_FILE" 2>/dev/null; then
       echo "Prohibited dependency candidate '$package' found in $manifest"
@@ -53,7 +53,7 @@ done < <(find . -type f '(' -name 'package.json' -o -name 'pyproject.toml' -o -n
   -not -path '*/node_modules/*' \
   -not -path '*/.venv/*' \
   -not -path '*/venv/*' \
-  -not -path './apps/desktop/src-tauri/target/*' | sort)
+  -not -path './apps/desktop/src-tauri/target/*' -print0)
 
 if ! grep -R -n -I -- "Apache-2.0" LICENSE README.md README.ja.md docs/licenses >/dev/null; then
   echo "Apache-2.0 license declaration was not found."
