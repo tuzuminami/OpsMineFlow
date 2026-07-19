@@ -48,9 +48,9 @@ while IFS= read -r manifest; do
     fi
   done
 done < <(find . -type f '(' -name 'package.json' -o -name 'pyproject.toml' -o -name 'requirements*.txt' -o -name 'Cargo.toml' ')' \
-  -not -path './node_modules/*' \
-  -not -path './.venv/*' \
-  -not -path './venv/*' \
+  -not -path '*/node_modules/*' \
+  -not -path '*/.venv/*' \
+  -not -path '*/venv/*' \
   -not -path './apps/desktop/src-tauri/target/*' | sort)
 
 if ! rg -n "Apache-2.0" LICENSE README.md README.ja.md docs/licenses >/dev/null; then
