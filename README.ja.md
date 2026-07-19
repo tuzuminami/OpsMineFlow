@@ -4,6 +4,8 @@
 
 OpsMineFlow は、業務効率化コンサルティングの As-Is 調査、業務棚卸し、業務プロセス可視化、ボトルネック分析、自動化候補抽出、報告書ドラフト作成を支援する、Mac向けローカルファーストOSSだよ。
 
+CIの状態、必須check、main保護の手順は [CI / main branch quality gate](docs/operations/CI.md) にまとめてる。
+
 ## プロダクト概要
 
 商用SaaS契約なしで、CSV/JSONイベントログや任意のActivityWatchエクスポートをローカルに取り込み、業務フローと改善候補を可視化する。

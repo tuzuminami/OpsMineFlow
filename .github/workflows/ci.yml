@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-core:
+    name: macos-core
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Python test dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --disable-pip-version-check --no-input \
+            -e packages/drawio-exporter \
+            -e 'services/mining-core[dev]' \
+            -e 'services/local-api[dev]'
+
+      - name: Install locked desktop dependencies
+        run: npm --prefix apps/desktop ci --ignore-scripts
+
+      - name: Verify Rust lockfile
+        run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+      - name: Run repository quality gates
+        run: |
+          ./scripts/test.sh
+          ./scripts/lint.sh
+          ./scripts/check_licenses.sh
+          ./scripts/check_no_external_network.sh
+
+  macos-package-smoke:
+    name: macos-package-smoke
+    needs: macos-core
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install desktop dependencies
+        run: npm --prefix apps/desktop ci --ignore-scripts
+
+      - name: Build unsigned package smoke artifact
+        run: OPSMINEFLOW_SKIP_CHECKS=1 ./scripts/package_macos.sh
+
+      - name: Verify package checksums
+        run: |
+          shopt -s nullglob
+          artifacts=(dist/macos/OpsMineFlow.app.zip dist/macos/*.dmg)
+          if [[ ${#artifacts[@]} -ne 2 ]]; then
+            echo "Expected one app zip and one dmg artifact."
+            printf '%s\n' "${artifacts[@]}"
+            exit 1
+          fi
+          test -s dist/macos/SHA256SUMS.txt
+          for artifact in "${artifacts[@]}"; do
+            test -s "$artifact"
+            grep -F -- "$(basename "$artifact")" dist/macos/SHA256SUMS.txt >/dev/null
+          done
+          cd dist/macos
+          shasum -a 256 -c SHA256SUMS.txt

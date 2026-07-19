@@ -19,19 +19,31 @@ is_scan_metadata() {
     || "$file" == *"package-lock.json" ]]
 }
 
-while IFS= read -r match; do
-  file="${match%%:*}"
-  rest="${match#*:}"
-  value="${rest#*:}"
-  if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == "scripts/bootstrap_mac.sh" ]] || is_scan_metadata "$file"; then
-    continue
-  fi
-  if [[ "$value" =~ ^https?://(127\.0\.0\.1|localhost)([:/].*)?$ ]]; then
-    continue
-  fi
-  echo "External URL candidate: $file -> $value"
-  FAILED=1
-done < <(rg -n -o "$URL_PATTERN" "${SCAN_PATHS[@]}" 2>/dev/null || true)
+source_files() {
+  find "$@" -type f \
+    -not -path '*/node_modules/*' \
+    -not -path '*/.venv/*' \
+    -not -path '*/venv/*' \
+    -not -path '*/.pytest_cache/*' \
+    -not -path '*/dist/*' \
+    -not -path '*/src-tauri/target/*' \
+    -not -path '*/src-tauri/gen/*' \
+    -not -path '*/src-tauri/icons/*' -print0
+}
+
+while IFS= read -r -d '' file; do
+  while IFS= read -r match; do
+    value="${match#*:}"
+    if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == "scripts/bootstrap_mac.sh" ]] || is_scan_metadata "$file"; then
+      continue
+    fi
+    if [[ "$value" =~ ^https?://(127\.0\.0\.1|localhost)([:/].*)?$ ]]; then
+      continue
+    fi
+    echo "External URL candidate: $file -> $value"
+    FAILED=1
+  done < <(grep -E -n -I -o -- "$URL_PATTERN" "$file" 2>/dev/null || true)
+done < <(source_files "${SCAN_PATHS[@]}")
 
 PROHIBITED_TERMS=(
   telemetry
@@ -49,20 +61,23 @@ PROHIBITED_TERMS=(
 )
 
 for term in "${PROHIBITED_TERMS[@]}"; do
-  while IFS= read -r match; do
-    file="${match%%:*}"
-    if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == "scripts/bootstrap_mac.sh" ]] || is_scan_metadata "$file"; then
-      continue
-    fi
-    echo "Prohibited integration term '$term' found in $match"
-    FAILED=1
-  done < <(rg -n -i "$term" apps services packages scripts 2>/dev/null || true)
+  while IFS= read -r -d '' file; do
+    while IFS= read -r match; do
+      if [[ "$file" == "scripts/check_no_external_network.sh" || "$file" == "scripts/check_licenses.sh" || "$file" == "scripts/bootstrap_mac.sh" ]] || is_scan_metadata "$file"; then
+        continue
+      fi
+      echo "Prohibited integration term '$term' found in $file:$match"
+      FAILED=1
+    done < <(grep -E -n -I -i -- "$term" "$file" 2>/dev/null || true)
+  done < <(source_files "${SCAN_PATHS[@]}")
 done
 
-if rg -n '"dangerousRemoteDomainIpcAccess"|externalBin|allowlist.*all|0\.0\.0\.0' apps packages services 2>/dev/null; then
-  echo "Potential unsafe network or Tauri configuration found."
-  FAILED=1
-fi
+while IFS= read -r -d '' file; do
+  if grep -E -n -I -- '"dangerousRemoteDomainIpcAccess"|externalBin|allowlist.*all|0\.0\.0\.0' "$file" 2>/dev/null; then
+    echo "Potential unsafe network or Tauri configuration found in $file."
+    FAILED=1
+  fi
+done < <(source_files apps packages services)
 
 if [[ "$FAILED" -ne 0 ]]; then
   echo "Local-only network policy check failed."
