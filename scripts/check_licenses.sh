@@ -7,6 +7,18 @@ cd "$ROOT_DIR"
 echo "Checking license policy guardrails..."
 
 FAILED=0
+APACHE_2_0_SHA256="cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+
+if [[ ! -f LICENSE ]]; then
+  echo "LICENSE file is missing."
+  FAILED=1
+else
+  LICENSE_SHA256="$(shasum -a 256 LICENSE | awk '{print $1}')"
+  if [[ "$LICENSE_SHA256" != "$APACHE_2_0_SHA256" ]]; then
+    echo "LICENSE must match the complete, unmodified Apache License 2.0 text."
+    FAILED=1
+  fi
+fi
 
 PROHIBITED_PACKAGES=(
   pm4py
