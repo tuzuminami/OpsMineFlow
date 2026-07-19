@@ -294,8 +294,16 @@ class ApiLogicTests(unittest.TestCase):
     def test_diagnostic_checks_run_local_guardrails(self) -> None:
         results = run_diagnostic_checks()
 
-        self.assertEqual(results["license_policy"]["status"], "passed")
-        self.assertEqual(results["local_network_policy"]["status"], "passed")
+        self.assertEqual(
+            results["license_policy"]["status"],
+            "passed",
+            results["license_policy"].get("output", ""),
+        )
+        self.assertEqual(
+            results["local_network_policy"]["status"],
+            "passed",
+            results["local_network_policy"].get("output", ""),
+        )
 
     def test_import_preview_and_store_import_history(self) -> None:
         preview = create_import_preview("csv", "data/sample/sample_events.csv")
