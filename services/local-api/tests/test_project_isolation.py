@@ -9,7 +9,7 @@ from unittest.mock import patch
 from opsmineflow_mining import load_events_from_csv
 
 from opsmineflow_api.app import create_export_artifact, create_process_map
-from opsmineflow_api.storage import EventStore, ProjectConflictError
+from opsmineflow_api.storage import MAX_CACHED_PROJECT_VIEWS, EventStore, ProjectConflictError
 
 
 class ProjectIsolationTests(unittest.TestCase):
@@ -87,8 +87,36 @@ class ProjectIsolationTests(unittest.TestCase):
 
             with patch("opsmineflow_api.storage.migrate_database", side_effect=AssertionError("must not migrate per request")):
                 scoped = workspace.for_project(project.project_id)
+                repeated = workspace.for_project(project.project_id)
 
             self.assertEqual(scoped.snapshot().project_id, project.project_id)
+            self.assertIs(scoped, repeated)
+
+    def test_revision_bound_mutation_invalidates_the_cached_project_view(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = EventStore(db_path=Path(temp_dir) / "opsmineflow.sqlite3")
+            project = workspace.create_project("Cache invalidation")
+            cached = workspace.for_project(project.project_id)
+            revision = cached.snapshot().project_revision
+
+            mutation = workspace.for_project(project.project_id, expected_revision=revision)
+            mutation.update_settings({"retention_days": 21})
+            refreshed = workspace.for_project(project.project_id)
+
+            self.assertIsNot(cached, refreshed)
+            self.assertEqual(refreshed.get_settings()["retention_days"], 21)
+
+    def test_project_view_cache_is_bounded_and_evicts_the_least_recent_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = EventStore(db_path=Path(temp_dir) / "opsmineflow.sqlite3")
+            projects = [workspace.create_project(f"Cache {index}") for index in range(MAX_CACHED_PROJECT_VIEWS + 1)]
+
+            for project in projects:
+                workspace.for_project(project.project_id)
+
+            self.assertEqual(len(workspace._project_views), MAX_CACHED_PROJECT_VIEWS)
+            self.assertNotIn(projects[0].project_id, workspace._project_views)
+            self.assertEqual(list(workspace._project_views), [project.project_id for project in projects[1:]])
 
     def test_project_delete_requires_an_empty_dataset_and_updates_the_durable_selection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from dataclasses import dataclass, field
@@ -36,6 +37,8 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "excluded_apps": [],
     "excluded_domains": [],
 }
+
+MAX_CACHED_PROJECT_VIEWS = 2
 
 AUTOMATION_REVIEW_STATUSES = {"unreviewed", "adopted", "on_hold", "rejected"}
 
@@ -154,6 +157,8 @@ class EventStore:
     _analysis_cache: dict[object, object] = field(default_factory=dict, init=False, repr=False, compare=False)
     _analysis_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
     _mutation_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
+    _project_view_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
+    _project_views: OrderedDict[str, "EventStore"] = field(default_factory=OrderedDict, init=False, repr=False, compare=False)
     _generation: int = field(default=0, init=False, repr=False, compare=False)
     _project_revision: int = field(default=0, init=False, repr=False, compare=False)
     _writes_blocked: bool = field(default=False, init=False, repr=False, compare=False)
@@ -196,6 +201,30 @@ class EventStore:
             if expected_revision is not None and expected_revision != self._project_revision:
                 raise ProjectConflictError("Project changed. Refresh it before applying another change.")
             return self
+        if expected_revision is None:
+            # Dashboard reads arrive in parallel. Reuse one project-bound view
+            # so a 100k-event project is deserialized once, not once per
+            # endpoint. The view remains explicit: this cache never consults
+            # or falls back to the workspace active-project preference.
+            with self._project_view_lock:
+                cached = self._project_views.get(normalized_project_id)
+                if cached is not None:
+                    self._project_views.move_to_end(normalized_project_id)
+                    return cached
+                cached = EventStore(
+                    db_path=self.db_path,
+                    project_id=normalized_project_id,
+                    _migration_ready=True,
+                    _parent_migration_report=self._migration_report,
+                )
+                self._project_views[normalized_project_id] = cached
+                while len(self._project_views) > MAX_CACHED_PROJECT_VIEWS:
+                    self._project_views.popitem(last=False)
+                return cached
+        # A revision-bound operation must load and validate the durable state
+        # itself. Drop any read view so the next unversioned dashboard refresh
+        # cannot reuse a stale pre-mutation snapshot.
+        self._invalidate_project_view(normalized_project_id)
         return EventStore(
             db_path=self.db_path,
             project_id=normalized_project_id,
@@ -349,6 +378,7 @@ class EventStore:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
+        self._invalidate_project_view(normalized_project_id)
         return self.get_project(normalized_project_id)
 
     def delete_project(self, project_id: str, *, expected_revision: int | None = None) -> str:
@@ -394,6 +424,7 @@ class EventStore:
                 if connection.in_transaction:
                     connection.execute("ROLLBACK")
                 raise
+        self._invalidate_project_view(normalized_project_id)
         return replacement_project_id
 
     def _snapshot_locked(self) -> StoreSnapshot:
@@ -1038,6 +1069,10 @@ class EventStore:
         connection.execute("PRAGMA busy_timeout = 5000")
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    def _invalidate_project_view(self, project_id: str) -> None:
+        with self._project_view_lock:
+            self._project_views.pop(project_id, None)
 
     def _load(self) -> None:
         with self._connect() as conn:
