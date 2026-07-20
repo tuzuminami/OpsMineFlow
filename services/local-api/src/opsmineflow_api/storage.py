@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
+from types import MappingProxyType
+from typing import Any
 
 from opsmineflow_mining import load_events_from_csv
 from opsmineflow_mining.analysis import event_sort_key
@@ -31,6 +34,57 @@ DEFAULT_SETTINGS: dict[str, object] = {
 AUTOMATION_REVIEW_STATUSES = {"unreviewed", "adopted", "on_hold", "rejected"}
 
 
+class StorageCommitError(RuntimeError):
+    """A local mutation did not reach durable storage and was not applied."""
+
+    def __init__(self, code: str = "storage_commit_failed") -> None:
+        self.code = code
+        details = {
+            "storage_busy": ("Local storage could not be updated. No changes were applied.", True, "retry"),
+            "storage_commit_failed": ("Local storage could not be updated. No changes were applied.", True, "retry"),
+            "storage_unavailable": ("Local storage is unavailable. Check free space and permissions.", False, "check_local_storage"),
+            "storage_read_only": ("Local storage is read-only. Check local storage permissions.", False, "check_permissions"),
+            "storage_constraint_failed": ("Local storage rejected the change. No changes were applied.", False, "check_local_storage"),
+            "storage_commit_indeterminate": (
+                "Local storage was reconciled after an uncertain commit. Refresh the data before continuing.",
+                False,
+                "refresh_data",
+            ),
+            "storage_recovery_required": (
+                "Local storage needs recovery before further changes can be made.",
+                False,
+                "recover_local_storage",
+            ),
+        }
+        self.message, self.retryable, self.recovery_action = details.get(
+            code,
+            details["storage_commit_failed"],
+        )
+        super().__init__(self.message)
+
+    def to_api_dict(self) -> dict[str, object]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+            "recovery_action": self.recovery_action,
+        }
+
+
+@dataclass(frozen=True)
+class StoreSnapshot:
+    """One self-consistent local state observed by a reader or mutation."""
+
+    events: tuple[StandardEvent, ...]
+    manual_labels: Mapping[str, str]
+    settings: Mapping[str, object]
+    metadata: Mapping[str, str]
+    import_history: tuple[Mapping[str, object], ...]
+    automation_reviews: Mapping[str, str]
+    automation_review_notes: Mapping[str, str]
+    generation: int
+
+
 def default_data_dir() -> Path:
     override = os.environ.get("OPSMINEFLOW_DATA_DIR")
     if override:
@@ -44,16 +98,20 @@ def default_data_dir() -> Path:
 class EventStore:
     events: list[StandardEvent] = field(default_factory=list)
     manual_labels: dict[str, str] = field(default_factory=dict)
-    settings: dict[str, object] = field(default_factory=lambda: dict(DEFAULT_SETTINGS))
+    settings: dict[str, object] = field(default_factory=lambda: _copy_settings(DEFAULT_SETTINGS))
     metadata: dict[str, str] = field(default_factory=dict)
     import_history: list[dict[str, object]] = field(default_factory=list)
     automation_reviews: dict[str, str] = field(default_factory=dict)
     automation_review_notes: dict[str, str] = field(default_factory=dict)
     db_path: Path | None = None
     migration_fault_injector: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
+    mutation_fault_injector: Callable[[str], None] | None = field(default=None, repr=False, compare=False)
     _migration_report: MigrationReport | None = field(default=None, init=False, repr=False)
     _analysis_cache: dict[object, object] = field(default_factory=dict, init=False, repr=False, compare=False)
     _analysis_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
+    _mutation_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
+    _generation: int = field(default=0, init=False, repr=False, compare=False)
+    _writes_blocked: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.db_path is None:
@@ -71,92 +129,345 @@ class EventStore:
         else:
             self._load()
 
-    def replace(self, events: list[StandardEvent], import_source: str = "", import_path: str = "") -> None:
-        self.events = _uniquify_event_ids(self._filter_events(list(events)))
-        self.manual_labels = {}
-        self._invalidate_analysis()
-        if self.db_path is None:
-            if import_source:
-                self.record_import(import_source, import_path, len(self.events))
-            return
-        with self._connect() as conn:
-            conn.execute("DELETE FROM events")
-            conn.execute("DELETE FROM manual_labels")
-            conn.executemany(
-                "INSERT INTO events(event_id, payload_json) VALUES(?, ?)",
-                [(event.event_id, json.dumps(event.to_dict(), ensure_ascii=False)) for event in self.events],
-            )
-            conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)", ("initialized", "true"))
-        self.metadata["initialized"] = "true"
-        if import_source:
-            self.record_import(import_source, import_path, len(self.events))
+    def snapshot(self) -> StoreSnapshot:
+        """Return one immutable view for a reader without exposing a torn mutation."""
 
-    def append(self, events: list[StandardEvent]) -> int:
-        existing_ids = {event.event_id for event in self.events}
-        candidates = [event for event in self._filter_events(list(events)) if event.event_id not in existing_ids]
-        new_events = [
-            event
-            for event in _uniquify_event_ids(candidates, reserved_ids=existing_ids)
-        ]
-        if not new_events:
-            return 0
-        self.events.extend(new_events)
-        self._persist_events()
-        return len(new_events)
+        with self._mutation_lock:
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> StoreSnapshot:
+        return StoreSnapshot(
+            events=tuple(self.events),
+            manual_labels=MappingProxyType(dict(self.manual_labels)),
+            settings=MappingProxyType(_copy_settings(self.settings)),
+            metadata=MappingProxyType(dict(self.metadata)),
+            import_history=tuple(MappingProxyType(dict(item)) for item in self.import_history),
+            automation_reviews=MappingProxyType(dict(self.automation_reviews)),
+            automation_review_notes=MappingProxyType(dict(self.automation_review_notes)),
+            generation=self._generation,
+        )
+
+    def _candidate(
+        self,
+        current: StoreSnapshot,
+        *,
+        events: list[StandardEvent] | tuple[StandardEvent, ...] | None = None,
+        manual_labels: dict[str, str] | None = None,
+        settings: dict[str, object] | None = None,
+        metadata: dict[str, str] | None = None,
+        import_history: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
+        automation_reviews: dict[str, str] | None = None,
+        automation_review_notes: dict[str, str] | None = None,
+    ) -> StoreSnapshot:
+        candidate_events = tuple(sorted(current.events if events is None else events, key=event_sort_key))
+        candidate_labels = dict(current.manual_labels if manual_labels is None else manual_labels)
+        live_event_ids = {event.event_id for event in candidate_events}
+        return StoreSnapshot(
+            events=candidate_events,
+            manual_labels=MappingProxyType(
+                {event_id: label for event_id, label in candidate_labels.items() if event_id in live_event_ids}
+            ),
+            settings=MappingProxyType(_copy_settings(current.settings if settings is None else settings)),
+            metadata=MappingProxyType(dict(current.metadata if metadata is None else metadata)),
+            import_history=tuple(
+                MappingProxyType(dict(item))
+                for item in (current.import_history if import_history is None else import_history)
+            ),
+            automation_reviews=MappingProxyType(
+                dict(current.automation_reviews if automation_reviews is None else automation_reviews)
+            ),
+            automation_review_notes=MappingProxyType(
+                dict(current.automation_review_notes if automation_review_notes is None else automation_review_notes)
+            ),
+            generation=current.generation + 1,
+        )
+
+    def _commit_candidate(self, candidate: StoreSnapshot) -> None:
+        """Persist a full candidate state before making it observable in memory."""
+
+        if self._writes_blocked:
+            raise StorageCommitError("storage_recovery_required")
+        if self.db_path is not None:
+            connection: sqlite3.Connection | None = None
+            persisted: StoreSnapshot | None = None
+            committed = False
+            transaction_started = False
+            rollback_confirmed = False
+            failure: Exception | None = None
+            close_failure: Exception | None = None
+            try:
+                connection = self._connect()
+                connection.execute("BEGIN IMMEDIATE")
+                transaction_started = True
+                persisted = self._write_candidate(connection, candidate)
+                if self.mutation_fault_injector is not None:
+                    self.mutation_fault_injector("before_commit")
+                connection.execute("COMMIT")
+                committed = True
+                if self.mutation_fault_injector is not None:
+                    self.mutation_fault_injector("after_commit")
+            except Exception as error:
+                failure = error
+                if not committed:
+                    rollback_confirmed = self._rollback_after_failed_commit(connection)
+            finally:
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception as close_error:
+                        close_failure = close_error
+            if close_failure is not None:
+                self._reconcile_after_connection_failure(close_failure)
+            if failure is not None:
+                if committed or (transaction_started and not rollback_confirmed):
+                    self._reconcile_after_uncertain_commit(failure)
+                if isinstance(failure, StorageCommitError):
+                    raise failure
+                raise StorageCommitError(_storage_error_code(failure)) from failure
+            if persisted is None:
+                raise StorageCommitError("storage_commit_failed")
+            candidate = persisted
+        self._apply_candidate(candidate)
+
+    def _rollback_after_failed_commit(self, connection: sqlite3.Connection | None) -> bool:
+        if connection is None:
+            return False
+        try:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+                return not connection.in_transaction
+        except Exception:
+            # Preserve the original durable-write failure. A failed rollback
+            # must never leak a driver/path error to the UI.
+            return False
+        return False
+
+    def _reconcile_after_uncertain_commit(self, error: Exception) -> None:
+        """Converge memory with durable SQLite state after an uncertain response."""
+
+        try:
+            self._load()
+        except Exception as reload_error:
+            self._writes_blocked = True
+            raise StorageCommitError("storage_recovery_required") from reload_error
+        raise StorageCommitError("storage_commit_indeterminate") from error
+
+    def _reconcile_after_connection_failure(self, error: Exception) -> None:
+        """Reload what is readable, then fail closed when a connection leaked."""
+
+        try:
+            self._load()
+        except Exception as reload_error:
+            self._writes_blocked = True
+            raise StorageCommitError("storage_recovery_required") from reload_error
+        self._writes_blocked = True
+        raise StorageCommitError("storage_recovery_required") from error
+
+    def _write_candidate(self, connection: sqlite3.Connection, candidate: StoreSnapshot) -> StoreSnapshot:
+        """Write every coupled table in the caller-owned transaction."""
+
+        connection.execute("DELETE FROM events")
+        connection.executemany(
+            "INSERT INTO events(event_id, payload_json) VALUES(?, ?)",
+            [(event.event_id, json.dumps(event.to_dict(), ensure_ascii=False)) for event in candidate.events],
+        )
+        connection.execute("DELETE FROM manual_labels")
+        connection.executemany(
+            "INSERT INTO manual_labels(event_id, label) VALUES(?, ?)",
+            sorted(candidate.manual_labels.items()),
+        )
+        connection.execute("DELETE FROM settings")
+        connection.executemany(
+            "INSERT INTO settings(key, value_json) VALUES(?, ?)",
+            [(key, json.dumps(value, ensure_ascii=False)) for key, value in sorted(candidate.settings.items())],
+        )
+        connection.execute("DELETE FROM metadata")
+        connection.executemany(
+            "INSERT INTO metadata(key, value) VALUES(?, ?)",
+            sorted(candidate.metadata.items()),
+        )
+        connection.execute("DELETE FROM automation_reviews")
+        connection.executemany(
+            "INSERT INTO automation_reviews(activity, status, note, updated_at) VALUES(?, ?, ?, ?)",
+            [
+                (
+                    activity,
+                    status,
+                    candidate.automation_review_notes.get(activity, ""),
+                    datetime.now(timezone.utc).isoformat(),
+                )
+                for activity, status in sorted(candidate.automation_reviews.items())
+            ],
+        )
+        connection.execute("DELETE FROM import_history")
+        persisted_history: list[dict[str, object]] = []
+        for item in candidate.import_history:
+            if "id" in item:
+                connection.execute(
+                    "INSERT INTO import_history(id, source, path, event_count, imported_at) VALUES(?, ?, ?, ?, ?)",
+                    (item["id"], item["source"], item["path"], item["event_count"], item["imported_at"]),
+                )
+                persisted_history.append(dict(item))
+            else:
+                cursor = connection.execute(
+                    "INSERT INTO import_history(source, path, event_count, imported_at) VALUES(?, ?, ?, ?)",
+                    (item["source"], item["path"], item["event_count"], item["imported_at"]),
+                )
+                persisted_item = dict(item)
+                persisted_item["id"] = int(cursor.lastrowid)
+                persisted_history.append(persisted_item)
+        return replace(
+            candidate,
+            import_history=tuple(MappingProxyType(dict(item)) for item in persisted_history),
+        )
+
+    def _apply_candidate(self, candidate: StoreSnapshot) -> None:
+        self.events = list(candidate.events)
+        self.manual_labels = dict(candidate.manual_labels)
+        self.settings = _copy_settings(candidate.settings)
+        self.metadata = dict(candidate.metadata)
+        self.import_history = [dict(item) for item in candidate.import_history]
+        self.automation_reviews = dict(candidate.automation_reviews)
+        self.automation_review_notes = dict(candidate.automation_review_notes)
+        self._generation = candidate.generation
+        self._invalidate_analysis()
+
+    def replace(self, events: list[StandardEvent], import_source: str = "", import_path: str = "") -> None:
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            candidate_events = _uniquify_event_ids(_filter_events_for_settings(list(events), current.settings))
+            metadata = dict(current.metadata)
+            metadata["initialized"] = "true"
+            history = [dict(item) for item in current.import_history]
+            if import_source:
+                import_key = _import_fingerprint(import_source, import_path, candidate_events)
+                if (
+                    metadata.get("last_import_fingerprint") == import_key
+                    and _same_import_dataset(candidate_events, current.events)
+                ):
+                    return
+                metadata["last_import_fingerprint"] = import_key
+                history.append(_import_history_item(import_source, import_path, len(candidate_events)))
+            self._commit_candidate(
+                self._candidate(
+                    current,
+                    events=candidate_events,
+                    manual_labels={},
+                    metadata=metadata,
+                    import_history=history,
+                )
+            )
+
+    def append(
+        self,
+        events: list[StandardEvent],
+        *,
+        import_source: str = "",
+        import_path: str = "",
+    ) -> int:
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            existing_ids = {event.event_id for event in current.events}
+            filtered_events = _filter_events_for_settings(list(events), current.settings)
+            candidates = [
+                event
+                for event in filtered_events
+                if event.event_id not in existing_ids
+            ]
+            new_events = _uniquify_event_ids(candidates, reserved_ids=existing_ids)
+            import_key = _import_fingerprint(import_source, import_path, filtered_events) if import_source else ""
+            if import_key and current.metadata.get("last_import_fingerprint") == import_key:
+                return 0
+            if not new_events:
+                if import_source:
+                    history = [dict(item) for item in current.import_history]
+                    history.append(_import_history_item(import_source, import_path, 0))
+                    metadata = _initialized_metadata(current)
+                    metadata["last_import_fingerprint"] = import_key
+                    self._commit_candidate(self._candidate(current, import_history=history, metadata=metadata))
+                return 0
+            metadata = dict(current.metadata)
+            metadata["initialized"] = "true"
+            history = [dict(item) for item in current.import_history]
+            if import_source:
+                metadata["last_import_fingerprint"] = import_key
+                history.append(_import_history_item(import_source, import_path, len(new_events)))
+            self._commit_candidate(
+                self._candidate(
+                    current,
+                    events=[*current.events, *new_events],
+                    metadata=metadata,
+                    import_history=history,
+                )
+            )
+            return len(new_events)
 
     def set_label(self, event_id: str, label: str) -> None:
-        if not any(event.event_id == event_id for event in self.events):
-            raise KeyError(event_id)
-        self.manual_labels[event_id] = label
-        if self.db_path is None:
-            return
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO manual_labels(event_id, label) VALUES(?, ?)",
-                (event_id, label),
-            )
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            if not any(event.event_id == event_id for event in current.events):
+                raise KeyError(event_id)
+            labels = dict(current.manual_labels)
+            labels[event_id] = label
+            self._commit_candidate(self._candidate(current, manual_labels=labels))
 
     def update_event_activity(self, event_id: str, activity: str) -> dict[str, object]:
         normalized_activity = activity.strip()
         if not normalized_activity:
             raise ValueError("Activity label is required.")
-        index = self._find_event_index(event_id)
-        self.events[index] = _replace_event(
-            self.events[index],
-            activity_raw=normalized_activity,
-            activity_normalized=_normalize_activity(normalized_activity),
-            confidential_flag=looks_confidential(
-                self.events[index].window_title,
-                self.events[index].url,
-                normalized_activity,
-            ),
-            metadata_json=_edited_metadata(self.events[index], "activity_update"),
-        )
-        self._persist_events()
-        return self.events[index].to_dict()
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            index = _find_event_index(current.events, event_id)
+            original = current.events[index]
+            updated = _replace_event(
+                original,
+                activity_raw=normalized_activity,
+                activity_normalized=_normalize_activity(normalized_activity),
+                confidential_flag=looks_confidential(original.window_title, original.url, normalized_activity),
+                metadata_json=_edited_metadata(original, "activity_update"),
+            )
+            events = list(current.events)
+            events[index] = updated
+            self._commit_candidate(self._candidate(current, events=events, metadata=_initialized_metadata(current)))
+            return updated.to_dict()
 
     def exclude_event(self, event_id: str) -> dict[str, object]:
-        index = self._find_event_index(event_id)
-        removed = self.events.pop(index)
-        self.manual_labels.pop(event_id, None)
-        self._persist_events()
-        return {"excluded": True, "event_id": removed.event_id}
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            index = _find_event_index(current.events, event_id)
+            removed = current.events[index]
+            labels = dict(current.manual_labels)
+            labels.pop(event_id, None)
+            self._commit_candidate(
+                self._candidate(
+                    current,
+                    events=[*current.events[:index], *current.events[index + 1 :]],
+                    manual_labels=labels,
+                    metadata=_initialized_metadata(current),
+                )
+            )
+            return {"excluded": True, "event_id": removed.event_id}
 
     def set_event_quality_review(self, event_id: str, status: str) -> dict[str, object]:
         normalized_status = status.strip().casefold() or "approved"
         if normalized_status not in {"approved", "unreviewed"}:
             raise ValueError("Quality review status must be approved or unreviewed.")
-        index = self._find_event_index(event_id)
-        self.events[index] = _replace_event(
-            self.events[index],
-            metadata_json=_edited_metadata(
-                self.events[index],
-                "quality_review",
-                quality_review_status=normalized_status,
-            ),
-        )
-        self._persist_events()
-        return {"event_id": event_id, "quality_review_status": normalized_status}
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            index = _find_event_index(current.events, event_id)
+            original = current.events[index]
+            updated = _replace_event(
+                original,
+                metadata_json=_edited_metadata(
+                    original,
+                    "quality_review",
+                    quality_review_status=normalized_status,
+                ),
+            )
+            events = list(current.events)
+            events[index] = updated
+            self._commit_candidate(self._candidate(current, events=events, metadata=_initialized_metadata(current)))
+            return {"event_id": event_id, "quality_review_status": normalized_status}
 
     def update_event_case_correlation(self, event_id: str, case_id: str, reason: str) -> dict[str, object]:
         """Apply a local human case correction without inventing source evidence.
@@ -175,16 +486,20 @@ class EventStore:
             raise ValueError("A review reason is required for a manual case correction.")
         if len(normalized_reason) > 500 or any(character in "\r\n\t" for character in normalized_reason):
             raise ValueError("Review reason must be a single line of at most 500 characters.")
-        index = self._find_event_index(event_id)
-        event = self.events[index]
-        self.events[index] = _replace_event(
-            event,
-            case_id=normalized_case_id,
-            session_id=f"{normalized_case_id}:manual-review",
-            metadata_json=_case_correlation_metadata(event, "manual_case_correction", normalized_reason),
-        )
-        self._persist_events()
-        return self.events[self._find_event_index(event_id)].to_dict()
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            index = _find_event_index(current.events, event_id)
+            event = current.events[index]
+            updated = _replace_event(
+                event,
+                case_id=normalized_case_id,
+                session_id=f"{normalized_case_id}:manual-review",
+                metadata_json=_case_correlation_metadata(event, "manual_case_correction", normalized_reason),
+            )
+            events = list(current.events)
+            events[index] = updated
+            self._commit_candidate(self._candidate(current, events=events, metadata=_initialized_metadata(current)))
+            return updated.to_dict()
 
     def split_event(
         self,
@@ -193,111 +508,127 @@ class EventStore:
         first_activity: str = "",
         second_activity: str = "",
     ) -> dict[str, object]:
-        index = self._find_event_index(event_id)
-        event = self.events[index]
-        start, end, duration = _event_time_bounds(event)
-        split_after = float(split_after_seconds)
-        if duration <= 1:
-            raise ValueError("Event is too short to split.")
-        if split_after <= 0 or split_after >= duration:
-            raise ValueError("Split point must be inside the event duration.")
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            index = _find_event_index(current.events, event_id)
+            event = current.events[index]
+            start, end, duration = _event_time_bounds(event)
+            split_after = float(split_after_seconds)
+            if duration <= 1:
+                raise ValueError("Event is too short to split.")
+            if split_after <= 0 or split_after >= duration:
+                raise ValueError("Split point must be inside the event duration.")
 
-        split_at = start + timedelta(seconds=split_after)
-        first_label = first_activity.strip() or event.activity_raw
-        second_label = second_activity.strip() or event.activity_raw
-        first = _replace_event(
-            event,
-            event_id=_derived_event_id(event.event_id, "split1"),
-            source_event_id=f"{event.source_event_id}:split1",
-            timestamp_start=_to_iso(start),
-            timestamp_end=_to_iso(split_at),
-            duration_seconds=split_after,
-            activity_raw=first_label,
-            activity_normalized=_normalize_activity(first_label),
-            metadata_json=_edited_metadata(event, "split", part=1),
-        )
-        second = _replace_event(
-            event,
-            event_id=_derived_event_id(event.event_id, "split2"),
-            source_event_id=f"{event.source_event_id}:split2",
-            timestamp_start=_to_iso(split_at),
-            timestamp_end=_to_iso(end),
-            duration_seconds=max(duration - split_after, 0.0),
-            activity_raw=second_label,
-            activity_normalized=_normalize_activity(second_label),
-            metadata_json=_edited_metadata(event, "split", part=2),
-        )
-        self.events[index : index + 1] = [first, second]
-        self.manual_labels.pop(event_id, None)
-        self._persist_events()
-        return {"split": True, "events": [first.to_dict(), second.to_dict()]}
+            split_at = start + timedelta(seconds=split_after)
+            first_label = first_activity.strip() or event.activity_raw
+            second_label = second_activity.strip() or event.activity_raw
+            first = _replace_event(
+                event,
+                event_id=_derived_event_id(event.event_id, "split1"),
+                source_event_id=f"{event.source_event_id}:split1",
+                timestamp_start=_to_iso(start),
+                timestamp_end=_to_iso(split_at),
+                duration_seconds=split_after,
+                activity_raw=first_label,
+                activity_normalized=_normalize_activity(first_label),
+                metadata_json=_edited_metadata(event, "split", part=1),
+            )
+            second = _replace_event(
+                event,
+                event_id=_derived_event_id(event.event_id, "split2"),
+                source_event_id=f"{event.source_event_id}:split2",
+                timestamp_start=_to_iso(split_at),
+                timestamp_end=_to_iso(end),
+                duration_seconds=max(duration - split_after, 0.0),
+                activity_raw=second_label,
+                activity_normalized=_normalize_activity(second_label),
+                metadata_json=_edited_metadata(event, "split", part=2),
+            )
+            labels = dict(current.manual_labels)
+            labels.pop(event_id, None)
+            self._commit_candidate(
+                self._candidate(
+                    current,
+                    events=[*current.events[:index], first, second, *current.events[index + 1 :]],
+                    manual_labels=labels,
+                    metadata=_initialized_metadata(current),
+                )
+            )
+            return {"split": True, "events": [first.to_dict(), second.to_dict()]}
 
     def merge_adjacent_events(self, first_event_id: str, second_event_id: str, activity: str = "") -> dict[str, object]:
-        first_index = self._find_event_index(first_event_id)
-        second_index = self._find_event_index(second_event_id)
-        ordered = sorted(
-            [(first_index, self.events[first_index]), (second_index, self.events[second_index])],
-            key=lambda item: (item[1].timestamp_start, item[1].event_id),
-        )
-        left_index, left = ordered[0]
-        right_index, right = ordered[1]
-        timeline = sorted(enumerate(self.events), key=lambda item: (item[1].case_id, item[1].timestamp_start, item[1].event_id))
-        positions = {event.event_id: position for position, (_, event) in enumerate(timeline)}
-        if left.case_id != right.case_id or abs(positions[left.event_id] - positions[right.event_id]) != 1:
-            raise ValueError("Only adjacent events in the same case can be merged.")
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            first_index = _find_event_index(current.events, first_event_id)
+            second_index = _find_event_index(current.events, second_event_id)
+            ordered = sorted(
+                [(first_index, current.events[first_index]), (second_index, current.events[second_index])],
+                key=lambda item: (item[1].timestamp_start, item[1].event_id),
+            )
+            left_index, left = ordered[0]
+            right_index, right = ordered[1]
+            timeline = sorted(enumerate(current.events), key=lambda item: (item[1].case_id, item[1].timestamp_start, item[1].event_id))
+            positions = {event.event_id: position for position, (_, event) in enumerate(timeline)}
+            if left.case_id != right.case_id or abs(positions[left.event_id] - positions[right.event_id]) != 1:
+                raise ValueError("Only adjacent events in the same case can be merged.")
 
-        start = _parse_iso(left.timestamp_start)
-        end = _parse_iso(right.timestamp_end)
-        merged_activity = activity.strip() or (left.activity_raw if left.activity_raw == right.activity_raw else f"{left.activity_raw} + {right.activity_raw}")
-        merged_app = left.app_name if left.app_name == right.app_name else f"{left.app_name or 'Unknown'} + {right.app_name or 'Unknown'}"
-        merged_bundle = left.app_bundle_id if left.app_bundle_id == right.app_bundle_id else ""
-        merged_url = left.url if left.url == right.url else ""
-        merged_window = left.window_title if left.window_title == right.window_title else ""
-        merged = _replace_event(
-            left,
-            event_id=_derived_event_id(left.event_id, f"merge-{right.event_id}"),
-            source_event_id=f"{left.source_event_id}+{right.source_event_id}",
-            app_name=merged_app,
-            app_bundle_id=merged_bundle,
-            window_title=merged_window,
-            window_title_masked=mask_window_title(merged_window),
-            url=merged_url,
-            url_masked=mask_url(merged_url),
-            domain=extract_domain(merged_url),
-            activity_raw=merged_activity,
-            activity_normalized=_normalize_activity(merged_activity),
-            timestamp_start=_to_iso(start),
-            timestamp_end=_to_iso(end),
-            duration_seconds=max((end - start).total_seconds(), 0.0),
-            confidential_flag=looks_confidential(merged_window, merged_url, merged_activity),
-            metadata_json=_edited_metadata(left, "merge", merged_event_ids=[left.event_id, right.event_id]),
-        )
-        for remove_index in sorted([left_index, right_index], reverse=True):
-            self.events.pop(remove_index)
-        self.events.append(merged)
-        self.manual_labels.pop(left.event_id, None)
-        self.manual_labels.pop(right.event_id, None)
-        self._persist_events()
-        return {"merged": True, "event": merged.to_dict()}
+            start = _parse_iso(left.timestamp_start)
+            end = _parse_iso(right.timestamp_end)
+            merged_activity = activity.strip() or (left.activity_raw if left.activity_raw == right.activity_raw else f"{left.activity_raw} + {right.activity_raw}")
+            merged_app = left.app_name if left.app_name == right.app_name else f"{left.app_name or 'Unknown'} + {right.app_name or 'Unknown'}"
+            merged_bundle = left.app_bundle_id if left.app_bundle_id == right.app_bundle_id else ""
+            merged_url = left.url if left.url == right.url else ""
+            merged_window = left.window_title if left.window_title == right.window_title else ""
+            merged = _replace_event(
+                left,
+                event_id=_derived_event_id(left.event_id, f"merge-{right.event_id}"),
+                source_event_id=f"{left.source_event_id}+{right.source_event_id}",
+                app_name=merged_app,
+                app_bundle_id=merged_bundle,
+                window_title=merged_window,
+                window_title_masked=mask_window_title(merged_window),
+                url=merged_url,
+                url_masked=mask_url(merged_url),
+                domain=extract_domain(merged_url),
+                activity_raw=merged_activity,
+                activity_normalized=_normalize_activity(merged_activity),
+                timestamp_start=_to_iso(start),
+                timestamp_end=_to_iso(end),
+                duration_seconds=max((end - start).total_seconds(), 0.0),
+                confidential_flag=looks_confidential(merged_window, merged_url, merged_activity),
+                metadata_json=_edited_metadata(left, "merge", merged_event_ids=[left.event_id, right.event_id]),
+            )
+            events = [event for index, event in enumerate(current.events) if index not in {left_index, right_index}]
+            events.append(merged)
+            labels = dict(current.manual_labels)
+            labels.pop(left.event_id, None)
+            labels.pop(right.event_id, None)
+            self._commit_candidate(
+                self._candidate(current, events=events, manual_labels=labels, metadata=_initialized_metadata(current))
+            )
+            return {"merged": True, "event": merged.to_dict()}
 
     def clear(self) -> None:
-        self.events = []
-        self.manual_labels = {}
-        self.automation_reviews = {}
-        self.automation_review_notes = {}
-        self._invalidate_analysis()
-        if self.db_path is None:
-            self.import_history = []
-            return
-        with self._connect() as conn:
-            conn.execute("DELETE FROM events")
-            conn.execute("DELETE FROM manual_labels")
-            conn.execute("DELETE FROM automation_reviews")
-            conn.execute("DELETE FROM import_history")
-            conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)", ("initialized", "true"))
-        delete_migration_backups(self.db_path)
-        self.import_history = []
-        self.metadata["initialized"] = "true"
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            self._commit_candidate(
+                self._candidate(
+                    current,
+                    events=[],
+                    manual_labels={},
+                    metadata={"initialized": "true"},
+                    import_history=[],
+                    automation_reviews={},
+                    automation_review_notes={},
+                )
+            )
+        if self.db_path is not None:
+            try:
+                delete_migration_backups(self.db_path)
+            except OSError:
+                # The data deletion is committed. A future start/clear retries
+                # backup cleanup without pretending the DB mutation rolled back.
+                pass
 
     def set_automation_review(self, activity: str, status: str, note: str = "") -> dict[str, str]:
         normalized_activity = activity.strip()
@@ -307,128 +638,85 @@ class EventStore:
             raise ValueError("Automation activity is required.")
         if normalized_status not in AUTOMATION_REVIEW_STATUSES:
             raise ValueError("Review status must be unreviewed, adopted, on_hold, or rejected.")
-        if normalized_status == "unreviewed" and not normalized_note:
-            self.automation_reviews.pop(normalized_activity, None)
-            self.automation_review_notes.pop(normalized_activity, None)
-        else:
-            self.automation_reviews[normalized_activity] = normalized_status
-            self.automation_review_notes[normalized_activity] = normalized_note
-        if self.db_path is not None:
-            with self._connect() as conn:
-                if normalized_status == "unreviewed" and not normalized_note:
-                    conn.execute("DELETE FROM automation_reviews WHERE activity = ?", (normalized_activity,))
-                else:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO automation_reviews(activity, status, note, updated_at) VALUES(?, ?, ?, ?)",
-                        (normalized_activity, normalized_status, normalized_note, datetime.now(timezone.utc).isoformat()),
-                    )
-        return {"activity": normalized_activity, "review_status": normalized_status, "review_note": normalized_note}
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            reviews = dict(current.automation_reviews)
+            notes = dict(current.automation_review_notes)
+            if normalized_status == "unreviewed" and not normalized_note:
+                reviews.pop(normalized_activity, None)
+                notes.pop(normalized_activity, None)
+            else:
+                reviews[normalized_activity] = normalized_status
+                notes[normalized_activity] = normalized_note
+            self._commit_candidate(
+                self._candidate(current, automation_reviews=reviews, automation_review_notes=notes)
+            )
+            return {"activity": normalized_activity, "review_status": normalized_status, "review_note": normalized_note}
 
     def get_settings(self) -> dict[str, object]:
-        return dict(self.settings)
+        return _copy_settings(self.snapshot().settings)
 
     def update_settings(self, updates: dict[str, object]) -> dict[str, object]:
-        allowed = set(DEFAULT_SETTINGS)
-        for key, value in updates.items():
-            if key in allowed:
-                self.settings[key] = _normalize_setting(key, value)
-        self.events = self._filter_events(self.events)
-        self._invalidate_analysis()
-        if self.db_path is not None:
-            with self._connect() as conn:
-                conn.execute("DELETE FROM events")
-                conn.executemany(
-                    "INSERT INTO events(event_id, payload_json) VALUES(?, ?)",
-                    [(event.event_id, json.dumps(event.to_dict(), ensure_ascii=False)) for event in self.events],
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            settings = _copy_settings(current.settings)
+            for key, value in updates.items():
+                if key in DEFAULT_SETTINGS:
+                    settings[key] = _normalize_setting(key, value)
+            events = _filter_events_for_settings(list(current.events), settings)
+            live_event_ids = {event.event_id for event in events}
+            labels = {event_id: label for event_id, label in current.manual_labels.items() if event_id in live_event_ids}
+            self._commit_candidate(
+                self._candidate(
+                    current,
+                    events=events,
+                    manual_labels=labels,
+                    settings=settings,
+                    metadata=_initialized_metadata(current),
                 )
-                conn.executemany(
-                    "INSERT OR REPLACE INTO settings(key, value_json) VALUES(?, ?)",
-                    [(key, json.dumps(value, ensure_ascii=False)) for key, value in self.settings.items()],
-                )
-        return self.get_settings()
-
-    def record_import(self, source: str, path: str, event_count: int) -> None:
-        imported_at = datetime.now(timezone.utc).isoformat()
-        display_name = _safe_import_display_name(source, path)
-        item: dict[str, object] = {
-            "source": source,
-            "path": display_name,
-            "event_count": event_count,
-            "imported_at": imported_at,
-        }
-        if self.db_path is None:
-            self.import_history.append(item)
-            return
-        with self._connect() as conn:
-            cursor = conn.execute(
-                "INSERT INTO import_history(source, path, event_count, imported_at) VALUES(?, ?, ?, ?)",
-                (source, display_name, event_count, imported_at),
             )
-            item["id"] = cursor.lastrowid
-        self.import_history.append(item)
+            return self.get_settings()
+
+    def record_import(self, source: str, path: str, event_count: int, *, operation_id: str = "") -> None:
+        with self._mutation_lock:
+            current = self._snapshot_locked()
+            metadata = _initialized_metadata(current)
+            operation_marker = _record_import_operation_marker(operation_id) if operation_id else ""
+            if operation_marker and metadata.get(operation_marker) == "committed":
+                return
+            history = [dict(item) for item in current.import_history]
+            history.append(_import_history_item(source, path, event_count))
+            if operation_marker:
+                metadata[operation_marker] = "committed"
+            self._commit_candidate(self._candidate(current, import_history=history, metadata=metadata))
 
     def list_import_history(self) -> list[dict[str, object]]:
-        return list(reversed(self.import_history))
+        return [dict(item) for item in reversed(self.snapshot().import_history)]
 
     def is_initialized(self) -> bool:
-        return self.metadata.get("initialized") == "true"
+        return self.snapshot().metadata.get("initialized") == "true"
+
+    def filter_events(
+        self,
+        events: list[StandardEvent],
+        snapshot: StoreSnapshot | None = None,
+    ) -> list[StandardEvent]:
+        active_snapshot = snapshot or self.snapshot()
+        return _filter_events_for_settings(events, active_snapshot.settings)
 
     def _filter_events(self, events: list[StandardEvent]) -> list[StandardEvent]:
-        excluded_apps = {str(app).strip().casefold() for app in self.settings.get("excluded_apps", []) if str(app).strip()}
-        excluded_domains = {
-            str(domain).strip().casefold()
-            for domain in self.settings.get("excluded_domains", [])
-            if str(domain).strip()
-        }
-        if not excluded_apps and not excluded_domains:
-            return events
-        filtered: list[StandardEvent] = []
-        for event in events:
-            app_name = event.app_name.casefold()
-            domain = event.domain.casefold()
-            if app_name in excluded_apps:
-                continue
-            if any(domain == excluded or domain.endswith(f".{excluded}") for excluded in excluded_domains):
-                continue
-            filtered.append(event)
-        return filtered
+        return self.filter_events(events)
 
-    def _find_event_index(self, event_id: str) -> int:
-        for index, event in enumerate(self.events):
-            if event.event_id == event_id:
-                return index
-        raise KeyError(event_id)
-
-    def _persist_events(self) -> None:
-        self._invalidate_analysis()
-        self.events.sort(key=event_sort_key)
-        live_event_ids = {event.event_id for event in self.events}
-        self.manual_labels = {event_id: label for event_id, label in self.manual_labels.items() if event_id in live_event_ids}
-        if self.db_path is not None:
-            with self._connect() as conn:
-                conn.execute("DELETE FROM events")
-                conn.executemany(
-                    "INSERT OR REPLACE INTO events(event_id, payload_json) VALUES(?, ?)",
-                    [(event.event_id, json.dumps(event.to_dict(), ensure_ascii=False)) for event in self.events],
-                )
-                conn.execute(
-                    f"DELETE FROM manual_labels WHERE event_id NOT IN ({','.join('?' for _ in live_event_ids)})"
-                    if live_event_ids
-                    else "DELETE FROM manual_labels",
-                    tuple(live_event_ids),
-                )
-                conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)", ("initialized", "true"))
-        self.metadata["initialized"] = "true"
-
-    def diagnostics(self) -> dict[str, object]:
+    def diagnostics(self, snapshot: StoreSnapshot | None = None) -> dict[str, object]:
         migration = self._migration_report
+        active_snapshot = snapshot or self.snapshot()
         return {
             "storage_mode": "sqlite" if self.db_path else "memory",
             "storage_path": str(self.db_path) if self.db_path else "",
-            "event_count": len(self.events),
-            "manual_label_count": len(self.manual_labels),
-            "import_history_count": len(self.import_history),
-            "automation_review_count": len(self.automation_reviews),
+            "event_count": len(active_snapshot.events),
+            "manual_label_count": len(active_snapshot.manual_labels),
+            "import_history_count": len(active_snapshot.import_history),
+            "automation_review_count": len(active_snapshot.automation_reviews),
             "schema_version": migration.schema_version if migration else 0,
             "schema_target_version": CURRENT_SCHEMA_VERSION if self.db_path else 0,
             "migration_status": migration.status if migration else "not_applicable",
@@ -441,7 +729,7 @@ class EventStore:
     def _connect(self) -> sqlite3.Connection:
         if self.db_path is None:
             raise RuntimeError("Persistent storage is not configured.")
-        connection = sqlite3.connect(self.db_path, timeout=5)
+        connection = sqlite3.connect(self.db_path, timeout=5, isolation_level=None)
         connection.execute("PRAGMA busy_timeout = 5000")
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
@@ -458,7 +746,7 @@ class EventStore:
             ).fetchall()
         self.events = sorted((StandardEvent(**json.loads(row[0])) for row in event_rows), key=event_sort_key)
         self.manual_labels = {str(event_id): str(label) for event_id, label in label_rows}
-        self.settings = dict(DEFAULT_SETTINGS)
+        self.settings = _copy_settings(DEFAULT_SETTINGS)
         for key, value_json in setting_rows:
             if key in DEFAULT_SETTINGS:
                 self.settings[str(key)] = json.loads(value_json)
@@ -479,9 +767,15 @@ class EventStore:
             }
             for row_id, source, path, event_count, imported_at in import_rows
         ]
+        self._generation += 1
         self._invalidate_analysis()
 
-    def get_or_create_analysis(self, cache_key: object, builder: Callable[[], object]) -> object:
+    def get_or_create_analysis(
+        self,
+        snapshot_generation: int,
+        cache_key: object,
+        builder: Callable[[], object],
+    ) -> object:
         """Return one immutable analysis per local data/configuration snapshot.
 
         Dashboard routes arrive concurrently from the WebUI.  Preparing the
@@ -493,9 +787,13 @@ class EventStore:
         """
 
         with self._analysis_lock:
-            if cache_key not in self._analysis_cache:
-                self._analysis_cache[cache_key] = builder()
-            return self._analysis_cache[cache_key]
+            generation_key = (snapshot_generation, cache_key)
+            if generation_key not in self._analysis_cache:
+                analysis = builder()
+                if snapshot_generation == self._generation:
+                    self._analysis_cache[generation_key] = analysis
+                return analysis
+            return self._analysis_cache[generation_key]
 
     def _invalidate_analysis(self) -> None:
         with self._analysis_lock:
@@ -511,6 +809,107 @@ def _safe_import_display_name(source: str, path_value: str) -> str:
     return name or "Imported file"
 
 
+def _copy_settings(settings: Mapping[str, object]) -> dict[str, object]:
+    copied: dict[str, object] = {}
+    for key, value in settings.items():
+        copied[key] = list(value) if isinstance(value, (list, tuple)) else value
+    return copied
+
+
+def _filter_events_for_settings(events: list[StandardEvent], settings: Mapping[str, object]) -> list[StandardEvent]:
+    excluded_apps = {str(app).strip().casefold() for app in settings.get("excluded_apps", []) if str(app).strip()}
+    excluded_domains = {
+        str(domain).strip().casefold()
+        for domain in settings.get("excluded_domains", [])
+        if str(domain).strip()
+    }
+    if not excluded_apps and not excluded_domains:
+        return events
+    filtered: list[StandardEvent] = []
+    for event in events:
+        app_name = event.app_name.casefold()
+        domain = event.domain.casefold()
+        if app_name in excluded_apps:
+            continue
+        if any(domain == excluded or domain.endswith(f".{excluded}") for excluded in excluded_domains):
+            continue
+        filtered.append(event)
+    return filtered
+
+
+def _find_event_index(events: tuple[StandardEvent, ...], event_id: str) -> int:
+    for index, event in enumerate(events):
+        if event.event_id == event_id:
+            return index
+    raise KeyError(event_id)
+
+
+def _initialized_metadata(snapshot: StoreSnapshot) -> dict[str, str]:
+    metadata = dict(snapshot.metadata)
+    metadata["initialized"] = "true"
+    return metadata
+
+
+def _import_history_item(source: str, path: str, event_count: int) -> dict[str, object]:
+    return {
+        "source": source,
+        "path": _safe_import_display_name(source, path),
+        "event_count": event_count,
+        "imported_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _record_import_operation_marker(operation_id: str) -> str:
+    digest = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+    return f"recording_import:{digest}"
+
+
+def _import_fingerprint(source: str, path: str, events: tuple[StandardEvent, ...] | list[StandardEvent]) -> str:
+    """Recognize an immediate/restarted retry without retaining a raw local path."""
+
+    payload = {
+        "source": source,
+        "path": _safe_import_display_name(source, path),
+        "events": sorted(_canonical_event_fingerprint(event) for event in events),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _same_import_dataset(
+    left: tuple[StandardEvent, ...] | list[StandardEvent],
+    right: tuple[StandardEvent, ...] | list[StandardEvent],
+) -> bool:
+    return sorted(_canonical_event_fingerprint(event) for event in left) == sorted(
+        _canonical_event_fingerprint(event) for event in right
+    )
+
+
+def _canonical_event_fingerprint(event: StandardEvent) -> str:
+    """Hash imported source content, excluding local import bookkeeping."""
+
+    payload = event.to_dict()
+    payload.pop("created_at", None)
+    payload.pop("event_id", None)
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _storage_error_code(error: Exception) -> str:
+    message = str(error).casefold()
+    if "locked" in message or "busy" in message:
+        return "storage_busy"
+    if "read-only" in message or "readonly" in message:
+        return "storage_read_only"
+    if "full" in message or "disk i/o" in message or "unable to open" in message or isinstance(error, OSError):
+        return "storage_unavailable"
+    if "malformed" in message or "corrupt" in message:
+        return "storage_recovery_required"
+    if "constraint" in message:
+        return "storage_constraint_failed"
+    return "storage_commit_failed"
+
+
 _STORE: EventStore | None = None
 
 
@@ -519,7 +918,8 @@ def default_store() -> EventStore:
     if _STORE is None:
         db_path = default_data_dir() / "opsmineflow.sqlite3"
         _STORE = EventStore(db_path=db_path)
-        if not _STORE.events and not _STORE.is_initialized():
+        snapshot = _STORE.snapshot()
+        if not snapshot.events and snapshot.metadata.get("initialized") != "true":
             sample_path = Path(__file__).resolve().parents[4] / "data/sample/sample_events.csv"
             _STORE.replace(load_events_from_csv(sample_path))
     return _STORE

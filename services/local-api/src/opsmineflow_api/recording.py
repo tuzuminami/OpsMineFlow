@@ -16,7 +16,7 @@ from opsmineflow_mining import build_native_app_event
 
 from .child_process import recording_agent_environment as _recording_agent_environment
 from .child_process import sanitized_subprocess_environment
-from .storage import EventStore, default_data_dir, default_store
+from .storage import EventStore, StorageCommitError, default_data_dir, default_store
 
 TOKEN_TTL_SECONDS = 12 * 60 * 60
 INGEST_RATE_WINDOW_SECONDS = 60
@@ -110,6 +110,7 @@ class RecordingManager:
                     "paused_at": "",
                     "pause_reason": "",
                     "pause_intervals": [],
+                    "capture_ended": False,
                     "current_app": "",
                     "recorded_events": 0,
                     "last_heartbeat_at": "",
@@ -170,9 +171,10 @@ class RecordingManager:
                 "started_at": _now_iso(),
                 "paused": False,
                 "paused_at": "",
-                "pause_reason": "",
-                "pause_intervals": [],
-                "current_app": "",
+                    "pause_reason": "",
+                    "pause_intervals": [],
+                    "capture_ended": False,
+                    "current_app": "",
                 "recorded_events": 0,
                 "last_heartbeat_at": "",
             }
@@ -213,24 +215,28 @@ class RecordingManager:
         with self._lock:
             session_id = str(payload.get("session_id") or "")
             self._authorize(token, session_id)
-            self._enforce_rate_limit()
+            accepted_at = self._check_rate_limit()
             assert self._session is not None
             sequence = int(payload.get("sequence") or 0)
             if sequence in self._seen_sequences:
                 raise ValueError("Recording event sequence was already accepted.")
             if self._session.get("paused"):
                 self._seen_sequences.add(sequence)
+                self._record_rate_acceptance(accepted_at)
                 self._session["last_heartbeat_at"] = _now_iso()
                 return {"accepted": True, "appended": 0, "paused": True, "event_id": ""}
             event = native_event_from_payload(payload, self._session)
-            self._seen_sequences.add(sequence)
             active_store = store or default_store()
             appended = active_store.append([event])
+            # Storage may reject a write. Do not consume a sequence or rate
+            # budget until its durable outcome is known, so a retry can replay.
+            self._seen_sequences.add(sequence)
+            self._record_rate_acceptance(accepted_at)
             self._session["recorded_events"] = int(self._session["recorded_events"]) + appended
             self._session["current_app"] = event.app_name
             return {"accepted": True, "appended": appended, "event_id": event.event_id}
 
-    def stop(self, store: EventStore | None = None) -> dict[str, Any]:
+    def stop(self, store: EventStore | None = None, *, record_import: bool = True) -> dict[str, Any]:
         with self._lock:
             self._refresh_process_state()
             if self._session is None or not self._session.get("active"):
@@ -253,9 +259,19 @@ class RecordingManager:
                 return self.status()
             if self._session.get("paused"):
                 self._close_pause_interval()
+            self._session["capture_ended"] = True
             recorded_events = int(self._session.get("recorded_events", 0))
-            if recorded_events > 0:
-                (store or default_store()).record_import("native_recording", str(self._session["case_id"]), recorded_events)
+            if record_import and recorded_events > 0:
+                try:
+                    (store or default_store()).record_import(
+                        "native_recording",
+                        str(self._session["case_id"]),
+                        recorded_events,
+                        operation_id=str(self._session["session_id"]),
+                    )
+                except StorageCommitError:
+                    self._last_error = "Recording audit could not be saved. Retry stopping the session."
+                    raise
             self._session["active"] = False
             self._session["current_app"] = ""
             self._cleanup_process()
@@ -278,20 +294,26 @@ class RecordingManager:
             self._last_error = "Recording session token expired."
             raise PermissionError("Recording session token expired.")
 
-    def _enforce_rate_limit(self) -> None:
+    def _check_rate_limit(self) -> float:
         now = time.monotonic()
         cutoff = now - INGEST_RATE_WINDOW_SECONDS
         self._recent_ingest_times = [item for item in self._recent_ingest_times if item >= cutoff]
         if len(self._recent_ingest_times) >= INGEST_RATE_LIMIT:
             self._last_error = "Recording event rate limit exceeded."
             raise PermissionError("Recording event rate limit exceeded.")
-        self._recent_ingest_times.append(now)
+        return now
+
+    def _record_rate_acceptance(self, accepted_at: float) -> None:
+        self._recent_ingest_times.append(accepted_at)
 
     def _refresh_process_state(self) -> None:
         if self._process is None or self._process.poll() is None:
             return
         if self._session and self._session.get("active"):
-            self._session["active"] = False
+            # Keep the session finalizable. The agent may already be stopped
+            # when its audit-history commit fails, and callers must be able to
+            # retry ``stop`` without losing the durable event count.
+            self._session["capture_ended"] = True
             self._session["current_app"] = ""
             if self._session.get("paused"):
                 self._close_pause_interval()
