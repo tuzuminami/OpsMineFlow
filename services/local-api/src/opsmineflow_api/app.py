@@ -13,6 +13,13 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
+# A launcher secret belongs to the Rust parent, not to this long-running Python
+# process or any diagnostics it may invoke. Capture the ownership nonce needed
+# for the loopback health check, then remove both launcher values before loading
+# the rest of the application.
+_RUNTIME_NONCE = os.environ.pop("OPSMINEFLOW_RUNTIME_NONCE", "").strip()
+os.environ.pop("OPSMINEFLOW_RUNTIME_SECRET", None)
+
 from opsmineflow_drawio import build_drawio_xml
 from opsmineflow_mining import (
     StandardEvent,
@@ -33,6 +40,7 @@ from opsmineflow_mining import (
 from opsmineflow_mining.pipeline import metrics_to_dict
 
 from .activitywatch import import_activitywatch_local
+from .child_process import sanitized_subprocess_environment
 from .recording import recording_manager
 from .storage import EventStore, default_store
 
@@ -172,15 +180,13 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     process_map = build_directly_follows_graph(events)
     store_diagnostics = active_store.diagnostics()
     automation_candidates = apply_automation_reviews(score_automation_candidates(events), active_store, events)
+    health = {
+        **create_runtime_health(),
+        "storage_mode": store_diagnostics["storage_mode"],
+        "event_count": store_diagnostics["event_count"],
+    }
     return {
-        "health": {
-            "status": "ok",
-            "bind": "127.0.0.1",
-            "local_only": True,
-            "llm_supported": False,
-            "storage_mode": store_diagnostics["storage_mode"],
-            "event_count": store_diagnostics["event_count"],
-        },
+        "health": health,
         "events": [event_to_api_dict(event, settings) for event in events],
         "summary": metrics_to_dict(metrics),
         "app_switching": detect_app_switches(events),
@@ -193,6 +199,20 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
         "mermaid": export_mermaid(events),
         "drawio": build_drawio_xml(process_map),
     }
+
+
+def create_runtime_health() -> dict[str, Any]:
+    """Return a constant-time loopback ownership payload for the Rust launcher."""
+
+    health: dict[str, Any] = {
+        "status": "ok",
+        "bind": "127.0.0.1",
+        "local_only": True,
+        "llm_supported": False,
+    }
+    if _RUNTIME_NONCE:
+        health["runtime"] = {"nonce": _RUNTIME_NONCE, "pid": os.getpid()}
+    return health
 
 
 def apply_automation_reviews(
@@ -948,7 +968,14 @@ def _dependency_status(name: str, command: list[str]) -> dict[str, str]:
             "remediation": f"Install {name} with ./scripts/install_mac.sh.",
         }
     try:
-        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=3)
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            env=sanitized_subprocess_environment(),
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return {"status": "error", "version": "", "remediation": str(exc)}
     version = (result.stdout or result.stderr).strip().splitlines()[0] if (result.stdout or result.stderr).strip() else ""
@@ -986,6 +1013,7 @@ def _run_guardrail_script(script_name: str) -> dict[str, object]:
             capture_output=True,
             text=True,
             timeout=30,
+            env=sanitized_subprocess_environment(),
         )
     except subprocess.TimeoutExpired:
         return {"status": "timeout", "command": f"./scripts/{script_name}", "output": "", "remediation": "Run the script manually for full output."}
@@ -1035,6 +1063,10 @@ if app is not None:
     @app.get("/health")
     def health() -> dict[str, Any]:
         return create_api_snapshot()["health"]
+
+    @app.get("/runtime/health")
+    def runtime_health() -> dict[str, Any]:
+        return create_runtime_health()
 
     @app.get("/diagnostics")
     def diagnostics() -> dict[str, Any]:

@@ -51,6 +51,9 @@ jobs:
       - name: Verify Rust lockfile
         run: cargo check --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
 
+      - name: Test Tauri runtime lifecycle guards
+        run: cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+
       - name: Run repository quality gates
         run: |
           ./scripts/test.sh

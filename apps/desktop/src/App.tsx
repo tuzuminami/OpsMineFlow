@@ -4,6 +4,7 @@ import {
   deleteLocalData,
   excludeEvent,
   exportArtifact,
+  getNativeRuntimeStatus,
   importActivityWatchLocal,
   importEvents,
   loadDashboardData,
@@ -12,6 +13,7 @@ import {
   previewActivityWatchLocal,
   previewImport,
   previewExport,
+  repairNativeRuntimeState,
   resumeRecording,
   runDiagnosticChecks,
   saveAutomationReview,
@@ -43,6 +45,7 @@ import type {
   ImportPreview,
   ProcessMap,
   RecordingStatus,
+  RuntimeStatus,
   Summary
 } from "./types";
 
@@ -124,6 +127,17 @@ type CsvMappingPreset = {
   timezone: string;
 };
 
+function runtimeRecoveryMessage(status: RuntimeStatus, t: (key: TranslationKey) => string): string {
+  const keys: Record<string, TranslationKey> = {
+    reinstall: "message.runtimeReinstall",
+    close_conflicting_app: "message.runtimePortCollision",
+    restart: "message.runtimeRestart",
+    repair_runtime_state: "message.runtimeRepairState",
+    development_setup: "message.runtimeDevelopmentSetup"
+  };
+  return t(keys[status.recovery_action] || "message.runtimeUnavailable");
+}
+
 function loadRecordingTemplates(): string[] {
   try {
     const raw = window.localStorage.getItem(RECORDING_TEMPLATES_KEY);
@@ -174,11 +188,17 @@ export function App() {
   const [actionMessage, setActionMessage] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
 
   async function refresh(silent = false) {
     if (!silent) setLoading(true);
     setError("");
     try {
+      const runtime = await getNativeRuntimeStatus();
+      setRuntimeStatus(runtime);
+      if (runtime && runtime.state !== "ready") {
+        throw new Error(runtimeRecoveryMessage(runtime, t));
+      }
       setData(await loadDashboardData());
     } catch (err) {
       setError(err instanceof Error ? err.message : t("message.apiUnavailable", { error: "" }));
@@ -187,9 +207,41 @@ export function App() {
     }
   }
 
+  async function repairRuntimeState() {
+    if (!window.confirm(t("confirm.repairRuntimeState"))) return;
+    setWorking(true);
+    setError("");
+    try {
+      const runtime = await repairNativeRuntimeState();
+      setRuntimeStatus(runtime);
+      if (runtime && runtime.state !== "ready") {
+        setError(runtimeRecoveryMessage(runtime, t));
+        return;
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("message.runtimeUnavailable"));
+    } finally {
+      setWorking(false);
+    }
+  }
+
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(() => {
+    if (data?.recording.active) return;
+    const timer = window.setInterval(() => {
+      void getNativeRuntimeStatus()
+        .then((runtime) => {
+          setRuntimeStatus(runtime);
+          if (runtime && runtime.state !== "ready") setError(runtimeRecoveryMessage(runtime, t));
+        })
+        .catch(() => setError(t("message.runtimeUnavailable")));
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [data?.recording.active, t]);
 
   useEffect(() => {
     if (!data?.recording.active) return;
@@ -416,7 +468,16 @@ export function App() {
           </button>
         </section>
       ) : null}
-      {error ? <div className="api-warning">{t("message.apiUnavailable", { error })}</div> : null}
+      {error ? (
+        <div className="api-warning">
+          <span>{t("message.apiUnavailable", { error })}</span>
+          {runtimeStatus?.recovery_action === "repair_runtime_state" ? (
+            <button onClick={() => void repairRuntimeState()} disabled={working || loading}>
+              {t("action.repairRuntimeState")}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {actionMessage ? <div className="action-message">{actionMessage}</div> : null}
       {loading && !data ? <div className="loading">{t("message.loading")}</div> : null}
 

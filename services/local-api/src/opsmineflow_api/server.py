@@ -14,6 +14,7 @@ from .app import (
     create_event_quality_report,
     create_export_artifact,
     create_import_preview,
+    create_runtime_health,
     import_activitywatch_into_store,
     import_path_into_store,
     run_diagnostic_checks,
@@ -34,6 +35,9 @@ class LocalApiHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path == "/runtime/health":
+            self._send_json(create_runtime_health())
+            return
         snapshot = create_api_snapshot()
         routes: dict[str, Any] = {
             "/health": snapshot["health"],

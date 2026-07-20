@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window-runtime-status",
+  "description": "Lets the main OpsMineFlow window read redacted local runtime status and explicitly repair quarantined runtime state.",
+  "windows": ["main"],
+  "permissions": ["allow-runtime-status", "allow-repair-runtime-state"]
+}
