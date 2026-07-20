@@ -137,4 +137,14 @@ Build macOS release artifacts:
 ./scripts/package_macos.sh
 ```
 
+Run the Tauri desktop shell with its explicitly owned development sidecar:
+
+```bash
+./scripts/dev_desktop.sh
+```
+
+The development command is intentionally separate from `npm run tauri -- dev`: it passes the local Python interpreter and source import paths only to the Rust-owned child process. A packaged app never falls back to a repository checkout, Terminal, Node.js, or a system Python. Until #78 bundles the signed local runtime, a packaged build fails closed with a recovery action instead of starting an arbitrary executable.
+
+If the desktop app asks to repair prior runtime state, first make sure no other OpsMineFlow process is running. Then choose **Repair local runtime state** and confirm the safety prompt. OpsMineFlow keeps the unverified ownership record in a private quarantine location and starts a replacement only after confirming that the local port is free. Do not delete runtime ownership records manually.
+
 See [PACKAGING_MACOS.md](PACKAGING_MACOS.md) before client or public distribution.

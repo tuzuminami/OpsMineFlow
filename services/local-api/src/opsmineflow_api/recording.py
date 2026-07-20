@@ -14,6 +14,8 @@ from typing import Any
 
 from opsmineflow_mining import build_native_app_event
 
+from .child_process import recording_agent_environment as _recording_agent_environment
+from .child_process import sanitized_subprocess_environment
 from .storage import EventStore, default_data_dir, default_store
 
 TOKEN_TTL_SECONDS = 12 * 60 * 60
@@ -142,8 +144,7 @@ class RecordingManager:
             self._token_issued_at = time.monotonic()
             self._seen_sequences = set()
             self._recent_ingest_times = []
-            environment = dict(os.environ)
-            environment["OPSMINEFLOW_RECORDING_TOKEN"] = self._token
+            environment = _recording_agent_environment(self._token)
             api_port = os.environ.get("OPSMINEFLOW_API_PORT", "8765")
             self._process = subprocess.Popen(
                 [
@@ -341,6 +342,7 @@ class RecordingManager:
                 capture_output=True,
                 text=True,
                 timeout=2,
+                env=sanitized_subprocess_environment(),
             )
         except Exception:
             return "unknown"
@@ -349,7 +351,5 @@ class RecordingManager:
         self._agent_version_cache = version
         self._agent_version_mtime = mtime
         return version
-
-
 recording_manager = RecordingManager()
 atexit.register(recording_manager.shutdown)

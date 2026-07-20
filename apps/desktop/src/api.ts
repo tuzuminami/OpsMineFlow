@@ -18,10 +18,22 @@ import type {
   ImportPreview,
   ProcessMap,
   RecordingStatus,
+  RuntimeStatus,
   Summary
 } from "./types";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8765";
+
+export async function getNativeRuntimeStatus(): Promise<RuntimeStatus | null> {
+  if (!isTauri()) return null;
+  return invoke<RuntimeStatus>("runtime_status");
+}
+
+export async function repairNativeRuntimeState(): Promise<RuntimeStatus | null> {
+  if (!isTauri()) return null;
+  return invoke<RuntimeStatus>("repair_runtime_state");
+}
 
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`);

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import http.client
+import json
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -14,12 +17,15 @@ from opsmineflow_api.app import (
     create_event_quality_report,
     create_export_artifact,
     create_import_preview,
+    create_runtime_health,
     import_activitywatch_into_store,
     import_path_into_store,
     run_diagnostic_checks,
     save_export_artifact,
 )
-from opsmineflow_api.recording import RecordingManager, native_event_from_payload
+from opsmineflow_api.child_process import sanitized_subprocess_environment
+from opsmineflow_api.recording import RecordingManager, _recording_agent_environment, native_event_from_payload
+from opsmineflow_api.server import LocalApiHandler
 from opsmineflow_api.storage import EventStore
 from opsmineflow_mining import load_events_from_csv
 
@@ -205,6 +211,90 @@ class ApiLogicTests(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["total_events"], 7)
         self.assertIn("flowchart LR", snapshot["mermaid"])
         self.assertIn("<mxfile", snapshot["drawio"])
+
+    def test_runtime_health_identity_is_present_only_for_an_owned_sidecar(self) -> None:
+        with patch("opsmineflow_api.app._RUNTIME_NONCE", "sidecar-owner-nonce"):
+            health = create_runtime_health()
+
+        self.assertEqual(health["runtime"]["nonce"], "sidecar-owner-nonce")
+        self.assertIsInstance(health["runtime"]["pid"], int)
+        self.assertNotIn("storage_mode", health)
+        self.assertNotIn("event_count", health)
+
+    def test_runtime_health_route_does_not_create_an_analysis_snapshot(self) -> None:
+        from http.server import ThreadingHTTPServer
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), LocalApiHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        try:
+            with patch("opsmineflow_api.server.create_api_snapshot", side_effect=AssertionError("must not analyze")):
+                connection.request("GET", "/runtime/health")
+                response = connection.getresponse()
+                payload = json.loads(response.read())
+        finally:
+            connection.close()
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["local_only"])
+
+    def test_recording_agent_environment_does_not_inherit_runtime_credentials(self) -> None:
+        environment = _recording_agent_environment("recording-token")
+
+        self.assertEqual(environment, {"OPSMINEFLOW_RECORDING_TOKEN": "recording-token"})
+
+    def test_diagnostic_subprocess_environment_does_not_inherit_runtime_credentials(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "PATH": "/usr/bin:/bin",
+                "OPSMINEFLOW_RUNTIME_SECRET": "runtime-secret",
+                "OPSMINEFLOW_RUNTIME_NONCE": "runtime-nonce",
+                "PYTHONPATH": "/private/pythonpath",
+            },
+            clear=True,
+        ):
+            environment = sanitized_subprocess_environment()
+
+        self.assertEqual(environment, {"PATH": "/usr/bin:/bin"})
+
+    def test_recording_agent_version_probe_does_not_receive_runtime_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            agent_path = root / "probe-agent.sh"
+            probe_path = root / "environment.txt"
+            agent_path.write_text(
+                "#!/bin/bash\n"
+                "if [[ ${1:-} == --version ]]; then\n"
+                "  printf '%s|%s|%s' \"${OPSMINEFLOW_RUNTIME_SECRET-}\" \"${OPSMINEFLOW_RUNTIME_NONCE-}\" \"${PYTHONPATH-}\" > \"$(dirname \"$0\")/environment.txt\"\n"
+                "  echo 'opsmineflow-agent test'\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            agent_path.chmod(0o755)
+            manager = RecordingManager(agent_path=agent_path, platform_name="Darwin")
+            with patch.dict(
+                "os.environ",
+                {
+                    "PATH": "/usr/bin:/bin",
+                    "OPSMINEFLOW_RUNTIME_SECRET": "runtime-secret",
+                    "OPSMINEFLOW_RUNTIME_NONCE": "runtime-nonce",
+                    "PYTHONPATH": "/private/pythonpath",
+                },
+                clear=True,
+            ):
+                availability = manager.availability()
+            observed_environment = probe_path.read_text(encoding="utf-8")
+
+        self.assertEqual(availability["agent_version"], "opsmineflow-agent test")
+        self.assertEqual(observed_environment, "||")
 
     def test_event_quality_report_flags_and_approves_issues(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")

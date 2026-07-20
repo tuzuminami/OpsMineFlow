@@ -7,6 +7,12 @@ export type Health = {
   event_count: number;
 };
 
+export type RuntimeStatus = {
+  state: "ready" | "unavailable" | "port_collision" | "stopped" | string;
+  endpoint: string;
+  recovery_action: "none" | "reinstall" | "close_conflicting_app" | "restart" | "development_setup" | string;
+};
+
 export type EventRecord = {
   event_id: string;
   case_id: string;
