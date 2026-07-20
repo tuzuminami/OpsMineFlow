@@ -6,12 +6,15 @@ import unittest
 from pathlib import Path
 
 from opsmineflow_mining import (
+    build_native_app_event,
     inspect_csv_columns,
     load_events_from_csv,
     load_events_from_csv_with_mapping,
     load_events_from_json,
     suggest_csv_mapping,
 )
+from opsmineflow_mining.analysis import correlation_for
+from dataclasses import replace
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -81,7 +84,7 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(events[0].activity_raw, "申請確認")
         self.assertEqual(events[0].app_name, "Chrome")
         self.assertEqual(events[0].duration_seconds, 420)
-        self.assertTrue(events[0].timestamp_start.endswith("+09:00"))
+        self.assertEqual(events[0].timestamp_start, "2026-06-01T00:00:00+00:00")
 
     def test_import_limits_are_enforced_before_csv_rows_accumulate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -119,6 +122,65 @@ class ImporterTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "metadata exceeds"):
                 load_events_from_json(path, max_events=10)
+
+    def test_import_requires_offset_or_explicit_mapping_timezone_and_rejects_dst_ambiguity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "events.csv"
+            path.write_text(
+                "activity,timestamp_start,timestamp_end\n"
+                "Review,2026-11-01T01:30:00,2026-11-01T01:35:00\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "explicit UTC offset"):
+                load_events_from_csv(path)
+            mapping = {"activity": "activity", "timestamp_start": "timestamp_start", "timestamp_end": "timestamp_end"}
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                load_events_from_csv_with_mapping(
+                    path,
+                    mapping,
+                    timezone_name="America/New_York",
+                )
+
+            path.write_text(
+                "activity,timestamp_start,timestamp_end\n"
+                "Review,2026-03-08T02:30:00,2026-03-08T02:35:00\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                load_events_from_csv_with_mapping(
+                    path,
+                    mapping,
+                    timezone_name="America/New_York",
+                )
+
+    def test_case_provenance_distinguishes_source_manual_unassigned_and_legacy(self) -> None:
+        observed = load_events_from_csv(ROOT / "data/sample/sample_events.csv")[0]
+        native = build_native_app_event(
+            session_id="recording-1",
+            sequence=1,
+            case_id="CASE-MANUAL",
+            activity="Review invoice",
+            app_name="Mail",
+            app_bundle_id="com.example.Mail",
+            timestamp_start="2026-07-01T09:00:00+09:00",
+            timestamp_end="2026-07-01T09:01:00+09:00",
+            duration_seconds=60,
+        )
+        legacy = replace(observed, case_id="CASE-INFERRED-000001", metadata_json="{}")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "unassigned.csv"
+            path.write_text(
+                "activity,timestamp_start,timestamp_end\n"
+                "Review,2026-07-01T00:00:00+00:00,2026-07-01T00:01:00+00:00\n",
+                encoding="utf-8",
+            )
+            unassigned = load_events_from_csv(path)[0]
+
+        self.assertEqual(correlation_for(observed).origin, "observed")
+        self.assertEqual(correlation_for(native).origin, "manual")
+        self.assertEqual(correlation_for(native).confidence, "medium")
+        self.assertEqual(correlation_for(unassigned).origin, "unassigned")
+        self.assertEqual(correlation_for(legacy).origin, "inferred")
 
 
 if __name__ == "__main__":

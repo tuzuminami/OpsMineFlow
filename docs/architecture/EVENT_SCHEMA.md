@@ -28,5 +28,24 @@ Required fields:
 - `metadata_json`
 - `created_at`
 
-`case_id` can be imported directly or inferred from filename, domain, window title, temporal proximity, app transition patterns, manual labels, or CSV business IDs.
+`case_id` is either supplied by the source, manually corrected, or marked as
+unassigned/inferred with structured provenance in `metadata_json`:
 
+- `opsmineflow_case_correlation.origin`: `observed`, `manual`, `inferred`, or
+  `unassigned`
+- `strategy`, `confidence`, and non-sensitive `evidence`
+
+When a local reviewer corrects a case ID, OpsMineFlow records a bounded
+single-line reason, the preceding case ID, a generic local-reviewer marker,
+and the UTC change time under `opsmineflow_case_correlation_review`. Native
+Mac recording case names are also `manual` evidence rather than source-observed
+evidence. These fields preserve the distinction without claiming that local
+operator input came from an imported source system.
+
+An absent source case ID is stored as a reviewable singleton. OpsMineFlow never
+uses a filename, domain, title, app transition, or activity label by itself to
+merge events into a business case.
+
+`timestamp_start` and `timestamp_end` are persisted as UTC instants. Import
+requires an explicit source offset unless the user selected a timezone in the
+mapped CSV import flow.

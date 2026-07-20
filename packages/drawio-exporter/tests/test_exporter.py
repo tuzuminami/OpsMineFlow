@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 from xml.etree import ElementTree
@@ -19,6 +20,7 @@ class DrawioExporterTests(unittest.TestCase):
         root = ElementTree.fromstring(xml_text)
 
         self.assertEqual(root.tag, "mxfile")
+        self.assertEqual(json.loads(root.attrib["opsmineflowAnalysisReceipt"]), process_map["analysis_receipt"])
         diagram = root.find("diagram")
         self.assertIsNotNone(diagram)
         model = diagram.find("mxGraphModel") if diagram is not None else None
@@ -34,4 +36,3 @@ class DrawioExporterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

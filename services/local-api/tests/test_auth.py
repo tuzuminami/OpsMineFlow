@@ -29,7 +29,7 @@ class LocalApiPolicyTests(unittest.TestCase):
         self.policy.authorize(method, path, headers, content_length)
 
     def test_protected_route_rejects_missing_wrong_and_recording_tokens(self) -> None:
-        for method, path in (("GET", "/events"), ("POST", "/export/llm-handoff")):
+        for method, path in (("GET", "/events"), ("POST", "/export/llm-handoff"), ("POST", "/events/case-correlation")):
             for token in ("", "wrong", "recording-token"):
                 with self.subTest(method=method, path=path, token=token):
                     headers = {"Host": "127.0.0.1:8765", API_SESSION_HEADER: token}
@@ -40,7 +40,7 @@ class LocalApiPolicyTests(unittest.TestCase):
                     self.assertEqual(rejected.exception.status_code, 401)
 
     def test_protected_route_accepts_only_the_runtime_session_token(self) -> None:
-        for method, path in (("GET", "/events"), ("POST", "/export/llm-handoff")):
+        for method, path in (("GET", "/events"), ("POST", "/export/llm-handoff"), ("POST", "/events/case-correlation")):
             with self.subTest(method=method, path=path):
                 headers = {"Host": "127.0.0.1:8765", API_SESSION_HEADER: "a" * 64}
                 if method == "POST":

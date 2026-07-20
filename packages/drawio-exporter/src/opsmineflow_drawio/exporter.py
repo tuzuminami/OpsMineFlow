@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from typing import Any
 from xml.etree import ElementTree
 
 
 def build_drawio_xml(process_map: dict[str, Any], diagram_name: str = "OpsMineFlow Process Map") -> str:
+    attributes = {
+        "host": "app.diagrams.net",
+        "modified": datetime.now(timezone.utc).isoformat(),
+        "agent": "OpsMineFlow",
+        "version": "0.1.0",
+    }
+    receipt = process_map.get("analysis_receipt")
+    if isinstance(receipt, dict):
+        # mxfile permits application-defined attributes. Keep the JSON compact
+        # and deterministic so a draw.io file carries the same receipt as the
+        # process-map API without exposing raw event rows.
+        attributes["opsmineflowAnalysisReceipt"] = json.dumps(
+            receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
     mxfile = ElementTree.Element(
         "mxfile",
-        {
-            "host": "app.diagrams.net",
-            "modified": datetime.now(timezone.utc).isoformat(),
-            "agent": "OpsMineFlow",
-            "version": "0.1.0",
-        },
+        attributes,
     )
     diagram = ElementTree.SubElement(mxfile, "diagram", {"id": "opsmineflow-process-map", "name": diagram_name})
     graph = ElementTree.SubElement(
@@ -133,4 +143,3 @@ def _add_edge(
         },
     )
     ElementTree.SubElement(cell, "mxGeometry", {"relative": "1", "as": "geometry"})
-

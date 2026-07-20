@@ -21,16 +21,17 @@ from zipfile import ZIP_STORED, ZipFile, ZipInfo
 from pydantic import BaseModel, ConfigDict, Field
 
 from opsmineflow_mining import (
+    MiningConfig,
     StandardEvent,
     build_directly_follows_graph,
     detect_app_switches,
     detect_bottlenecks,
+    prepare_analysis,
 )
-from opsmineflow_mining.pipeline import normalize_events
 
 
 FORMAT_NAME = "opsmineflow-mermaid-handoff"
-FORMAT_VERSION = "1.0.0"
+FORMAT_VERSION = "1.1.0"
 PRODUCER_VERSION = "0.1.0"
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
@@ -73,6 +74,7 @@ class BundleManifest(StrictModel):
 
 
 class Coverage(StrictModel):
+    events_input: int = Field(ge=0)
     events_observed: int = Field(ge=0)
     cases_observed: int = Field(ge=0)
     activities_observed: int = Field(ge=0)
@@ -82,11 +84,35 @@ class Coverage(StrictModel):
     exclusion_note: str
 
 
+class AnalysisReceiptModel(StrictModel):
+    algorithm_version: str
+    session_gap_minutes: int = Field(ge=0)
+    scope_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    filter_fingerprint: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    input_event_count: int = Field(ge=0)
+    used_event_count: int = Field(ge=0)
+    excluded_event_count: int = Field(ge=0)
+    excluded_by_reason: dict[str, int]
+    analysis_case_count: int = Field(ge=0)
+    case_origin_counts: dict[str, int]
+    confidence_counts: dict[str, int]
+    raw_active_seconds: float = Field(ge=0)
+    active_union_seconds: float = Field(ge=0)
+    case_elapsed_seconds: float = Field(ge=0)
+    waiting_seconds: float = Field(ge=0)
+
+
 class BottleneckEvidence(StrictModel):
     observed: bool
     reason: str
     evidence_event_count: int = Field(ge=0)
     average_duration_seconds: float = Field(ge=0)
+
+
+class CaseCorrelationEvidence(StrictModel):
+    origins: dict[str, int]
+    confidence_levels: dict[str, int]
+    low_confidence_case_count: int = Field(ge=0)
 
 
 class ProcessNode(StrictModel):
@@ -99,6 +125,7 @@ class ProcessNode(StrictModel):
     average_duration_seconds: float = Field(ge=0)
     median_duration_seconds: float = Field(ge=0)
     bottleneck: BottleneckEvidence
+    case_correlation: "CaseCorrelationEvidence"
 
 
 class ProcessEdge(StrictModel):
@@ -118,6 +145,7 @@ class ProcessVariant(StrictModel):
     case_coverage_ratio: float = Field(ge=0, le=1)
     average_case_duration_seconds: float = Field(ge=0)
     median_case_duration_seconds: float = Field(ge=0)
+    case_correlation: "CaseCorrelationEvidence"
 
 
 class AppHandoff(StrictModel):
@@ -135,6 +163,7 @@ class DataQuality(StrictModel):
     confidential_event_count: int = Field(ge=0)
     idle_event_count: int = Field(ge=0)
     timestamps_with_parse_errors: int = Field(ge=0)
+    excluded_by_reason: dict[str, int]
 
 
 class Confidence(StrictModel):
@@ -147,6 +176,7 @@ class Confidence(StrictModel):
 class HandoffProcess(StrictModel):
     analysis_parameters: dict[str, str]
     coverage: Coverage
+    analysis_receipt: AnalysisReceiptModel
     nodes: list[ProcessNode]
     edges: list[ProcessEdge]
     variants: list[ProcessVariant]
@@ -183,9 +213,13 @@ the user manually chooses to share it.
   decision rules, exceptions, or causes that are not present in the bundle.
 - Keep observations separate from interpretations. `confidence` is a local
   coverage heuristic, not a factual guarantee or an AI confidence score.
-- Respect `coverage`, `data_quality`, and `data_constraints`. The bundle may
-  omit work that was never collected, was excluded before storage, or happened
+- Respect `coverage`, `analysis_receipt`, `data_quality`, and
+  `data_constraints`. The bundle may omit work that was never collected, was
+  excluded before storage, was excluded from sequential analysis, or happened
   outside the observed period.
+- Do not turn an inferred or unassigned case count into a confirmed business
+  flow. The receipt records the local session-gap, UTC ordering, exclusion,
+  and case-confidence rules used for this bundle.
 
 ## Write Mermaid Markdown
 
@@ -200,7 +234,8 @@ and data constraints.
 ## Terms
 
 - **activity**: an observed local event label, not a verified business step.
-- **case**: a locally grouped sequence. Case identifiers are not exported.
+- **case**: a locally grouped analysis session. Case identifiers are not
+  exported; the receipt states whether grouping was observed or inferred.
 - **variant**: one observed activity sequence across one or more cases.
 - **bottleneck**: a local duration rule result with explicit evidence count.
 """
@@ -210,17 +245,26 @@ def build_handoff_bundle(
     events: Iterable[StandardEvent],
     automation_reviews: dict[str, str] | None = None,
     automation_review_notes: dict[str, str] | None = None,
+    config: MiningConfig | None = None,
 ) -> HandoffBundle:
     """Build and validate a deterministic ZIP without exposing raw events."""
 
-    event_list = normalize_events(events)
+    source_events = tuple(events)
+    analysis = prepare_analysis(source_events, config=config)
+    event_list = list(analysis.events)
+    receipt = analysis.receipt.to_dict()
     review_statuses = automation_reviews or {}
     review_notes = automation_review_notes or {}
-    graph = build_directly_follows_graph(event_list)
+    graph = build_directly_follows_graph(analysis)
     total_events = len(event_list)
-    grouped_cases = _events_by_case(event_list)
+    grouped_cases = {case.key: list(case.events) for case in analysis.cases}
+    case_correlations = {case.key: case.correlation for case in analysis.cases}
+    node_correlations: dict[str, list[Any]] = defaultdict(list)
+    for case in analysis.cases:
+        for activity in {str(event.activity_raw) for event in case.events}:
+            node_correlations[activity].append(case.correlation)
     activity_durations = _activity_durations(event_list)
-    bottlenecks = {str(item["activity"]): item for item in detect_bottlenecks(event_list)}
+    bottlenecks = {str(item["activity"]): item for item in detect_bottlenecks(analysis)}
     node_ids = {
         str(node["activity"]): _stable_id("activity", str(node["activity"]))
         for node in graph["nodes"]
@@ -237,6 +281,7 @@ def build_handoff_bundle(
             "average_duration_seconds": _rounded(float(node["average_duration_seconds"])),
             "median_duration_seconds": _rounded(median(activity_durations[str(node["activity"])])),
             "bottleneck": _bottleneck_evidence(bottlenecks.get(str(node["activity"])), int(node["frequency"])),
+            "case_correlation": _case_correlation_evidence(node_correlations[str(node["activity"])]),
         }
         for node in sorted(graph["nodes"], key=lambda item: node_ids[str(item["activity"])])
     ]
@@ -257,8 +302,8 @@ def build_handoff_bundle(
         )
     ]
 
-    variants = _build_variants(grouped_cases, node_ids)
-    switches = detect_app_switches(event_list)
+    variants = _build_variants(grouped_cases, node_ids, case_correlations)
+    switches = detect_app_switches(analysis)
     app_handoffs = [
         {
             "source_app": str(item["source_app"]),
@@ -274,20 +319,27 @@ def build_handoff_bundle(
         {
             "analysis_parameters": {
                 "activity_source": "event activity label",
-                "case_ordering": "case grouping, timestamp_start, event_id",
+                "case_ordering": "UTC instant, source, source event id, event id",
+                "case_correlation": "source case IDs are observed; inferred or unassigned input is isolated until reviewed",
+                "sessionization": f"split when inactivity is greater than {analysis.receipt.session_gap_minutes} minutes",
+                "time_normalization": "UTC internal instants; source display timezone is not inferred",
+                "parallel_event_policy": "sessions containing overlap or parallel ambiguity are excluded from sequential flow analysis",
+                "duplicate_policy": "exact source-event duplicates are deduplicated; conflicting source-event IDs are excluded",
                 "process_graph": "directly-follows graph",
-                "duration_aggregation": "mean and median seconds",
+                "duration_aggregation": "event duration mean/median; case variants use elapsed seconds",
                 "variant_aggregation": "observed ordered activity sequences",
             },
             "coverage": {
+                "events_input": analysis.receipt.input_event_count,
                 "events_observed": total_events,
                 "cases_observed": len(grouped_cases),
                 "activities_observed": len(nodes),
                 "edges_observed": len(edges),
                 "variants_observed": len(variants),
-                "excluded_event_count": 0,
-                "exclusion_note": "This bundle observes the current local event store only; records excluded before storage are not recoverable.",
+                "excluded_event_count": analysis.receipt.excluded_event_count,
+                "exclusion_note": "Excluded counts are reason-coded in analysis_receipt. Records excluded before storage are not recoverable.",
             },
+            "analysis_receipt": receipt,
             "nodes": nodes,
             "edges": edges,
             "variants": variants,
@@ -298,21 +350,24 @@ def build_handoff_bundle(
             ],
             "data_quality": {
                 "confidential_event_count": sum(1 for event in event_list if event.confidential_flag),
-                "idle_event_count": sum(1 for event in event_list if event.idle_flag),
-                "timestamps_with_parse_errors": _timestamp_parse_error_count(event_list),
+                "idle_event_count": int(receipt["excluded_by_reason"].get("idle_event", 0)),
+                "timestamps_with_parse_errors": _timestamp_parse_error_count(source_events),
+                "excluded_by_reason": receipt["excluded_by_reason"],
             },
-            "confidence": _confidence(total_events, len(grouped_cases)),
+            "confidence": _confidence(total_events, len(grouped_cases), receipt),
             "terms": {
                 "activity": "Observed event label. It is not a verified business procedure.",
                 "case": "Local sequence group. Case identifiers are not exported.",
                 "edge": "Observed directly-follows transition between two activities.",
                 "variant": "Observed activity sequence across one or more cases.",
+                "case_correlation": "Per-node and per-variant counts of observed/manual/inferred/unassigned local case provenance.",
             },
             "data_constraints": [
                 "No raw event rows are included.",
                 "No case, event, session, user, device, import-path, URL, title, alias, memo, or metadata values are included.",
                 "Activity labels and app names are event-derived data and may require human review.",
                 "This local sample may not represent offline work, uncollected tools, or work outside the observed period.",
+                "Observed and inferred case counts, confidence, exclusions, and timing definitions are recorded in analysis_receipt.",
             ],
         }
     ).model_dump(mode="json")
@@ -338,11 +393,11 @@ def build_handoff_bundle(
             "generated_at_source": "maximum observed timestamp_end; 1970-01-01T00:00:00+00:00 when no parseable event timestamp exists",
             "dataset": {
                 "fingerprint": f"sha256:{_sha256(process_text.encode('utf-8'))}",
-                "timezone": _dataset_timezone(event_list),
+                "timezone": "UTC internal instants",
                 "duration_unit": "seconds",
                 "filters": {
-                    "applied": "none",
-                    "excluded_event_count": 0,
+                    "applied": "conservative process-mining receipt",
+                    "excluded_event_count": analysis.receipt.excluded_event_count,
                     "scope": "current local event store",
                 },
             },
@@ -373,7 +428,7 @@ def build_handoff_bundle(
         }
     ).model_dump(mode="json")
     entries = {"manifest.json": _canonical_json(manifest), **content_entries}
-    _assert_safe_export(event_list, process, review_notes.values())
+    _assert_safe_export(source_events, process, review_notes.values())
     return HandoffBundle(
         content=_deterministic_zip(entries),
         manifest=manifest,
@@ -399,13 +454,19 @@ def _public_schema(model: type[BaseModel]) -> dict[str, Any]:
     return model.model_json_schema()
 
 
-def _build_variants(grouped_cases: dict[str, list[StandardEvent]], node_ids: dict[str, str]) -> list[dict[str, Any]]:
+def _build_variants(
+    grouped_cases: dict[str, list[StandardEvent]],
+    node_ids: dict[str, str],
+    case_correlations: dict[str, Any],
+) -> list[dict[str, Any]]:
     counts: Counter[tuple[str, ...]] = Counter()
     durations: dict[tuple[str, ...], list[float]] = defaultdict(list)
-    for case_events in grouped_cases.values():
+    correlations: dict[tuple[str, ...], list[Any]] = defaultdict(list)
+    for case_key, case_events in grouped_cases.items():
         sequence = tuple(str(event.activity_raw) for event in case_events)
         counts[sequence] += 1
-        durations[sequence].append(sum(float(event.duration_seconds) for event in case_events))
+        durations[sequence].append(_case_elapsed_seconds(case_events))
+        correlations[sequence].append(case_correlations[case_key])
     case_total = len(grouped_cases)
     return [
         {
@@ -415,18 +476,12 @@ def _build_variants(grouped_cases: dict[str, list[StandardEvent]], node_ids: dic
             "case_coverage_ratio": _ratio(count, case_total),
             "average_case_duration_seconds": _rounded(mean(durations[sequence])),
             "median_case_duration_seconds": _rounded(median(durations[sequence])),
+            "case_correlation": _case_correlation_evidence(correlations[sequence]),
         }
         for sequence, count in sorted(
             counts.items(), key=lambda item: _stable_id("variant", ":".join(node_ids[activity] for activity in item[0]))
         )
     ]
-
-
-def _events_by_case(events: Iterable[StandardEvent]) -> dict[str, list[StandardEvent]]:
-    grouped: dict[str, list[StandardEvent]] = defaultdict(list)
-    for event in events:
-        grouped[event.case_id].append(event)
-    return {case_id: normalize_events(case_events) for case_id, case_events in sorted(grouped.items())}
 
 
 def _activity_durations(events: Iterable[StandardEvent]) -> dict[str, list[float]]:
@@ -452,13 +507,27 @@ def _bottleneck_evidence(item: dict[str, Any] | None, frequency: int) -> dict[st
     }
 
 
-def _confidence(event_count: int, case_count: int) -> dict[str, Any]:
-    level = "high" if case_count >= 10 else "medium" if case_count >= 3 else "low"
+def _confidence(event_count: int, case_count: int, receipt: dict[str, Any]) -> dict[str, Any]:
+    low_confidence = int(dict(receipt["confidence_counts"]).get("low", 0))
+    level = "low" if low_confidence else "high" if case_count >= 10 else "medium" if case_count >= 3 else "low"
     return {
         "level": level,
-        "basis": "Deterministic local coverage heuristic: high at 10+ cases, medium at 3-9 cases, low below 3 cases.",
+        "basis": "Deterministic local coverage heuristic, reduced to low when any eligible case has low correlation confidence.",
         "evidence_event_count": event_count,
         "evidence_case_count": case_count,
+    }
+
+
+def _case_correlation_evidence(correlations: Iterable[Any]) -> dict[str, Any]:
+    origins: Counter[str] = Counter()
+    confidence_levels: Counter[str] = Counter()
+    for correlation in correlations:
+        origins[str(correlation.origin)] += 1
+        confidence_levels[str(correlation.confidence)] += 1
+    return {
+        "origins": dict(sorted(origins.items())),
+        "confidence_levels": dict(sorted(confidence_levels.items())),
+        "low_confidence_case_count": int(confidence_levels["low"]),
     }
 
 
@@ -506,7 +575,15 @@ def _dataset_timezone(events: Iterable[StandardEvent]) -> str:
 
 def _parse_time(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp must include an explicit UTC offset")
+    return parsed
+
+
+def _case_elapsed_seconds(events: list[StandardEvent]) -> float:
+    if not events:
+        return 0.0
+    return (_parse_time(events[-1].timestamp_end) - _parse_time(events[0].timestamp_start)).total_seconds()
 
 
 def _assert_safe_export(
@@ -582,7 +659,11 @@ def _metadata_scalar_strings(metadata: dict[str, Any] | None, raw_metadata: str)
     }
 
     def collect(value: Any, path: str = "") -> None:
-        if path in {"opsmineflow_window_title_origin", "opsmineflow_handoff_allowed_metadata_paths"}:
+        if path in {
+            "opsmineflow_window_title_origin",
+            "opsmineflow_handoff_allowed_metadata_paths",
+            "opsmineflow_case_correlation",
+        }:
             return
         if path in allowed_paths:
             return

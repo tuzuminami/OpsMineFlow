@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 from pathlib import Path
 
@@ -62,9 +63,13 @@ class PipelineTests(unittest.TestCase):
 
         self.assertIn("flowchart LR", mermaid)
         self.assertIn("# OpsMineFlow As-Is Report", markdown)
+        self.assertIn("## Analysis Receipt", markdown)
         self.assertIn("LLM integration: not supported", markdown)
+        receipt_line = next(line for line in mermaid.splitlines() if line.startswith("%% opsmineflow_analysis_receipt: "))
+        receipt = json.loads(receipt_line.split(": ", 1)[1])
+        self.assertEqual(receipt["input_event_count"], 7)
+        self.assertEqual(receipt["used_event_count"], 7)
 
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -25,6 +25,23 @@ export type EventRecord = {
   duration_seconds: number;
   confidential_flag: boolean;
   quality_review_status: string;
+  case_correlation: CaseCorrelation;
+  case_correlation_review: CaseCorrelationReview | null;
+};
+
+export type CaseCorrelation = {
+  origin: "observed" | "manual" | "inferred" | "unassigned" | string;
+  strategy: string;
+  confidence: "high" | "medium" | "low" | string;
+  evidence: string;
+};
+
+export type CaseCorrelationReview = {
+  action: string;
+  previous_case_id: string;
+  reason: string;
+  operator: string;
+  changed_at: string;
 };
 
 export type EventPage = {
@@ -33,6 +50,24 @@ export type EventPage = {
   limit: number;
   total: number;
   has_more: boolean;
+};
+
+export type AnalysisReceipt = {
+  algorithm_version: string;
+  session_gap_minutes: number;
+  scope_fingerprint: string;
+  filter_fingerprint: string;
+  input_event_count: number;
+  used_event_count: number;
+  excluded_event_count: number;
+  excluded_by_reason: Record<string, number>;
+  analysis_case_count: number;
+  case_origin_counts: Record<string, number>;
+  confidence_counts: Record<string, number>;
+  raw_active_seconds: number;
+  active_union_seconds: number;
+  case_elapsed_seconds: number;
+  waiting_seconds: number;
 };
 
 export type Summary = {
@@ -44,6 +79,7 @@ export type Summary = {
   label_usage_seconds: Record<string, number>;
   user_usage_seconds: Record<string, number>;
   average_event_duration_seconds: number;
+  analysis_receipt: AnalysisReceipt;
 };
 
 export type ProcessNode = {
@@ -66,6 +102,7 @@ export type ProcessMap = {
   edges: ProcessEdge[];
   start_activities: Record<string, number>;
   end_activities: Record<string, number>;
+  analysis_receipt: AnalysisReceipt;
 };
 
 export type AutomationReviewStatus = "unreviewed" | "adopted" | "on_hold" | "rejected";
@@ -89,6 +126,11 @@ export type AutomationCandidate = {
   review_note: string;
 };
 
+export type AutomationCandidatesResponse = {
+  candidates: AutomationCandidate[];
+  analysis_receipt: AnalysisReceipt;
+};
+
 export type AppSwitching = {
   transition_ranking: Array<{ source_app: string; target_app: string; count: number }>;
   round_trips: Array<{ pattern: string; count: number }>;
@@ -99,17 +141,21 @@ export type EventQualityIssue = {
   severity: string;
   label: string;
   remediation: string;
+  evidence?: string;
 };
 
 export type EventQualityItem = {
   event_id: string;
   case_id: string;
+  case_correlation: CaseCorrelation;
+  case_correlation_review: CaseCorrelationReview | null;
   activity: string;
   app_name: string;
   timestamp_start: string;
   timestamp_end: string;
   duration_seconds: number;
   quality_review_status: string;
+  analysis_excluded: boolean;
   issues: EventQualityIssue[];
   recommended_action: string;
 };
@@ -127,8 +173,11 @@ export type EventQualityReport = {
     long_duration: number;
     unlabeled: number;
     low_confidence: number;
+    case_correlation_low_confidence: number;
+    duration_interval_mismatch: number;
   };
   items: EventQualityItem[];
+  analysis_receipt: AnalysisReceipt;
 };
 
 export type Diagnostics = {
@@ -234,6 +283,7 @@ export type AppSettings = {
   mask_url_paths: boolean;
   mask_window_titles: boolean;
   retention_days: number;
+  session_gap_minutes: number;
   activitywatch_enabled: boolean;
   excluded_apps: string[];
   excluded_domains: string[];

@@ -5,11 +5,19 @@ OpsMineFlow uses a standard event record as the common contract between importer
 ## Core Entities
 
 - Event: one normalized observed work activity.
-- Case: a group of events representing one business instance.
-- Session: a contiguous work session.
+- Case: an observed/manual source grouping, or a clearly marked low-confidence
+  singleton when no source case ID exists.
+- Session: a contiguous UTC work session. A session splits only when its
+  inactivity gap is greater than the configured threshold (30 minutes by
+  default).
 - Business label: a rule-based or manually assigned work category.
 - Process map: activities and transitions derived from case-ordered events.
 - Automation candidate: a scored task or pattern that may deserve improvement review.
+- Analysis receipt: the versioned local record of input, used/excluded event
+  counts, exclusion reasons, case-correlation confidence, session rule, and
+  duration definitions shared by every analysis output. It also carries
+  privacy-safe SHA-256 scope and filter fingerprints for comparison across
+  exports without exposing source event content.
 
 ## Storage
 

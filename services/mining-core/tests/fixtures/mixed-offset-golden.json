@@ -1,0 +1,17 @@
+{
+  "edges": [
+    {
+      "source": "A",
+      "target": "B",
+      "frequency": 1,
+      "average_transition_seconds": 1800.0
+    }
+  ],
+  "variants": [
+    {
+      "variant": ["A", "B"],
+      "count": 1,
+      "average_case_duration_seconds": 1920.0
+    }
+  ]
+}

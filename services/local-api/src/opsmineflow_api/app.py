@@ -5,6 +5,7 @@ import csv
 import hashlib
 import hmac
 import json
+import math
 import os
 import platform
 import shutil
@@ -14,9 +15,10 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from .auth import (
     DELETE_CHALLENGE_HEADER,
@@ -41,8 +43,10 @@ MAX_PROCESS_MAP_NODES = 500
 MAX_PROCESS_MAP_EDGES = 1_000
 
 from opsmineflow_drawio import build_drawio_xml
+from opsmineflow_mining.analysis import correlation_for, parse_utc
 from opsmineflow_mining import (
     StandardEvent,
+    MiningConfig,
     analyze_variants,
     build_directly_follows_graph,
     calculate_duration_metrics,
@@ -54,6 +58,7 @@ from opsmineflow_mining import (
     load_events_from_csv,
     load_events_from_csv_with_mapping,
     load_events_from_json,
+    prepare_analysis,
     score_automation_candidates,
     suggest_csv_mapping,
 )
@@ -114,6 +119,12 @@ class EventQualityReviewRequest(BaseModel):  # type: ignore[misc, valid-type]
     status: str = "approved"
 
 
+class EventCaseCorrelationUpdateRequest(BaseModel):  # type: ignore[misc, valid-type]
+    event_id: str
+    case_id: str
+    reason: str
+
+
 class EventSplitRequest(BaseModel):  # type: ignore[misc, valid-type]
     event_id: str
     split_after_seconds: float
@@ -147,6 +158,7 @@ class SettingsRequest(BaseModel):  # type: ignore[misc, valid-type]
     mask_url_paths: bool | None = None
     mask_window_titles: bool | None = None
     retention_days: int | None = None
+    session_gap_minutes: int | None = None
     activitywatch_enabled: bool | None = None
     excluded_apps: list[str] | None = None
     excluded_domains: list[str] | None = None
@@ -215,14 +227,33 @@ LOCAL_API_POLICY = local_api_policy()
 DELETE_CHALLENGES = DeleteChallengeStore()
 
 
+def _analysis_for_store(store: EventStore):
+    return prepare_analysis(store.events, _mining_config_for_store(store))
+
+
+def _mining_config_for_store(store: EventStore) -> MiningConfig:
+    settings = store.get_settings()
+    filter_context = (
+        ("excluded_apps", tuple(sorted(str(value).casefold() for value in settings.get("excluded_apps", []) if str(value).strip()))),
+        ("excluded_domains", tuple(sorted(str(value).casefold() for value in settings.get("excluded_domains", []) if str(value).strip()))),
+    )
+    return MiningConfig(
+        session_gap_minutes=int(settings.get("session_gap_minutes", 30)),
+        filter_context=filter_context,
+    )
+
+
 def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
     events = active_store.events
     settings = active_store.get_settings()
-    metrics = calculate_duration_metrics(events)
-    process_map = build_directly_follows_graph(events)
+    analysis = _analysis_for_store(active_store)
+    metrics = calculate_duration_metrics(analysis)
+    process_map = build_directly_follows_graph(analysis)
     store_diagnostics = active_store.diagnostics()
-    automation_candidates = apply_automation_reviews(score_automation_candidates(events), active_store, events)
+    automation_candidates = apply_automation_reviews(
+        score_automation_candidates(analysis), active_store, list(analysis.events)
+    )
     health = {
         **create_public_health(),
         "storage_mode": store_diagnostics["storage_mode"],
@@ -232,14 +263,15 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
         "health": health,
         "events": [event_to_api_dict(event, settings) for event in events],
         "summary": metrics_to_dict(metrics),
-        "app_switching": detect_app_switches(events),
+        "analysis_receipt": analysis.receipt.to_dict(),
+        "app_switching": detect_app_switches(analysis),
         "automation_candidates": automation_candidates,
         "event_quality": create_event_quality_report(active_store),
         "process_map": process_map,
-        "variants": analyze_variants(events),
-        "bottlenecks": detect_bottlenecks(events),
-        "markdown_report": append_automation_review_section(export_markdown_report(events), automation_candidates),
-        "mermaid": export_mermaid(events),
+        "variants": analyze_variants(analysis),
+        "bottlenecks": detect_bottlenecks(analysis),
+        "markdown_report": append_automation_review_section(export_markdown_report(analysis), automation_candidates),
+        "mermaid": export_mermaid(analysis),
         "drawio": build_drawio_xml(process_map),
     }
 
@@ -275,27 +307,34 @@ def create_event_page(
 
 
 def create_summary(store: EventStore | None = None) -> dict[str, Any]:
-    return metrics_to_dict(calculate_duration_metrics((store or default_store()).events))
+    analysis = _analysis_for_store(store or default_store())
+    return {**metrics_to_dict(calculate_duration_metrics(analysis)), "analysis_receipt": analysis.receipt.to_dict()}
 
 
 def create_app_switching(store: EventStore | None = None) -> dict[str, Any]:
-    switching = detect_app_switches((store or default_store()).events)
+    analysis = _analysis_for_store(store or default_store())
+    switching = detect_app_switches(analysis)
     return {
         "transition_ranking": list(switching["transition_ranking"])[:MAX_ANALYTICS_LIST_ITEMS],
         "round_trips": list(switching["round_trips"])[:MAX_ANALYTICS_LIST_ITEMS],
+        "analysis_receipt": analysis.receipt.to_dict(),
     }
 
 
-def create_automation_candidates(store: EventStore | None = None) -> list[dict[str, Any]]:
+def create_automation_candidates(store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
+    analysis = _analysis_for_store(active_store)
     candidates = apply_automation_reviews(
-        score_automation_candidates(active_store.events), active_store, active_store.events
+        score_automation_candidates(analysis), active_store, list(analysis.events)
     )
-    return candidates[:MAX_ANALYTICS_LIST_ITEMS]
+    return {
+        "candidates": candidates[:MAX_ANALYTICS_LIST_ITEMS],
+        "analysis_receipt": analysis.receipt.to_dict(),
+    }
 
 
 def create_process_map(store: EventStore | None = None) -> dict[str, Any]:
-    graph = build_directly_follows_graph((store or default_store()).events)
+    graph = build_directly_follows_graph(_analysis_for_store(store or default_store()))
     nodes = list(graph["nodes"])[:MAX_PROCESS_MAP_NODES]
     visible_activities = {str(node["activity"]) for node in nodes}
     edges = [
@@ -316,13 +355,14 @@ def create_process_map(store: EventStore | None = None) -> dict[str, Any]:
             for activity, count in dict(graph["end_activities"]).items()
             if activity in visible_activities
         },
+        "analysis_receipt": graph["analysis_receipt"],
     }
 
 
 def create_markdown_report(store: EventStore | None = None) -> str:
     active_store = store or default_store()
-    candidates = create_automation_candidates(active_store)
-    return append_automation_review_section(export_markdown_report(active_store.events), candidates)
+    candidates = create_automation_candidates(active_store)["candidates"]
+    return append_automation_review_section(export_markdown_report(_analysis_for_store(active_store)), candidates)
 def create_public_health() -> dict[str, Any]:
     """Return the unauthenticated, constant-time local readiness payload."""
 
@@ -521,7 +561,10 @@ def append_automation_review_section(markdown: str, candidates: list[dict[str, o
 
 def create_event_quality_report(store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
+    analysis = _analysis_for_store(active_store)
     items: list[dict[str, Any]] = []
+    items_by_event_id: dict[str, dict[str, Any]] = {}
+    events_by_id = {event.event_id: event for event in active_store.events}
     issue_totals = {
         "missing_fields": 0,
         "invalid_time": 0,
@@ -530,32 +573,49 @@ def create_event_quality_report(store: EventStore | None = None) -> dict[str, An
         "long_duration": 0,
         "unlabeled": 0,
         "low_confidence": 0,
+        "case_correlation_low_confidence": 0,
+        "duration_interval_mismatch": 0,
     }
-    approved_count = 0
     for event in active_store.events:
         status = _event_quality_status(event)
-        if status == "approved":
-            approved_count += 1
         issues = _event_quality_issues(event)
         for issue in issues:
             code = str(issue["code"])
             if code in issue_totals:
                 issue_totals[code] += 1
         if issues:
-            items.append(
-                {
-                    "event_id": event.event_id,
-                    "case_id": event.case_id,
-                    "activity": event.activity_raw,
-                    "app_name": event.app_name,
-                    "timestamp_start": event.timestamp_start,
-                    "timestamp_end": event.timestamp_end,
-                    "duration_seconds": event.duration_seconds,
-                    "quality_review_status": status,
-                    "issues": issues,
-                    "recommended_action": _quality_recommended_action(issues),
-                }
-            )
+            item = _quality_item(event, status, issues)
+            items.append(item)
+            items_by_event_id[event.event_id] = item
+
+    for exclusion in analysis.exclusions:
+        event = events_by_id.get(exclusion.event_id)
+        if event is None:
+            continue
+        issue = {
+            "code": f"analysis_{exclusion.reason}",
+            "severity": "high",
+            "label": f"Excluded from analysis: {exclusion.reason.replace('_', ' ')}.",
+            "remediation": exclusion.remediation,
+            "evidence": exclusion.evidence,
+        }
+        item = items_by_event_id.get(event.event_id)
+        if item is None:
+            item = _quality_item(event, "requires_correction", [issue], analysis_excluded=True)
+            items.append(item)
+            items_by_event_id[event.event_id] = item
+        else:
+            item["issues"].append(issue)
+            item["analysis_excluded"] = True
+            item["quality_review_status"] = "requires_correction"
+            item["recommended_action"] = _quality_recommended_action(item["issues"])
+
+    excluded_event_ids = {exclusion.event_id for exclusion in analysis.exclusions}
+    approved_count = sum(
+        1
+        for event in active_store.events
+        if _event_quality_status(event) == "approved" and event.event_id not in excluded_event_ids
+    )
     unresolved_items = [item for item in items if item["quality_review_status"] != "approved"]
     return {
         "summary": {
@@ -566,6 +626,31 @@ def create_event_quality_report(store: EventStore | None = None) -> dict[str, An
             **issue_totals,
         },
         "items": items,
+        "analysis_receipt": analysis.receipt.to_dict(),
+    }
+
+
+def _quality_item(
+    event: Any,
+    status: str,
+    issues: list[dict[str, str]],
+    *,
+    analysis_excluded: bool = False,
+) -> dict[str, Any]:
+    return {
+        "event_id": event.event_id,
+        "case_id": event.case_id,
+        "case_correlation": _case_correlation_to_dict(event),
+        "case_correlation_review": _case_correlation_review_to_dict(event),
+        "activity": event.activity_raw,
+        "app_name": event.app_name,
+        "timestamp_start": event.timestamp_start,
+        "timestamp_end": event.timestamp_end,
+        "duration_seconds": event.duration_seconds,
+        "quality_review_status": status,
+        "analysis_excluded": analysis_excluded,
+        "issues": issues,
+        "recommended_action": _quality_recommended_action(issues),
     }
 
 
@@ -590,6 +675,7 @@ def _event_quality_issues(event: Any) -> list[dict[str, str]]:
             }
         )
 
+    interval_seconds: float | None = None
     try:
         start = _parse_event_time(event.timestamp_start)
         end = _parse_event_time(event.timestamp_end)
@@ -602,6 +688,8 @@ def _event_quality_issues(event: Any) -> list[dict[str, str]]:
                     "remediation": "Split, merge, or exclude this interval.",
                 }
             )
+        else:
+            interval_seconds = (end - start).total_seconds()
     except ValueError:
         issues.append(
             {
@@ -613,7 +701,7 @@ def _event_quality_issues(event: Any) -> list[dict[str, str]]:
         )
 
     duration = float(event.duration_seconds)
-    if duration <= 0:
+    if not math.isfinite(duration) or duration <= 0:
         issues.append(
             {
                 "code": "zero_duration",
@@ -640,6 +728,15 @@ def _event_quality_issues(event: Any) -> list[dict[str, str]]:
                 "remediation": "Split it or exclude it as a break if it was not work.",
             }
         )
+    if interval_seconds is not None and interval_seconds > 0 and abs(duration - interval_seconds) > 1.0:
+        issues.append(
+            {
+                "code": "duration_interval_mismatch",
+                "severity": "high",
+                "label": "Source duration does not match the timestamp interval.",
+                "remediation": "Correct the source duration or timestamps and import again.",
+            }
+        )
 
     normalized_activity = " ".join(event.activity_raw.strip().casefold().split())
     if normalized_activity in {"", "unlabeled activity", "unknown"}:
@@ -660,14 +757,38 @@ def _event_quality_issues(event: Any) -> list[dict[str, str]]:
                 "remediation": "Rename it to the actual business activity if needed.",
             }
         )
+    try:
+        metadata = json.loads(event.metadata_json) if event.metadata_json else {}
+    except json.JSONDecodeError:
+        metadata = {}
+    correlation = metadata.get("opsmineflow_case_correlation") if isinstance(metadata, dict) else None
+    if isinstance(correlation, dict) and (
+        str(correlation.get("origin") or "").lower() in {"inferred", "unassigned"}
+        or str(correlation.get("confidence") or "").lower() == "low"
+    ):
+        issues.append(
+            {
+                "code": "case_correlation_low_confidence",
+                "severity": "high",
+                "label": "Case correlation is inferred or unassigned.",
+            "remediation": "Enter a reviewed case ID and a short reason, or keep this event separate before relying on a process flow.",
+            }
+        )
     return issues
 
 
 def _quality_recommended_action(issues: list[dict[str, str]]) -> str:
     codes = {issue["code"] for issue in issues}
+    analysis_codes = {code.removeprefix("analysis_") for code in codes if code.startswith("analysis_")}
+    if analysis_codes & {"duplicate_event", "conflicting_source_event_id", "invalid_timestamp", "invalid_duration"}:
+        return "repair_source"
+    if analysis_codes & {"negative_interval", "zero_duration", "duration_interval_mismatch", "overlapping_or_parallel_session", "idle_event"}:
+        return "split_or_exclude"
     if "missing_fields" in codes or "unlabeled" in codes or "low_confidence" in codes:
         return "edit_label"
-    if "long_duration" in codes or "zero_duration" in codes or "invalid_time" in codes:
+    if "case_correlation_low_confidence" in codes:
+        return "edit_case_correlation"
+    if "long_duration" in codes or "zero_duration" in codes or "invalid_time" in codes or "duration_interval_mismatch" in codes:
         return "split_or_exclude"
     return "review"
 
@@ -683,10 +804,7 @@ def _event_quality_status(event: Any) -> str:
 
 
 def _parse_event_time(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed
+    return parse_utc(value)
 
 
 def event_to_api_dict(event: Any, settings: dict[str, object]) -> dict[str, object]:
@@ -706,7 +824,33 @@ def event_to_api_dict(event: Any, settings: dict[str, object]) -> dict[str, obje
         "duration_seconds": event.duration_seconds,
         "confidential_flag": event.confidential_flag,
         "quality_review_status": _event_quality_status(event),
+        "case_correlation": _case_correlation_to_dict(event),
+        "case_correlation_review": _case_correlation_review_to_dict(event),
     }
+
+
+def _case_correlation_to_dict(event: Any) -> dict[str, str]:
+    correlation = correlation_for(event)
+    return {
+        "origin": correlation.origin,
+        "strategy": correlation.strategy,
+        "confidence": correlation.confidence,
+        "evidence": correlation.evidence,
+    }
+
+
+def _case_correlation_review_to_dict(event: Any) -> dict[str, str] | None:
+    try:
+        metadata = json.loads(event.metadata_json) if event.metadata_json else {}
+    except json.JSONDecodeError:
+        return None
+    review = metadata.get("opsmineflow_case_correlation_review") if isinstance(metadata, dict) else None
+    if not isinstance(review, dict):
+        return None
+    required = ("action", "previous_case_id", "reason", "operator", "changed_at")
+    if any(not isinstance(review.get(key), str) for key in required):
+        return None
+    return {key: str(review[key]) for key in required}
 
 
 def load_events_for_import(
@@ -930,6 +1074,7 @@ def create_export_artifact(format_name: str, store: EventStore | None = None) ->
             active_store.events,
             active_store.automation_reviews,
             active_store.automation_review_notes,
+            config=_mining_config_for_store(active_store),
         )
         content: str | bytes = bundle.content
         extension = "zip"
@@ -948,8 +1093,11 @@ def create_export_artifact(format_name: str, store: EventStore | None = None) ->
             content = json_dumps({"snapshot": snapshot})
             extension = "json"
         elif format_name == "csv":
-            content = events_to_csv(snapshot["events"])
-            extension = "csv"
+            receipt = snapshot.get("analysis_receipt")
+            if not isinstance(receipt, dict):
+                raise RuntimeError("CSV export requires an analysis receipt.")
+            content = build_csv_export_bundle(snapshot["events"], receipt)
+            extension = "zip"
         elif format_name == "mermaid":
             content = str(snapshot["mermaid"])
             extension = "mmd"
@@ -958,8 +1106,12 @@ def create_export_artifact(format_name: str, store: EventStore | None = None) ->
             extension = "drawio"
         else:
             raise ValueError("Export format must be markdown, json, csv, mermaid, drawio, or llm-handoff.")
-        filename = f"opsmineflow-export.{extension}"
-        preview = str(content)[:2000]
+        filename = "opsmineflow-events-with-analysis-receipt.zip" if format_name == "csv" else f"opsmineflow-export.{extension}"
+        preview = (
+            "ZIP bundle containing events.csv and analysis-receipt.json."
+            if format_name == "csv"
+            else str(content)[:2000]
+        )
         warning = "Review masked fields and confidential flags before sharing this export."
 
     byte_content = content if isinstance(content, bytes) else content.encode("utf-8")
@@ -1077,6 +1229,33 @@ def events_to_csv(events: list[dict[str, object]]) -> str:
     writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(events)
+    return buffer.getvalue()
+
+
+def build_csv_export_bundle(events: list[dict[str, object]], receipt: dict[str, object]) -> bytes:
+    """Package raw CSV rows with a stable, privacy-safe analysis receipt.
+
+    CSV has no portable metadata channel. A deterministic local ZIP keeps the
+    event table compatible with spreadsheet tooling while ensuring a recipient
+    cannot lose the used/excluded/session interpretation.
+    """
+
+    receipt_payload = {
+        "scope": "all current local events; no saved analysis filter is applied",
+        "analysis_receipt": receipt,
+    }
+    entries = {
+        "events.csv": events_to_csv(events).encode("utf-8"),
+        "analysis-receipt.json": json.dumps(
+            receipt_payload, ensure_ascii=False, sort_keys=True, indent=2
+        ).encode("utf-8"),
+    }
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        for name, data in entries.items():
+            info = ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = ZIP_DEFLATED
+            archive.writestr(info, data)
     return buffer.getvalue()
 
 
@@ -1484,6 +1663,16 @@ if app is not None:
         except ValueError as exc:
             raise _bad_request(str(exc))
 
+    @app.post("/events/case-correlation")
+    def update_event_case_correlation(request: EventCaseCorrelationUpdateRequest) -> dict[str, Any]:
+        try:
+            event = default_store().update_event_case_correlation(request.event_id, request.case_id, request.reason)
+        except KeyError:
+            raise _not_found("Event was not found")
+        except ValueError as exc:
+            raise _bad_request(str(exc))
+        return {"event": event_to_api_dict(event, default_store().get_settings())}
+
     @app.post("/events/split")
     def split_event(request: EventSplitRequest) -> dict[str, Any]:
         try:
@@ -1532,7 +1721,7 @@ if app is not None:
         return create_app_switching()
 
     @app.get("/analytics/automation-candidates")
-    def analytics_automation_candidates() -> list[dict[str, Any]]:
+    def analytics_automation_candidates() -> dict[str, Any]:
         return create_automation_candidates()
 
     @app.get("/analytics/event-quality")
@@ -1568,7 +1757,14 @@ if app is not None:
 
     @app.post("/export/csv")
     def export_csv_endpoint() -> dict[str, Any]:
-        return {"csv": str(create_export_artifact("csv")["content"])}
+        artifact = create_export_artifact("csv")
+        content = artifact["content"]
+        if not isinstance(content, bytes):
+            raise RuntimeError("CSV export must be a ZIP bundle.")
+        return {
+            "filename": artifact["filename"],
+            "zip_base64": base64.b64encode(content).decode("ascii"),
+        }
 
     @app.post("/export/json")
     def export_json_endpoint() -> dict[str, Any]:
