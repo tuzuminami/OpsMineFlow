@@ -60,6 +60,7 @@ PROTECTED_ROUTES = {
     ("POST", "/export/svg"),
     ("POST", "/export/csv"),
     ("POST", "/export/json"),
+    ("POST", "/export/llm-handoff"),
     ("POST", "/export/preview"),
     ("POST", "/export/save"),
 }

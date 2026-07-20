@@ -20,7 +20,7 @@ CIの状態、必須check、main保護の手順は [CI / main branch quality gat
 
 ## LLM/API非連携方針
 
-OpenAI、Anthropic、Google、Azure、Ollama、ローカルLLMを含むLLM連携は実装しない。ラベル付け、分析、レポートはルールベースと統計処理で行う。
+OpenAI、Anthropic、Google、Azure、Ollama、ローカルLLMを含むLLM連携は実装しない。ラベル付け、分析、レポートはルールベースと統計処理で行う。ユーザーがローカル出力を手動で外部へ渡すことは連携ではなく、OpsMineFlowから送信・接続・応答取込は行わない。
 
 ## 商用利用しやすいApache-2.0ライセンス
 
@@ -42,7 +42,7 @@ OpenAI、Anthropic、Google、Azure、Ollama、ローカルLLMを含むLLM連携
 - ボトルネック候補抽出
 - 繰り返し作業・アプリ往復検出
 - 自動化候補スコアリング
-- Markdown/HTML/CSV/JSON/Mermaid/SVG/draw.io系エクスポート
+- Markdown/HTML/CSV/JSON/Mermaid/SVG/draw.io系エクスポート、手動Mermaid handoff ZIP
 
 ## ローカル製品版スコープ
 
@@ -115,7 +115,7 @@ CSVでは主に `case_id`、`activity`、`timestamp_start`、`timestamp_end`、`
 
 ### 6. 結果を出力する
 
-**ホーム > 出力** でMarkdown、JSON、CSV、Mermaid、draw.ioを選び、内容を確認する。マスキングと機密フラグを見てから **指定先へ保存** または **ダウンロード** を押す。
+**ホーム > 出力** でMarkdown、JSON、CSV、Mermaid、draw.io、または **LLM handoff (ZIP)** を選び、内容を確認する。マスキングと機密フラグを見てから **指定先へ保存** または **ダウンロード** を押す。hand-off ZIPは、外部LLMがMermaid Markdownを書くために使える集計根拠・JSON Schema・制約を含む手動受け渡し用のローカル成果物であり、OpsMineFlowからLLMへ接続や送信はしない。詳細は[サンプル契約](docs/samples/LLM_MERMAID_HANDOFF.md)。
 
 ### 7. 診断とデータ削除
 

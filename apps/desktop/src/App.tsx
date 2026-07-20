@@ -579,10 +579,15 @@ function downloadExport(
     csv?: string;
     mermaid?: string;
     drawio?: string;
+    filename?: string;
+    zip_base64?: string;
   };
-  const filename = `opsmineflow-export.${format === "markdown" ? "md" : format === "drawio" ? "drawio" : format}`;
+  const filename = format === "llm-handoff"
+    ? typed.filename || "opsmineflow-mermaid-handoff.zip"
+    : `opsmineflow-export.${format === "markdown" ? "md" : format === "drawio" ? "drawio" : format}`;
   let content = "";
   let mime = "text/plain;charset=utf-8";
+  let binaryContent: ArrayBuffer | null = null;
 
   if (format === "markdown") {
     content = typed.markdown || "";
@@ -595,12 +600,18 @@ function downloadExport(
     mime = "text/csv;charset=utf-8";
   } else if (format === "mermaid") {
     content = typed.mermaid || "";
+  } else if (format === "llm-handoff") {
+    const binary = atob(typed.zip_base64 || "");
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    binaryContent = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(binaryContent).set(bytes);
+    mime = "application/zip";
   } else {
     content = typed.drawio || "";
     mime = "application/xml;charset=utf-8";
   }
 
-  const url = URL.createObjectURL(new Blob([content], { type: mime }));
+  const url = URL.createObjectURL(new Blob([binaryContent ?? content], { type: mime }));
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
@@ -933,9 +944,9 @@ function HomeView({
             }}
             disabled={working}
           >
-            {(["markdown", "json", "csv", "mermaid", "drawio"] as const).map((formatName) => (
+            {(["markdown", "json", "csv", "mermaid", "drawio", "llm-handoff"] as const).map((formatName) => (
               <option key={formatName} value={formatName}>
-                {formatName}
+                {formatName === "llm-handoff" ? "LLM handoff (ZIP)" : formatName}
               </option>
             ))}
           </select>
@@ -2266,7 +2277,8 @@ function defaultExportPath(format: ExportFormat): string {
     json: "json",
     csv: "csv",
     mermaid: "mmd",
-    drawio: "drawio"
+    drawio: "drawio",
+    "llm-handoff": "zip"
   };
   return `exports/opsmineflow-export.${extensionByFormat[format]}`;
 }

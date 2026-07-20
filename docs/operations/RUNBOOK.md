@@ -50,12 +50,16 @@ Automation review states are stored in the local SQLite database and included in
 ### 7. Export
 
 1. Open **Home > Exports**.
-2. Choose Markdown, JSON, CSV, Mermaid, or draw.io.
+2. Choose Markdown, JSON, CSV, Mermaid, draw.io, or **LLM handoff (ZIP)**.
 3. Choose **Preview**.
 4. Review masked fields, confidential flags, and the privacy warning.
 5. Choose **Save** and select the destination in Finder.
 
 Treat export preview as the final manual checkpoint before sharing output with a client.
+
+### Manual Mermaid handoff
+
+`LLM handoff (ZIP)` creates a versioned, deterministic local ZIP for manual sharing with an external LLM. It contains aggregate process evidence, public JSON Schemas, and fixed Mermaid-writing constraints; it does not make any LLM, cloud, or network call. The export omits raw event rows, IDs, URLs, titles, aliases, metadata, and review notes. Activity labels and app names remain event-derived data and must be reviewed before sharing. See [the sample contract](../samples/LLM_MERMAID_HANDOFF.md).
 
 ### 8. Delete Local Analysis Data
 

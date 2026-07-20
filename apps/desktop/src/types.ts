@@ -295,7 +295,7 @@ export type ImportHistoryEntry = {
   imported_at: string;
 };
 
-export type ExportFormat = "markdown" | "json" | "csv" | "mermaid" | "drawio";
+export type ExportFormat = "markdown" | "json" | "csv" | "mermaid" | "drawio" | "llm-handoff";
 
 export type ExportPreview = {
   format: ExportFormat;

@@ -26,6 +26,7 @@ from .app import (
     create_public_health,
     create_runtime_health,
     create_summary,
+    export_llm_handoff_payload,
     import_activitywatch_into_store,
     import_path_into_store,
     run_diagnostic_checks,
@@ -297,6 +298,9 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             if path == "/export/json":
                 artifact = create_export_artifact("json")
                 self._send_json({"json": artifact["content"]})
+                return
+            if path == "/export/llm-handoff":
+                self._send_json(export_llm_handoff_payload())
                 return
             if path == "/export/preview":
                 artifact = create_export_artifact(str(payload.get("format") or ""))
