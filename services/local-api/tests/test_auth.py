@@ -14,6 +14,7 @@ fastapi_app = api_app_module.app
 from opsmineflow_api.auth import API_SESSION_HEADER, DeleteChallengeStore, LocalApiPolicy, RequestRejected
 from opsmineflow_api.server import LocalApiHandler
 from opsmineflow_api.server import _start_parent_watchdog
+from opsmineflow_api.storage import StorageCommitError
 
 
 class LocalApiPolicyTests(unittest.TestCase):
@@ -173,8 +174,32 @@ class HandwrittenServerPolicyTests(unittest.TestCase):
 
         self.assertEqual(status, 403)
         self.assertEqual(rejected["error"], "delete challenge is invalid or expired")
-        stop_recording.assert_called_once()
+        stop_recording.assert_called_once_with(default_store.return_value, record_import=False)
         default_store.return_value.clear.assert_called_once()
+
+    def test_storage_commit_failure_has_a_stable_handwritten_http_contract(self) -> None:
+        headers = {API_SESSION_HEADER: "b" * 64, "Content-Type": "application/json"}
+        with patch("opsmineflow_api.server.default_store") as default_store:
+            default_store.return_value.set_label.side_effect = StorageCommitError("storage_busy")
+            status, payload = self._request(
+                "POST",
+                "/events/label",
+                {"event_id": "event-1", "label": "Reviewed"},
+                headers,
+            )
+
+        self.assertEqual(status, 503)
+        self.assertEqual(
+            payload,
+            {
+                "error": {
+                    "code": "storage_busy",
+                    "message": "Local storage could not be updated. No changes were applied.",
+                    "retryable": True,
+                    "recovery_action": "retry",
+                }
+            },
+        )
 
 
 class ParentWatchdogTests(unittest.TestCase):
@@ -226,6 +251,38 @@ class FastApiPolicyTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertEqual(json.loads(response.body), {"error": "local API authorization failed"})
+
+    def test_fastapi_storage_commit_failure_has_the_same_stable_contract(self) -> None:
+        if fastapi_app is None:
+            self.skipTest("FastAPI is unavailable")
+        from starlette.requests import Request
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/events/label",
+                "headers": [(b"host", b"127.0.0.1:8765")],
+                "scheme": "http",
+                "query_string": b"",
+                "server": ("127.0.0.1", 8765),
+                "client": ("127.0.0.1", 1),
+            }
+        )
+        response = asyncio.run(api_app_module.storage_commit_error(request, StorageCommitError("storage_busy")))
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            json.loads(response.body),
+            {
+                "error": {
+                    "code": "storage_busy",
+                    "message": "Local storage could not be updated. No changes were applied.",
+                    "retryable": True,
+                    "recovery_action": "retry",
+                }
+            },
+        )
 
 
 if __name__ == "__main__":

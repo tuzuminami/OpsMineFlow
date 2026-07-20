@@ -40,7 +40,7 @@ from .auth import (
     RequestRejected,
 )
 from .recording import recording_manager
-from .storage import default_store
+from .storage import StorageCommitError, default_store
 
 HOST = os.environ.get("OPSMINEFLOW_API_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OPSMINEFLOW_API_PORT", "8765"))
@@ -110,8 +110,12 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             if not DELETE_CHALLENGES.consume(self.headers.get(DELETE_CHALLENGE_HEADER, "")):
                 self._send_json({"error": "delete challenge is invalid or expired"}, status=403)
                 return
-            recording_manager.stop(default_store())
-            default_store().clear()
+            try:
+                recording_manager.stop(default_store(), record_import=False)
+                default_store().clear()
+            except StorageCommitError as exc:
+                self._send_json({"error": exc.to_api_dict()}, status=503)
+                return
             self._send_json({"deleted": True})
             return
         try:
@@ -343,6 +347,9 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 return
         except FileNotFoundError as exc:
             self._send_json({"error": str(exc)}, status=404)
+            return
+        except StorageCommitError as exc:
+            self._send_json({"error": exc.to_api_dict()}, status=503)
             return
         except (ValueError, RuntimeError) as exc:
             self._send_json({"error": str(exc)}, status=400)

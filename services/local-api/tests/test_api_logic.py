@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 from io import BytesIO
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -35,12 +36,301 @@ from opsmineflow_api.auth import LocalApiPolicy
 from opsmineflow_api.llm_handoff import public_json_schemas, validate_handoff_json
 from opsmineflow_api.recording import RecordingManager, _recording_agent_environment, native_event_from_payload
 from opsmineflow_api.server import LocalApiHandler
-from opsmineflow_api.storage import EventStore
+from opsmineflow_api.storage import EventStore, StorageCommitError
 from opsmineflow_mining import load_events_from_csv, load_events_from_json
 from opsmineflow_mining.analysis import prepare_analysis
 
 
 class ApiLogicTests(unittest.TestCase):
+    def test_every_storage_mutation_keeps_memory_database_and_analysis_at_the_old_snapshot_on_commit_failure(self) -> None:
+        source_events = load_events_from_csv("data/sample/sample_events.csv")
+
+        def fail_before_commit(_point: str) -> None:
+            raise sqlite3.OperationalError("database is locked at /private/local-data")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for operation_name in (
+                "replace",
+                "append",
+                "label",
+                "activity",
+                "quality_review",
+                "case_correlation",
+                "exclude",
+                "split",
+                "merge",
+                "settings",
+                "automation_review",
+                "import_history",
+                "clear",
+            ):
+                with self.subTest(operation=operation_name):
+                    db_path = Path(temp_dir) / f"{operation_name}.sqlite3"
+                    store = EventStore(events=source_events, db_path=db_path)
+                    store.set_label(source_events[0].event_id, "Reviewed")
+                    store.set_automation_review("社内確認", "adopted", "Seed review")
+                    store.record_import("seed", "seed.csv", len(source_events))
+                    before_state = _store_state(store)
+                    before_receipt = create_api_snapshot(store)["analysis_receipt"]
+                    store.mutation_fault_injector = fail_before_commit
+
+                    with self.assertRaises(StorageCommitError) as raised:
+                        if operation_name == "replace":
+                            store.replace(source_events[:2], import_source="csv", import_path="replacement.csv")
+                        elif operation_name == "append":
+                            store.append(
+                                [replace(source_events[0], event_id="fault-append", source_event_id="fault-append")],
+                                import_source="activitywatch_local_append",
+                                import_path="http://127.0.0.1:5600",
+                            )
+                        elif operation_name == "label":
+                            store.set_label(source_events[1].event_id, "Changed")
+                        elif operation_name == "activity":
+                            store.update_event_activity(source_events[0].event_id, "Changed activity")
+                        elif operation_name == "quality_review":
+                            store.set_event_quality_review(source_events[0].event_id, "unreviewed")
+                        elif operation_name == "case_correlation":
+                            store.update_event_case_correlation(source_events[0].event_id, "CASE-CORRECTED", "Verified source record")
+                        elif operation_name == "exclude":
+                            store.exclude_event(source_events[0].event_id)
+                        elif operation_name == "split":
+                            store.split_event(source_events[0].event_id, 10)
+                        elif operation_name == "merge":
+                            store.merge_adjacent_events(source_events[0].event_id, source_events[1].event_id)
+                        elif operation_name == "settings":
+                            store.update_settings({"excluded_apps": [source_events[0].app_name]})
+                        elif operation_name == "automation_review":
+                            store.set_automation_review("社内確認", "rejected", "Changed review")
+                        elif operation_name == "import_history":
+                            store.record_import("csv", "another.csv", 1)
+                        else:
+                            store.clear()
+
+                    self.assertEqual(raised.exception.code, "storage_busy", operation_name)
+                    self.assertNotIn("/private/local-data", str(raised.exception))
+                    self.assertEqual(_store_state(store), before_state)
+                    self.assertEqual(create_api_snapshot(store)["analysis_receipt"], before_receipt)
+                    reopened = EventStore(db_path=db_path)
+                    self.assertEqual(_store_state(reopened), before_state)
+
+    def test_settings_view_cannot_create_an_in_memory_only_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            store = EventStore(db_path=db_path)
+            settings_view = store.get_settings()
+            settings_view["excluded_apps"].append("Safari")
+
+            self.assertEqual(store.get_settings()["excluded_apps"], [])
+            self.assertEqual(EventStore(db_path=db_path).get_settings()["excluded_apps"], [])
+
+    def test_import_retry_does_not_duplicate_history_or_events(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            store = EventStore(db_path=db_path)
+            store.replace(events, import_source="csv", import_path="sample_events.csv")
+            store.replace(events, import_source="csv", import_path="sample_events.csv")
+            self.assertEqual(len(store.events), len(events))
+            self.assertEqual(len(store.list_import_history()), 1)
+
+            store.clear()
+            self.assertEqual(
+                store.append(
+                    events[:2],
+                    import_source="activitywatch_local_append",
+                    import_path="http://127.0.0.1:5600",
+                ),
+                2,
+            )
+            self.assertEqual(
+                store.append(
+                    events[:2],
+                    import_source="activitywatch_local_append",
+                    import_path="http://127.0.0.1:5600",
+                ),
+                0,
+            )
+            reopened = EventStore(db_path=db_path)
+
+        self.assertEqual(len(reopened.events), 2)
+        self.assertEqual(len(reopened.list_import_history()), 1)
+
+    def test_reparsed_file_and_refetched_activitywatch_retry_do_not_duplicate_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = EventStore(db_path=Path(temp_dir) / "opsmineflow.sqlite3")
+            import_path_into_store("csv", "data/sample/sample_events.csv", store=store)
+            import_path_into_store("csv", "data/sample/sample_events.csv", store=store)
+            self.assertEqual(len(store.list_import_history()), 1)
+
+            activitywatch_events = load_events_from_csv("data/sample/sample_events.csv")[:2]
+            refreshed_events = [replace(event, created_at="2030-01-01T00:00:00+00:00") for event in activitywatch_events]
+            store.clear()
+            store.replace(
+                activitywatch_events,
+                import_source="activitywatch_local",
+                import_path="http://127.0.0.1:5600",
+            )
+            store.replace(
+                refreshed_events,
+                import_source="activitywatch_local",
+                import_path="http://127.0.0.1:5600",
+            )
+
+        self.assertEqual(len(store.list_import_history()), 1)
+
+    def test_uncertain_commit_reloads_durable_state_and_requires_a_refresh(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            store = EventStore(events=events, db_path=db_path)
+
+            def fail_after_commit(point: str) -> None:
+                if point == "after_commit":
+                    raise OSError("late storage acknowledgement failure")
+
+            store.mutation_fault_injector = fail_after_commit
+            with self.assertRaises(StorageCommitError) as raised:
+                store.set_label(events[0].event_id, "Reviewed")
+
+            self.assertEqual(raised.exception.code, "storage_commit_indeterminate")
+            self.assertFalse(raised.exception.retryable)
+            self.assertEqual(raised.exception.recovery_action, "refresh_data")
+            self.assertEqual(store.manual_labels[events[0].event_id], "Reviewed")
+            self.assertEqual(EventStore(db_path=db_path).manual_labels[events[0].event_id], "Reviewed")
+            store.mutation_fault_injector = None
+            store.set_label(events[1].event_id, "Verified")
+
+        self.assertEqual(store.manual_labels[events[1].event_id], "Verified")
+
+    def test_commit_response_loss_reloads_the_durable_snapshot(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+
+        class CommitThenRaiseConnection:
+            def __init__(self, connection: sqlite3.Connection) -> None:
+                self.connection = connection
+
+            def execute(self, statement: str, *args):
+                cursor = self.connection.execute(statement, *args)
+                if statement == "COMMIT":
+                    raise sqlite3.OperationalError("commit response was lost")
+                return cursor
+
+            def __getattr__(self, name: str):
+                return getattr(self.connection, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.connection.close()
+                return False
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            store = EventStore(events=events, db_path=db_path)
+            original_connect = store._connect
+            with patch.object(store, "_connect", side_effect=lambda: CommitThenRaiseConnection(original_connect())):
+                with self.assertRaises(StorageCommitError) as raised:
+                    store.set_label(events[0].event_id, "Reviewed")
+
+            self.assertEqual(raised.exception.code, "storage_commit_indeterminate")
+            self.assertEqual(store.manual_labels[events[0].event_id], "Reviewed")
+            self.assertEqual(EventStore(db_path=db_path).manual_labels[events[0].event_id], "Reviewed")
+
+    def test_busy_commit_with_a_confirmed_rollback_remains_retryable(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+
+        class BusyCommitConnection:
+            def __init__(self, connection: sqlite3.Connection) -> None:
+                self.connection = connection
+
+            def execute(self, statement: str, *args):
+                if statement == "COMMIT":
+                    raise sqlite3.OperationalError("database is locked")
+                return self.connection.execute(statement, *args)
+
+            def __getattr__(self, name: str):
+                return getattr(self.connection, name)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            store = EventStore(events=events, db_path=db_path)
+            original_connect = store._connect
+            with patch.object(store, "_connect", side_effect=lambda: BusyCommitConnection(original_connect())):
+                with self.assertRaises(StorageCommitError) as raised:
+                    store.set_label(events[0].event_id, "Reviewed")
+
+            self.assertEqual(raised.exception.code, "storage_busy")
+            self.assertTrue(raised.exception.retryable)
+            self.assertNotIn(events[0].event_id, store.manual_labels)
+            self.assertNotIn(events[0].event_id, EventStore(db_path=db_path).manual_labels)
+
+    def test_rollback_and_close_failure_blocks_writes_without_leaking_the_driver_error(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+
+        class RollbackAndCloseFailureConnection:
+            def __init__(self, connection: sqlite3.Connection) -> None:
+                self.connection = connection
+
+            def execute(self, statement: str, *args):
+                if statement == "ROLLBACK":
+                    raise sqlite3.OperationalError("rollback transport failed")
+                return self.connection.execute(statement, *args)
+
+            def close(self) -> None:
+                raise sqlite3.OperationalError("close transport failed")
+
+            def __getattr__(self, name: str):
+                return getattr(self.connection, name)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            store = EventStore(events=events, db_path=db_path)
+            original_connect = store._connect
+            failed_connection = RollbackAndCloseFailureConnection(original_connect())
+            connections = iter((failed_connection, original_connect()))
+
+            def fail_before_commit(point: str) -> None:
+                if point == "before_commit":
+                    raise sqlite3.IntegrityError("constraint failed")
+
+            store.mutation_fault_injector = fail_before_commit
+            with patch.object(store, "_connect", side_effect=lambda: next(connections)):
+                with self.assertRaises(StorageCommitError) as raised:
+                    store.set_label(events[0].event_id, "Reviewed")
+
+            self.assertEqual(raised.exception.code, "storage_recovery_required")
+            self.assertNotIn("constraint failed", str(raised.exception))
+            with self.assertRaises(StorageCommitError) as blocked:
+                store.set_label(events[1].event_id, "Verified")
+
+            failed_connection.connection.execute("ROLLBACK")
+            failed_connection.connection.close()
+            reopened = EventStore(db_path=db_path)
+
+        self.assertEqual(blocked.exception.code, "storage_recovery_required")
+        self.assertNotIn(events[0].event_id, reopened.manual_labels)
+
+    def test_unreadable_state_after_an_uncertain_commit_blocks_further_writes(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = EventStore(events=events, db_path=Path(temp_dir) / "opsmineflow.sqlite3")
+
+            def fail_after_commit(point: str) -> None:
+                if point == "after_commit":
+                    raise OSError("late storage acknowledgement failure")
+
+            store.mutation_fault_injector = fail_after_commit
+            with patch.object(store, "_load", side_effect=sqlite3.DatabaseError("database is malformed")):
+                with self.assertRaises(StorageCommitError) as raised:
+                    store.set_label(events[0].event_id, "Reviewed")
+
+            self.assertEqual(raised.exception.code, "storage_recovery_required")
+            with self.assertRaises(StorageCommitError) as blocked:
+                store.set_label(events[1].event_id, "Verified")
+
+        self.assertEqual(blocked.exception.code, "storage_recovery_required")
+
     def test_analysis_cache_reuses_concurrent_snapshot_and_invalidates_after_mutation(self) -> None:
         store = EventStore(events=load_events_from_csv("data/sample/sample_events.csv"))
         started = threading.Event()
@@ -72,6 +362,41 @@ class ApiLogicTests(unittest.TestCase):
             create_summary(store)
 
         self.assertEqual(calls, 2)
+
+    def test_analysis_snapshot_is_not_reused_after_a_concurrent_committed_mutation(self) -> None:
+        store = EventStore(events=load_events_from_csv("data/sample/sample_events.csv"))
+        started = threading.Event()
+        release = threading.Event()
+        captured_event_ids: list[tuple[str, ...]] = []
+
+        def delayed_prepare(events, config):
+            captured_event_ids.append(tuple(event.event_id for event in events))
+            started.set()
+            self.assertTrue(release.wait(timeout=2))
+            return prepare_analysis(events, config)
+
+        with patch("opsmineflow_api.app.prepare_analysis", side_effect=delayed_prepare):
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                old_summary_future = executor.submit(create_summary, store)
+                self.assertTrue(started.wait(timeout=2))
+                mutation_future = executor.submit(
+                    store.update_event_activity,
+                    store.events[0].event_id,
+                    "Corrected activity",
+                )
+                release.set()
+                old_summary = old_summary_future.result(timeout=2)
+                mutation_future.result(timeout=2)
+                current_summary = create_summary(store)
+
+        self.assertEqual(captured_event_ids[0], tuple(event.event_id for event in load_events_from_csv("data/sample/sample_events.csv")))
+        self.assertNotEqual(
+            old_summary["analysis_receipt"]["scope_fingerprint"],
+            current_summary["analysis_receipt"]["scope_fingerprint"],
+        )
+        self.assertEqual({key[0] for key in store._analysis_cache}, {store.snapshot().generation})
 
     def test_native_recording_event_appends_and_persists(self) -> None:
         session = {
@@ -123,6 +448,108 @@ class ApiLogicTests(unittest.TestCase):
 
         self.assertEqual(store.append([native_event_from_payload(payload, session)]), 0)
         self.assertEqual(store.events, [])
+
+    def test_recording_storage_failure_keeps_the_sequence_retryable(self) -> None:
+        manager = RecordingManager()
+        manager._token = "recording-retry-token"
+        manager._session = {
+            "active": True,
+            "session_id": "rec-retry",
+            "case_id": "CASE-RETRY",
+            "activity_label": "Work",
+            "recorded_events": 0,
+            "current_app": "",
+        }
+        payload = {
+            "session_id": "rec-retry",
+            "sequence": 1,
+            "app_name": "Safari",
+            "app_bundle_id": "com.apple.Safari",
+            "timestamp_start": "2026-06-21T01:00:00+00:00",
+            "timestamp_end": "2026-06-21T01:00:10+00:00",
+            "duration_seconds": 10,
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = EventStore(db_path=Path(temp_dir) / "opsmineflow.sqlite3")
+
+            def fail_before_commit(_point: str) -> None:
+                raise sqlite3.OperationalError("database is locked")
+
+            store.mutation_fault_injector = fail_before_commit
+            with self.assertRaises(StorageCommitError):
+                manager.ingest(manager._token, payload, store)
+
+            self.assertNotIn(1, manager._seen_sequences)
+            self.assertEqual(manager._recent_ingest_times, [])
+            self.assertEqual(manager._session["recorded_events"], 0)
+            store.mutation_fault_injector = None
+            retried = manager.ingest(manager._token, payload, store)
+
+        self.assertEqual(retried["appended"], 1)
+        self.assertEqual(len(store.events), 1)
+        self.assertEqual(manager._session["recorded_events"], 1)
+
+    def test_recording_stop_retries_a_failed_audit_history_commit(self) -> None:
+        manager = RecordingManager()
+        manager._session = {
+            "active": True,
+            "capture_ended": False,
+            "session_id": "rec-stop-retry",
+            "case_id": "CASE-STOP-RETRY",
+            "activity_label": "Work",
+            "recorded_events": 2,
+            "current_app": "Safari",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = EventStore(db_path=Path(temp_dir) / "opsmineflow.sqlite3")
+
+            def fail_before_commit(_point: str) -> None:
+                raise sqlite3.OperationalError("database is locked")
+
+            store.mutation_fault_injector = fail_before_commit
+            with self.assertRaises(StorageCommitError):
+                manager.stop(store)
+
+            self.assertTrue(manager.status()["active"])
+            self.assertTrue(manager.status()["capture_ended"])
+            self.assertEqual(store.list_import_history(), [])
+            store.mutation_fault_injector = None
+            stopped = manager.stop(store)
+
+        self.assertFalse(stopped["active"])
+        self.assertEqual(len(store.list_import_history()), 1)
+        self.assertEqual(store.list_import_history()[0]["source"], "native_recording")
+
+    def test_recording_stop_finalizes_without_duplicate_history_after_an_uncertain_commit(self) -> None:
+        manager = RecordingManager()
+        manager._session = {
+            "active": True,
+            "capture_ended": False,
+            "session_id": "rec-stop-indeterminate",
+            "case_id": "CASE-STOP-INDETERMINATE",
+            "activity_label": "Work",
+            "recorded_events": 2,
+            "current_app": "Safari",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = EventStore(db_path=Path(temp_dir) / "opsmineflow.sqlite3")
+
+            def fail_after_commit(point: str) -> None:
+                if point == "after_commit":
+                    raise OSError("late storage acknowledgement failure")
+
+            store.mutation_fault_injector = fail_after_commit
+            with self.assertRaises(StorageCommitError) as raised:
+                manager.stop(store)
+
+            self.assertEqual(raised.exception.code, "storage_commit_indeterminate")
+            self.assertEqual(len(store.list_import_history()), 1)
+            store.mutation_fault_injector = None
+            stopped = manager.stop(store)
+
+        self.assertFalse(stopped["active"])
+        self.assertEqual(len(store.list_import_history()), 1)
 
     def test_recording_manager_requires_consent_and_stops_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1131,6 +1558,18 @@ class ApiLogicTests(unittest.TestCase):
         self.assertIn("## Automation Priority Portfolio", snapshot["markdown_report"])
         self.assertIn("Slack運用の例外確認が必要", snapshot["markdown_report"])
         self.assertIn("社内確認: review on_hold", snapshot["markdown_report"])
+
+
+def _store_state(store: EventStore) -> dict[str, object]:
+    return {
+        "events": [event.to_dict() for event in store.events],
+        "manual_labels": dict(store.manual_labels),
+        "settings": store.get_settings(),
+        "metadata": dict(store.metadata),
+        "import_history": store.list_import_history(),
+        "automation_reviews": dict(store.automation_reviews),
+        "automation_review_notes": dict(store.automation_review_notes),
+    }
 
 
 if __name__ == "__main__":

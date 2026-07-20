@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -68,7 +69,7 @@ from .activitywatch import import_activitywatch_local
 from .child_process import sanitized_subprocess_environment
 from .llm_handoff import build_handoff_bundle
 from .recording import recording_manager
-from .storage import EventStore, default_store
+from .storage import EventStore, StorageCommitError, StoreSnapshot, default_store
 
 try:
     from fastapi import FastAPI, Header, HTTPException, Request
@@ -227,13 +228,17 @@ LOCAL_API_POLICY = local_api_policy()
 DELETE_CHALLENGES = DeleteChallengeStore()
 
 
-def _analysis_for_store(store: EventStore):
-    config = _mining_config_for_store(store)
-    return store.get_or_create_analysis(config, lambda: prepare_analysis(tuple(store.events), config))
+def _analysis_for_store(store: EventStore, snapshot: StoreSnapshot | None = None):
+    active_snapshot = snapshot or store.snapshot()
+    config = _mining_config_for_settings(active_snapshot.settings)
+    return store.get_or_create_analysis(
+        active_snapshot.generation,
+        config,
+        lambda: prepare_analysis(active_snapshot.events, config),
+    )
 
 
-def _mining_config_for_store(store: EventStore) -> MiningConfig:
-    settings = store.get_settings()
+def _mining_config_for_settings(settings: Mapping[str, object]) -> MiningConfig:
     filter_context = (
         ("excluded_apps", tuple(sorted(str(value).casefold() for value in settings.get("excluded_apps", []) if str(value).strip()))),
         ("excluded_domains", tuple(sorted(str(value).casefold() for value in settings.get("excluded_domains", []) if str(value).strip()))),
@@ -244,21 +249,25 @@ def _mining_config_for_store(store: EventStore) -> MiningConfig:
     )
 
 
-def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
+def create_api_snapshot(
+    store: EventStore | None = None,
+    snapshot: StoreSnapshot | None = None,
+) -> dict[str, Any]:
     active_store = store or default_store()
-    events = active_store.events
-    settings = active_store.get_settings()
-    analysis = _analysis_for_store(active_store)
+    store_snapshot = snapshot or active_store.snapshot()
+    events = store_snapshot.events
+    settings = store_snapshot.settings
+    analysis = _analysis_for_store(active_store, store_snapshot)
     metrics = calculate_duration_metrics(analysis)
     process_map = build_directly_follows_graph(analysis)
     store_diagnostics = active_store.diagnostics()
     automation_candidates = apply_automation_reviews(
-        score_automation_candidates(analysis), active_store, list(analysis.events)
+        score_automation_candidates(analysis), store_snapshot, list(analysis.events)
     )
     health = {
         **create_public_health(),
         "storage_mode": store_diagnostics["storage_mode"],
-        "event_count": store_diagnostics["event_count"],
+        "event_count": len(events),
     }
     return {
         "health": health,
@@ -267,7 +276,7 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
         "analysis_receipt": analysis.receipt.to_dict(),
         "app_switching": detect_app_switches(analysis),
         "automation_candidates": automation_candidates,
-        "event_quality": create_event_quality_report(active_store),
+        "event_quality": create_event_quality_report(active_store, store_snapshot, analysis),
         "process_map": process_map,
         "variants": analyze_variants(analysis),
         "bottlenecks": detect_bottlenecks(analysis),
@@ -287,11 +296,12 @@ def create_event_page(
     if limit < 1 or limit > MAX_EVENT_PAGE_SIZE:
         raise ValueError(f"Event page size must be between 1 and {MAX_EVENT_PAGE_SIZE}.")
     active_store = store or default_store()
-    settings = active_store.get_settings()
-    total = len(active_store.events)
+    store_snapshot = active_store.snapshot()
+    settings = store_snapshot.settings
+    total = len(store_snapshot.events)
     page: list[dict[str, object]] = []
     response_bytes = 0
-    for event in active_store.events[offset : offset + limit]:
+    for event in store_snapshot.events[offset : offset + limit]:
         record = event_to_api_dict(event, settings)
         record_bytes = len(json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         if page and response_bytes + record_bytes > MAX_EVENT_PAGE_RESPONSE_BYTES:
@@ -308,12 +318,14 @@ def create_event_page(
 
 
 def create_summary(store: EventStore | None = None) -> dict[str, Any]:
-    analysis = _analysis_for_store(store or default_store())
+    active_store = store or default_store()
+    analysis = _analysis_for_store(active_store, active_store.snapshot())
     return {**metrics_to_dict(calculate_duration_metrics(analysis)), "analysis_receipt": analysis.receipt.to_dict()}
 
 
 def create_app_switching(store: EventStore | None = None) -> dict[str, Any]:
-    analysis = _analysis_for_store(store or default_store())
+    active_store = store or default_store()
+    analysis = _analysis_for_store(active_store, active_store.snapshot())
     switching = detect_app_switches(analysis)
     return {
         "transition_ranking": list(switching["transition_ranking"])[:MAX_ANALYTICS_LIST_ITEMS],
@@ -324,9 +336,10 @@ def create_app_switching(store: EventStore | None = None) -> dict[str, Any]:
 
 def create_automation_candidates(store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
-    analysis = _analysis_for_store(active_store)
+    store_snapshot = active_store.snapshot()
+    analysis = _analysis_for_store(active_store, store_snapshot)
     candidates = apply_automation_reviews(
-        score_automation_candidates(analysis), active_store, list(analysis.events)
+        score_automation_candidates(analysis), store_snapshot, list(analysis.events)
     )
     return {
         "candidates": candidates[:MAX_ANALYTICS_LIST_ITEMS],
@@ -335,7 +348,8 @@ def create_automation_candidates(store: EventStore | None = None) -> dict[str, A
 
 
 def create_process_map(store: EventStore | None = None) -> dict[str, Any]:
-    graph = build_directly_follows_graph(_analysis_for_store(store or default_store()))
+    active_store = store or default_store()
+    graph = build_directly_follows_graph(_analysis_for_store(active_store, active_store.snapshot()))
     nodes = list(graph["nodes"])[:MAX_PROCESS_MAP_NODES]
     visible_activities = {str(node["activity"]) for node in nodes}
     edges = [
@@ -362,8 +376,12 @@ def create_process_map(store: EventStore | None = None) -> dict[str, Any]:
 
 def create_markdown_report(store: EventStore | None = None) -> str:
     active_store = store or default_store()
-    candidates = create_automation_candidates(active_store)["candidates"]
-    return append_automation_review_section(export_markdown_report(_analysis_for_store(active_store)), candidates)
+    store_snapshot = active_store.snapshot()
+    analysis = _analysis_for_store(active_store, store_snapshot)
+    candidates = apply_automation_reviews(
+        score_automation_candidates(analysis), store_snapshot, list(analysis.events)
+    )
+    return append_automation_review_section(export_markdown_report(analysis), candidates)
 def create_public_health() -> dict[str, Any]:
     """Return the unauthenticated, constant-time local readiness payload."""
 
@@ -398,7 +416,7 @@ def _valid_runtime_probe_challenge(challenge: str) -> bool:
 
 def apply_automation_reviews(
     candidates: list[dict[str, object]],
-    store: EventStore,
+    snapshot: StoreSnapshot,
     events: list[Any],
 ) -> list[dict[str, object]]:
     activity_profiles = _automation_activity_profiles(events)
@@ -407,8 +425,8 @@ def apply_automation_reviews(
         item = dict(candidate)
         activity = str(item.get("activity", ""))
         item.update(_automation_portfolio_fields(item, activity_profiles.get(activity, {})))
-        item["review_status"] = store.automation_reviews.get(activity, "unreviewed")
-        item["review_note"] = store.automation_review_notes.get(activity, "")
+        item["review_status"] = snapshot.automation_reviews.get(activity, "unreviewed")
+        item["review_note"] = snapshot.automation_review_notes.get(activity, "")
         reviewed.append(item)
     return reviewed
 
@@ -560,12 +578,17 @@ def append_automation_review_section(markdown: str, candidates: list[dict[str, o
     return "\n".join(lines) + "\n"
 
 
-def create_event_quality_report(store: EventStore | None = None) -> dict[str, Any]:
+def create_event_quality_report(
+    store: EventStore | None = None,
+    snapshot: StoreSnapshot | None = None,
+    analysis: Any | None = None,
+) -> dict[str, Any]:
     active_store = store or default_store()
-    analysis = _analysis_for_store(active_store)
+    store_snapshot = snapshot or active_store.snapshot()
+    active_analysis = analysis or _analysis_for_store(active_store, store_snapshot)
     items: list[dict[str, Any]] = []
     items_by_event_id: dict[str, dict[str, Any]] = {}
-    events_by_id = {event.event_id: event for event in active_store.events}
+    events_by_id = {event.event_id: event for event in store_snapshot.events}
     issue_totals = {
         "missing_fields": 0,
         "invalid_time": 0,
@@ -577,7 +600,7 @@ def create_event_quality_report(store: EventStore | None = None) -> dict[str, An
         "case_correlation_low_confidence": 0,
         "duration_interval_mismatch": 0,
     }
-    for event in active_store.events:
+    for event in store_snapshot.events:
         status = _event_quality_status(event)
         issues = _event_quality_issues(event)
         for issue in issues:
@@ -589,7 +612,7 @@ def create_event_quality_report(store: EventStore | None = None) -> dict[str, An
             items.append(item)
             items_by_event_id[event.event_id] = item
 
-    for exclusion in analysis.exclusions:
+    for exclusion in active_analysis.exclusions:
         event = events_by_id.get(exclusion.event_id)
         if event is None:
             continue
@@ -611,23 +634,23 @@ def create_event_quality_report(store: EventStore | None = None) -> dict[str, An
             item["quality_review_status"] = "requires_correction"
             item["recommended_action"] = _quality_recommended_action(item["issues"])
 
-    excluded_event_ids = {exclusion.event_id for exclusion in analysis.exclusions}
+    excluded_event_ids = {exclusion.event_id for exclusion in active_analysis.exclusions}
     approved_count = sum(
         1
-        for event in active_store.events
+        for event in store_snapshot.events
         if _event_quality_status(event) == "approved" and event.event_id not in excluded_event_ids
     )
     unresolved_items = [item for item in items if item["quality_review_status"] != "approved"]
     return {
         "summary": {
-            "total_events": len(active_store.events),
+            "total_events": len(store_snapshot.events),
             "affected_event_count": len(unresolved_items),
             "issue_count": sum(len(item["issues"]) for item in unresolved_items),
             "approved_count": approved_count,
             **issue_totals,
         },
         "items": items,
-        "analysis_receipt": analysis.receipt.to_dict(),
+        "analysis_receipt": active_analysis.receipt.to_dict(),
     }
 
 
@@ -979,17 +1002,21 @@ def import_activitywatch_into_store(
     active_store = store or default_store()
     events = import_activitywatch_local(base_url)
     preview = _activitywatch_preview_payload(events, active_store, True, base_url)
-    existing_ids = {event.event_id for event in active_store.events}
-    importable_events = active_store._filter_events(list(events))
+    pre_import_snapshot = active_store.snapshot()
+    existing_ids = {event.event_id for event in pre_import_snapshot.events}
+    importable_events = active_store.filter_events(list(events), pre_import_snapshot)
 
     if normalized_mode == "replace":
         active_store.replace(events, import_source="activitywatch_local", import_path=base_url)
-        imported_events = len(active_store.events)
+        imported_events = len(active_store.snapshot().events)
         skipped_duplicates = 0
     else:
-        imported_events = active_store.append(events)
+        imported_events = active_store.append(
+            events,
+            import_source=f"activitywatch_local_{normalized_mode}",
+            import_path=base_url,
+        )
         skipped_duplicates = sum(1 for event in importable_events if event.event_id in existing_ids)
-        active_store.record_import(f"activitywatch_local_{normalized_mode}", base_url, imported_events)
 
     return {
         "imported_events": imported_events,
@@ -1015,8 +1042,9 @@ def _activitywatch_preview_payload(
     enabled: bool,
     base_url: str,
 ) -> dict[str, Any]:
-    filtered_events = store._filter_events(list(events))
-    existing_ids = {event.event_id for event in store.events}
+    store_snapshot = store.snapshot()
+    filtered_events = store.filter_events(list(events), store_snapshot)
+    existing_ids = {event.event_id for event in store_snapshot.events}
     duplicate_count = sum(1 for event in filtered_events if event.event_id in existing_ids)
     period_start, period_end = _event_period(events)
     return {
@@ -1070,12 +1098,13 @@ def _app_usage_seconds(events: list[StandardEvent]) -> dict[str, float]:
 
 def create_export_artifact(format_name: str, store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
+    store_snapshot = active_store.snapshot()
     if format_name == "llm-handoff":
         bundle = build_handoff_bundle(
-            active_store.events,
-            active_store.automation_reviews,
-            active_store.automation_review_notes,
-            config=_mining_config_for_store(active_store),
+            store_snapshot.events,
+            store_snapshot.automation_reviews,
+            store_snapshot.automation_review_notes,
+            config=_mining_config_for_settings(store_snapshot.settings),
         )
         content: str | bytes = bundle.content
         extension = "zip"
@@ -1086,7 +1115,7 @@ def create_export_artifact(format_name: str, store: EventStore | None = None) ->
             "not raw event rows; review it before sharing outside your organization."
         )
     else:
-        snapshot = create_api_snapshot(active_store)
+        snapshot = create_api_snapshot(active_store, store_snapshot)
         if format_name == "markdown":
             content = str(snapshot["markdown_report"])
             extension = "md"
@@ -1123,7 +1152,7 @@ def create_export_artifact(format_name: str, store: EventStore | None = None) ->
         "content": content,
         "byte_size": len(byte_content),
         "preview": preview,
-        "confidential_count": sum(1 for event in active_store.events if event.confidential_flag),
+        "confidential_count": sum(1 for event in store_snapshot.events if event.confidential_flag),
         "warning": warning,
     }
 
@@ -1268,8 +1297,9 @@ def json_dumps(payload: object) -> str:
 
 def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
-    diagnostics = active_store.diagnostics()
-    settings = active_store.get_settings()
+    store_snapshot = active_store.snapshot()
+    diagnostics = active_store.diagnostics(store_snapshot)
+    settings = store_snapshot.settings
     api_port = int(os.environ.get("OPSMINEFLOW_API_PORT", "8765"))
     webui_port = int(os.environ.get("OPSMINEFLOW_WEBUI_PORT", "5173"))
     activitywatch_enabled = bool(settings.get("activitywatch_enabled", False))
@@ -1468,6 +1498,11 @@ if FastAPI is not None:
             assert JSONResponse is not None
             return JSONResponse({"error": exc.message}, status_code=exc.status_code)
         return await call_next(request)
+
+    @app.exception_handler(StorageCommitError)
+    async def storage_commit_error(_request: Request, exc: StorageCommitError):
+        assert JSONResponse is not None
+        return JSONResponse({"error": exc.to_api_dict()}, status_code=503)
 else:
     app = None
 
@@ -1705,7 +1740,7 @@ if app is not None:
     def delete_data(x_opsmineflow_delete_challenge: str = Header(default="")) -> dict[str, Any]:
         if not DELETE_CHALLENGES.consume(x_opsmineflow_delete_challenge):
             raise _forbidden("delete challenge is invalid or expired")
-        recording_manager.stop(default_store())
+        recording_manager.stop(default_store(), record_import=False)
         default_store().clear()
         return {"deleted": True}
 
