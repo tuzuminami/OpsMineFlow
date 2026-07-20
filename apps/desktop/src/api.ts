@@ -73,6 +73,7 @@ const DEVELOPMENT_ROUTES: Record<string, { method: "GET" | "POST"; path: string 
   export_drawio: { method: "POST", path: "/export/drawio" },
   export_csv: { method: "POST", path: "/export/csv" },
   export_json: { method: "POST", path: "/export/json" },
+  export_llm_handoff: { method: "POST", path: "/export/llm-handoff" },
   export_preview: { method: "POST", path: "/export/preview" },
   export_save: { method: "POST", path: "/export/save" }
 };
@@ -299,6 +300,7 @@ export async function exportArtifact(format: ExportFormat) {
   if (format === "json") return postJson<{ json: string }>("export_json");
   if (format === "csv") return postJson<{ csv: string }>("export_csv");
   if (format === "mermaid") return postJson<{ mermaid: string }>("export_mermaid");
+  if (format === "llm-handoff") return postJson<{ filename: string; zip_base64: string }>("export_llm_handoff");
   return postJson<{ drawio: string }>("export_drawio");
 }
 

@@ -39,7 +39,7 @@ The project is licensed under Apache-2.0. Direct dependencies must be commercial
 - Bottleneck candidate detection
 - Repeated pattern and app-switching analysis
 - Automation candidate scoring
-- Markdown, JSON, CSV, Mermaid, SVG, and draw.io-oriented exports
+- Markdown, JSON, CSV, Mermaid, SVG, draw.io-oriented exports, and a manual Mermaid handoff ZIP
 
 ## Local Product Scope
 
@@ -120,7 +120,7 @@ CSV commonly uses `case_id`, `activity`, `timestamp_start`, `timestamp_end`, `us
 
 ### 6. Export Results
 
-Open **Home > Exports**, choose Markdown, JSON, CSV, Mermaid, or draw.io, and preview it. Review masking and confidential flags before choosing **Save to Path** or **Download**.
+Open **Home > Exports**, choose Markdown, JSON, CSV, Mermaid, draw.io, or **LLM handoff (ZIP)**, and preview it. Review masking and confidential flags before choosing **Save to Path** or **Download**. The handoff ZIP is a local, manual transfer artifact: it contains aggregate process evidence and a versioned schema so an external LLM can write Mermaid Markdown, but OpsMineFlow never connects to an LLM or sends the file. See [the handoff bundle example](docs/samples/LLM_MERMAID_HANDOFF.md).
 
 ### 7. Check or Remove Local Data
 

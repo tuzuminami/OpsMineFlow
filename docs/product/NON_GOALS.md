@@ -4,6 +4,9 @@
 
 LLM integration is not part of the local product and is not part of the near-term roadmap.
 
+A user-controlled local export that they manually share elsewhere is not an
+integration. It must not connect to, upload to, or accept results from an LLM.
+
 OpsMineFlow will not implement:
 
 - External LLM API integrations.

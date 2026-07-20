@@ -202,9 +202,12 @@ def _event_from_csv_row(row: dict[str, str], index: int, source: str) -> Standar
     end = _parse_datetime(end_value) if end_value else start
     duration = max((end - start).total_seconds(), 0.0)
     user_alias = row.get("user") or row.get("user_alias") or "unknown"
-    activity = row.get("activity") or row.get("activity_raw") or row.get("memo") or "Unlabeled activity"
+    memo = row.get("memo") or ""
+    activity = row.get("activity") or row.get("activity_raw") or memo or "Unlabeled activity"
     url = row.get("url") or ""
-    window_title = row.get("window_title") or row.get("memo") or activity
+    explicit_window_title = row.get("window_title") or ""
+    window_title = explicit_window_title or memo or activity
+    window_title_origin = "provided" if explicit_window_title else "memo" if memo else "activity_fallback"
     source_event_id = row.get("source_event_id") or str(index)
     case_id = row.get("case_id") or _fallback_case_id(url, activity, index)
     return _build_event(
@@ -222,7 +225,7 @@ def _event_from_csv_row(row: dict[str, str], index: int, source: str) -> Standar
         timestamp_end=end,
         duration_seconds=duration,
         idle_flag=_to_bool(row.get("idle_flag")),
-        metadata={"memo": row.get("memo") or ""},
+        metadata={"memo": memo, "opsmineflow_window_title_origin": window_title_origin},
     )
 
 
@@ -244,9 +247,12 @@ def _event_from_mapped_csv_row(
     duration = float(duration_value) if duration_value else 0.0
     end = _parse_mapped_datetime(end_value, date_format, timezone_name) if end_value else start + timedelta(seconds=duration)
     duration = max(float(duration_value) if duration_value else (end - start).total_seconds(), 0.0)
-    activity = value("activity") or value("memo") or "Unlabeled activity"
+    memo = value("memo")
+    activity = value("activity") or memo or "Unlabeled activity"
     url = value("url")
-    window_title = value("window_title") or value("memo") or activity
+    explicit_window_title = value("window_title")
+    window_title = explicit_window_title or memo or activity
+    window_title_origin = "provided" if explicit_window_title else "memo" if memo else "activity_fallback"
     source_event_id = value("source_event_id") or str(index)
     return _build_event(
         source=source,
@@ -264,7 +270,8 @@ def _event_from_mapped_csv_row(
         duration_seconds=duration,
         idle_flag=False,
         metadata={
-            "memo": value("memo"),
+            "memo": memo,
+            "opsmineflow_window_title_origin": window_title_origin,
             "csv_mapping": mapping,
             "date_format": date_format,
             "timezone": timezone_name,
@@ -280,15 +287,37 @@ def _event_from_generic_json(item: dict[str, Any], index: int, source: str) -> S
     duration = max(float(item.get("duration_seconds") or (end - start).total_seconds()), 0.0)
     data = item.get("data") if isinstance(item.get("data"), dict) else {}
     url = str(item.get("url") or data.get("url") or "")
-    activity = str(item.get("activity") or item.get("activity_raw") or data.get("title") or data.get("app") or "Unlabeled activity")
+    explicit_activity = _optional_json_string(item.get("activity"), "activity")
+    explicit_activity_raw = _optional_json_string(item.get("activity_raw"), "activity_raw")
+    data_title = _optional_json_string(data.get("title"), "data.title")
+    data_app = _optional_json_string(data.get("app"), "data.app")
+    top_level_app = _optional_json_string(item.get("app_name"), "app_name")
+    activity = explicit_activity or explicit_activity_raw or data_title or data_app or "Unlabeled activity"
+    allowed_metadata_paths: list[str] = []
+    if explicit_activity:
+        allowed_metadata_paths.append("activity")
+    elif explicit_activity_raw:
+        allowed_metadata_paths.append("activity_raw")
+    elif data_app:
+        allowed_metadata_paths.append("data.app")
+    if top_level_app:
+        allowed_metadata_paths.append("app_name")
+    elif data_app:
+        allowed_metadata_paths.append("data.app")
+    explicit_window_title = _optional_json_string(item.get("window_title"), "window_title") or data_title
+    metadata = {
+        **item,
+        "opsmineflow_handoff_allowed_metadata_paths": sorted(set(allowed_metadata_paths)),
+        "opsmineflow_window_title_origin": "provided" if explicit_window_title else "activity_fallback",
+    }
     return _build_event(
         source=source,
         source_event_id=str(item.get("source_event_id") or item.get("id") or index),
         case_id=str(item.get("case_id") or _fallback_case_id(url, activity, index)),
         user_alias=str(item.get("user") or item.get("user_alias") or "unknown"),
-        app_name=str(item.get("app_name") or data.get("app") or ""),
+        app_name=top_level_app or data_app,
         app_bundle_id=str(item.get("app_bundle_id") or data.get("app_bundle_id") or ""),
-        window_title=str(item.get("window_title") or data.get("title") or activity),
+        window_title=str(explicit_window_title or activity),
         url=url,
         activity_raw=activity,
         event_type=str(item.get("event_type") or "work_activity"),
@@ -296,7 +325,7 @@ def _event_from_generic_json(item: dict[str, Any], index: int, source: str) -> S
         timestamp_end=end,
         duration_seconds=duration,
         idle_flag=bool(item.get("idle_flag") or data.get("status") == "afk"),
-        metadata=item,
+        metadata=metadata,
     )
 
 
@@ -310,16 +339,20 @@ def _events_from_activitywatch_export(payload: dict[str, Any]) -> Iterable[Stand
             start = _parse_datetime(str(item.get("timestamp") or ""))
             duration = float(item.get("duration") or 0)
             end = start + timedelta(seconds=duration)
-            url = str(data.get("url") or "")
-            app_name = str(data.get("app") or data.get("browser") or "")
-            title = str(data.get("title") or data.get("url") or app_name or bucket_type)
+            url = _optional_json_string(data.get("url"), "ActivityWatch data.url")
+            data_app = _optional_json_string(data.get("app"), "ActivityWatch data.app")
+            data_browser = _optional_json_string(data.get("browser"), "ActivityWatch data.browser")
+            data_title = _optional_json_string(data.get("title"), "ActivityWatch data.title")
+            app_name = data_app or data_browser
+            title = data_title or url or app_name or bucket_type
+            allowed_metadata_paths = ["event.data.app"] if data_app else ["event.data.browser"] if data_browser else []
             yield _build_event(
                 source="activitywatch_export",
                 source_event_id=f"{bucket_id}:{item.get('id') or index}",
                 case_id=_fallback_case_id(url, title, index),
                 user_alias="activitywatch_user",
                 app_name=app_name,
-                app_bundle_id=str(data.get("app_bundle_id") or ""),
+                app_bundle_id=_optional_json_string(data.get("app_bundle_id"), "ActivityWatch data.app_bundle_id"),
                 window_title=title,
                 url=url,
                 activity_raw=title,
@@ -328,7 +361,11 @@ def _events_from_activitywatch_export(payload: dict[str, Any]) -> Iterable[Stand
                 timestamp_end=end,
                 duration_seconds=duration,
                 idle_flag=data.get("status") == "afk",
-                metadata={"bucket_id": bucket_id, "event": item},
+                metadata={
+                    "bucket_id": bucket_id,
+                    "event": item,
+                    "opsmineflow_handoff_allowed_metadata_paths": allowed_metadata_paths,
+                },
             )
             index += 1
 
@@ -403,6 +440,14 @@ def _build_event(
         metadata_json=metadata_json,
         created_at=created_at,
     )
+
+
+def _optional_json_string(value: object, field_name: str) -> str:
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"JSON field {field_name} must be a string when provided.")
+    return value
 
 
 def _validate_event_text_sizes(values: dict[str, str]) -> None:

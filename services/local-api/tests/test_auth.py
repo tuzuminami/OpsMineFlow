@@ -29,19 +29,23 @@ class LocalApiPolicyTests(unittest.TestCase):
         self.policy.authorize(method, path, headers, content_length)
 
     def test_protected_route_rejects_missing_wrong_and_recording_tokens(self) -> None:
-        headers = {"Host": "127.0.0.1:8765"}
-        for token in ("", "wrong", "recording-token"):
-            with self.subTest(token=token):
-                with self.assertRaises(RequestRejected) as rejected:
-                    self._authorize("GET", "/events", {**headers, API_SESSION_HEADER: token})
-                self.assertEqual(rejected.exception.status_code, 401)
+        for method, path in (("GET", "/events"), ("POST", "/export/llm-handoff")):
+            for token in ("", "wrong", "recording-token"):
+                with self.subTest(method=method, path=path, token=token):
+                    headers = {"Host": "127.0.0.1:8765", API_SESSION_HEADER: token}
+                    if method == "POST":
+                        headers["Content-Type"] = "application/json"
+                    with self.assertRaises(RequestRejected) as rejected:
+                        self._authorize(method, path, headers, "2" if method == "POST" else None)
+                    self.assertEqual(rejected.exception.status_code, 401)
 
     def test_protected_route_accepts_only_the_runtime_session_token(self) -> None:
-        self._authorize(
-            "GET",
-            "/events",
-            {"Host": "127.0.0.1:8765", API_SESSION_HEADER: "a" * 64},
-        )
+        for method, path in (("GET", "/events"), ("POST", "/export/llm-handoff")):
+            with self.subTest(method=method, path=path):
+                headers = {"Host": "127.0.0.1:8765", API_SESSION_HEADER: "a" * 64}
+                if method == "POST":
+                    headers["Content-Type"] = "application/json"
+                self._authorize(method, path, headers, "2" if method == "POST" else None)
 
     def test_policy_rejects_hostile_origin_simple_post_and_oversized_body_before_dispatch(self) -> None:
         headers = {

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import base64
 import csv
-import hmac
 import hashlib
+import hmac
 import json
 import os
 import platform
@@ -60,6 +61,7 @@ from opsmineflow_mining.pipeline import metrics_to_dict
 
 from .activitywatch import import_activitywatch_local
 from .child_process import sanitized_subprocess_environment
+from .llm_handoff import build_handoff_bundle
 from .recording import recording_manager
 from .storage import EventStore, default_store
 
@@ -923,34 +925,66 @@ def _app_usage_seconds(events: list[StandardEvent]) -> dict[str, float]:
 
 def create_export_artifact(format_name: str, store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
-    snapshot = create_api_snapshot(active_store)
-    if format_name == "markdown":
-        content = str(snapshot["markdown_report"])
-        extension = "md"
-    elif format_name == "json":
-        content = json_dumps({"snapshot": snapshot})
-        extension = "json"
-    elif format_name == "csv":
-        content = events_to_csv(snapshot["events"])
-        extension = "csv"
-    elif format_name == "mermaid":
-        content = str(snapshot["mermaid"])
-        extension = "mmd"
-    elif format_name == "drawio":
-        content = str(snapshot["drawio"])
-        extension = "drawio"
+    if format_name == "llm-handoff":
+        bundle = build_handoff_bundle(
+            active_store.events,
+            active_store.automation_reviews,
+            active_store.automation_review_notes,
+        )
+        content: str | bytes = bundle.content
+        extension = "zip"
+        filename = "opsmineflow-mermaid-handoff.zip"
+        preview = bundle.preview
+        warning = (
+            "This ZIP is a manual Mermaid handoff only. It contains aggregate evidence, "
+            "not raw event rows; review it before sharing outside your organization."
+        )
     else:
-        raise ValueError("Export format must be markdown, json, csv, mermaid, or drawio.")
+        snapshot = create_api_snapshot(active_store)
+        if format_name == "markdown":
+            content = str(snapshot["markdown_report"])
+            extension = "md"
+        elif format_name == "json":
+            content = json_dumps({"snapshot": snapshot})
+            extension = "json"
+        elif format_name == "csv":
+            content = events_to_csv(snapshot["events"])
+            extension = "csv"
+        elif format_name == "mermaid":
+            content = str(snapshot["mermaid"])
+            extension = "mmd"
+        elif format_name == "drawio":
+            content = str(snapshot["drawio"])
+            extension = "drawio"
+        else:
+            raise ValueError("Export format must be markdown, json, csv, mermaid, drawio, or llm-handoff.")
+        filename = f"opsmineflow-export.{extension}"
+        preview = str(content)[:2000]
+        warning = "Review masked fields and confidential flags before sharing this export."
 
+    byte_content = content if isinstance(content, bytes) else content.encode("utf-8")
     return {
         "format": format_name,
         "extension": extension,
-        "filename": f"opsmineflow-export.{extension}",
+        "filename": filename,
         "content": content,
-        "byte_size": len(content.encode("utf-8")),
-        "preview": content[:2000],
+        "byte_size": len(byte_content),
+        "preview": preview,
         "confidential_count": sum(1 for event in active_store.events if event.confidential_flag),
-        "warning": "Review masked fields and confidential flags before sharing this export.",
+        "warning": warning,
+    }
+
+
+def export_llm_handoff_payload(store: EventStore | None = None) -> dict[str, str]:
+    """Encode the locally generated ZIP for the development-only browser download path."""
+
+    artifact = create_export_artifact("llm-handoff", store=store)
+    content = artifact["content"]
+    if not isinstance(content, bytes):
+        raise ValueError("LLM handoff export must be a ZIP file.")
+    return {
+        "filename": str(artifact["filename"]),
+        "zip_base64": base64.b64encode(content).decode("ascii"),
     }
 
 
@@ -986,10 +1020,17 @@ def save_export_artifact(
         raise ValueError("Confirm replacement in the save dialog before overwriting an existing file.")
     file_descriptor, temporary_path = tempfile.mkstemp(prefix=".opsmineflow-export-", dir=path.parent)
     try:
-        with os.fdopen(file_descriptor, "w", encoding="utf-8") as export_file:
-            export_file.write(str(artifact["content"]))
-            export_file.flush()
-            os.fsync(export_file.fileno())
+        content = artifact["content"]
+        if isinstance(content, bytes):
+            with os.fdopen(file_descriptor, "wb") as export_file:
+                export_file.write(content)
+                export_file.flush()
+                os.fsync(export_file.fileno())
+        else:
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as export_file:
+                export_file.write(content)
+                export_file.flush()
+                os.fsync(export_file.fileno())
         os.replace(temporary_path, path)
         _fsync_directory(path.parent)
     except Exception:
@@ -1532,6 +1573,10 @@ if app is not None:
     @app.post("/export/json")
     def export_json_endpoint() -> dict[str, Any]:
         return {"json": str(create_export_artifact("json")["content"])}
+
+    @app.post("/export/llm-handoff")
+    def export_llm_handoff_endpoint() -> dict[str, str]:
+        return export_llm_handoff_payload()
 
     @app.post("/export/preview")
     def export_preview_endpoint(request: ExportPreviewRequest) -> dict[str, Any]:

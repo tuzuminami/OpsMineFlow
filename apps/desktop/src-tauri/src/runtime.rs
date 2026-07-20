@@ -1136,6 +1136,7 @@ fn export_file_details(format: &str) -> Result<(&'static str, &'static str), Str
         "csv" => Ok(("csv", "opsmineflow-events.csv")),
         "mermaid" => Ok(("mmd", "opsmineflow-flow.mmd")),
         "drawio" => Ok(("drawio", "opsmineflow-flow.drawio")),
+        "llm-handoff" => Ok(("zip", "opsmineflow-mermaid-handoff.zip")),
         _ => Err("choose a supported export format".to_owned()),
     }
 }
