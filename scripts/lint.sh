@@ -7,6 +7,8 @@ cd "$ROOT_DIR"
 echo "Compiling Python files..."
 python3 -m compileall -q services packages/drawio-exporter/src
 
+./scripts/check_migrations.sh
+
 echo "Checking shell syntax..."
 while IFS= read -r script; do
   bash -n "$script"

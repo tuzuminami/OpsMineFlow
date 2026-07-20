@@ -136,6 +136,13 @@ export type Diagnostics = {
     manual_label_count: number;
     import_history_count: number;
     automation_review_count: number;
+    schema_version: number;
+    schema_target_version: number;
+    migration_status: string;
+    migration_backup_created: boolean;
+    integrity_status: string;
+    wal_status: string;
+    backup_cleanup_status: string;
   };
   dependencies: Record<string, DiagnosticItem>;
   ports: Record<string, DiagnosticItem & { host: string; port: number }>;
