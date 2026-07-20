@@ -228,7 +228,8 @@ DELETE_CHALLENGES = DeleteChallengeStore()
 
 
 def _analysis_for_store(store: EventStore):
-    return prepare_analysis(store.events, _mining_config_for_store(store))
+    config = _mining_config_for_store(store)
+    return store.get_or_create_analysis(config, lambda: prepare_analysis(tuple(store.events), config))
 
 
 def _mining_config_for_store(store: EventStore) -> MiningConfig:

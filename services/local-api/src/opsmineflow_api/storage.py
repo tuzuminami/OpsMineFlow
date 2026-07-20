@@ -8,6 +8,7 @@ from dataclasses import replace
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import RLock
 
 from opsmineflow_mining import load_events_from_csv
 from opsmineflow_mining.analysis import event_sort_key
@@ -51,6 +52,8 @@ class EventStore:
     db_path: Path | None = None
     migration_fault_injector: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
     _migration_report: MigrationReport | None = field(default=None, init=False, repr=False)
+    _analysis_cache: dict[object, object] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _analysis_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.db_path is None:
@@ -71,6 +74,7 @@ class EventStore:
     def replace(self, events: list[StandardEvent], import_source: str = "", import_path: str = "") -> None:
         self.events = _uniquify_event_ids(self._filter_events(list(events)))
         self.manual_labels = {}
+        self._invalidate_analysis()
         if self.db_path is None:
             if import_source:
                 self.record_import(import_source, import_path, len(self.events))
@@ -281,6 +285,7 @@ class EventStore:
         self.manual_labels = {}
         self.automation_reviews = {}
         self.automation_review_notes = {}
+        self._invalidate_analysis()
         if self.db_path is None:
             self.import_history = []
             return
@@ -328,6 +333,7 @@ class EventStore:
             if key in allowed:
                 self.settings[key] = _normalize_setting(key, value)
         self.events = self._filter_events(self.events)
+        self._invalidate_analysis()
         if self.db_path is not None:
             with self._connect() as conn:
                 conn.execute("DELETE FROM events")
@@ -394,6 +400,7 @@ class EventStore:
         raise KeyError(event_id)
 
     def _persist_events(self) -> None:
+        self._invalidate_analysis()
         self.events.sort(key=event_sort_key)
         live_event_ids = {event.event_id for event in self.events}
         self.manual_labels = {event_id: label for event_id, label in self.manual_labels.items() if event_id in live_event_ids}
@@ -472,6 +479,27 @@ class EventStore:
             }
             for row_id, source, path, event_count, imported_at in import_rows
         ]
+        self._invalidate_analysis()
+
+    def get_or_create_analysis(self, cache_key: object, builder: Callable[[], object]) -> object:
+        """Return one immutable analysis per local data/configuration snapshot.
+
+        Dashboard routes arrive concurrently from the WebUI.  Preparing the
+        same 100k-event receipt in every request both wastes CPU and can make
+        otherwise bounded localhost requests time out.  Holding this small
+        per-store lock means the first route prepares the result while the
+        others reuse exactly that immutable result.  Every event/settings
+        mutation clears the cache through ``_invalidate_analysis``.
+        """
+
+        with self._analysis_lock:
+            if cache_key not in self._analysis_cache:
+                self._analysis_cache[cache_key] = builder()
+            return self._analysis_cache[cache_key]
+
+    def _invalidate_analysis(self) -> None:
+        with self._analysis_lock:
+            self._analysis_cache.clear()
 
 
 def _safe_import_display_name(source: str, path_value: str) -> str:

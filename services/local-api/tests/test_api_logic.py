@@ -24,6 +24,7 @@ from opsmineflow_api.app import (
     create_import_preview,
     create_process_map,
     create_runtime_health,
+    create_summary,
     import_activitywatch_into_store,
     import_path_into_store,
     run_diagnostic_checks,
@@ -36,9 +37,42 @@ from opsmineflow_api.recording import RecordingManager, _recording_agent_environ
 from opsmineflow_api.server import LocalApiHandler
 from opsmineflow_api.storage import EventStore
 from opsmineflow_mining import load_events_from_csv, load_events_from_json
+from opsmineflow_mining.analysis import prepare_analysis
 
 
 class ApiLogicTests(unittest.TestCase):
+    def test_analysis_cache_reuses_concurrent_snapshot_and_invalidates_after_mutation(self) -> None:
+        store = EventStore(events=load_events_from_csv("data/sample/sample_events.csv"))
+        started = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def delayed_prepare(events, config):
+            nonlocal calls
+            calls += 1
+            started.set()
+            self.assertTrue(release.wait(timeout=2))
+            return prepare_analysis(events, config)
+
+        with patch("opsmineflow_api.app.prepare_analysis", side_effect=delayed_prepare):
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                futures = [executor.submit(create_summary, store) for _ in range(6)]
+                self.assertTrue(started.wait(timeout=2))
+                release.set()
+                summaries = [future.result(timeout=2) for future in futures]
+
+            self.assertEqual(calls, 1)
+            self.assertEqual({summary["analysis_receipt"]["scope_fingerprint"] for summary in summaries}, {
+                summaries[0]["analysis_receipt"]["scope_fingerprint"]
+            })
+
+            store.update_event_activity(store.events[0].event_id, "Corrected activity")
+            create_summary(store)
+
+        self.assertEqual(calls, 2)
+
     def test_native_recording_event_appends_and_persists(self) -> None:
         session = {
             "session_id": "rec-test",
