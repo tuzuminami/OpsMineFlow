@@ -4,16 +4,17 @@ OpsMineFlow is designed for consent-based business improvement analysis.
 
 ## Privacy Controls
 
-- URL path masking.
-- Window-title masking.
-- Domain-only setting.
+- Mandatory event-data minimization before an imported or recorded event enters the in-memory store or SQLite.
+- Project-scoped opaque case, source-event, and event references; original source identifiers are not retained.
+- Empty persisted/API fields for user alias, app bundle ID, window title, URL, URL mask, and freeform memo.
+- A strict metadata allowlist for process provenance and review status; unknown metadata is dropped.
+- Optional normalized domain host for excluded-domain filtering; URL path and query are never retained.
 - Excluded apps.
 - Excluded domains.
-- Excluded keywords.
 - Local deletion.
 - Retention settings.
-- Anonymous user IDs.
-- Export preview and warning.
+- All API, report, and export formats use the same safe event profile. A legacy masking setting cannot re-enable raw data.
+- Exports fail closed when an event is marked confidential.
 
 ## Security Controls
 
@@ -50,6 +51,31 @@ Deletion requires a second, single-use challenge. The API issues and consumes th
 - Audio.
 - Camera images.
 
+## Event Data Boundary
+
+Schema version 4 applies the safe event profile to both existing and new data.
+It removes raw alias, title, URL, memo, app bundle ID, freeform review note,
+and unknown metadata from SQLite. It also turns case, source, and event
+identifiers into project-scoped HMAC references backed by a local owner-only
+key. The same profile is applied to in-memory
+events before API responses, reports, CSV/JSON/Markdown/Mermaid/draw.io
+exports, and the manual Mermaid handoff bundle are created.
+
+Activity labels and application names remain because they are the minimum
+evidence needed to describe a process. They are treated as data, never as
+instructions, in the handoff bundle. A user must review labels and the
+confidential flag before sharing an export.
+
+When a pre-v4 database is upgraded, the rewrite runs in one SQLite transaction
+and does not create a plaintext pre-upgrade snapshot. A failure leaves the
+original database untouched; a successful migration leaves only the minimized
+database. Encrypted backup, retention, and all-data-deletion lifecycle work
+remain tracked separately by #52, #53, and #54.
+
+An existing database stores a non-secret verifier for its local pseudonym key.
+If the owner-only key file is missing or does not match, OpsMineFlow fails
+closed instead of silently generating a new key and breaking ID consistency.
+
 ## Runtime Privacy Evidence
 
 The local API exposes `GET /diagnostics` with a `privacy_evidence` section. It is intended for user-facing and client-facing checks that the runtime recorder is limited to `frontmost_app_only`.
@@ -59,7 +85,7 @@ Current evidence categories:
 - `keystrokes`: no keyboard hooks, input monitoring APIs, or key event capture.
 - `typed_text`: no form values, document text, clipboard contents, or page body text.
 - `window_titles`: native recording stores an empty `window_title`.
-- `urls`: native recording stores an empty URL; CSV/JSON imports still pass through masking.
+- `urls`: native recording stores an empty URL; CSV/JSON and ActivityWatch imports discard raw URLs and retain at most a normalized host for exclusion filtering.
 - `screenshots`: no screenshot or screen-recording API in runtime collectors.
 - `audio_camera`: no microphone or camera API in runtime collectors.
 - `remote_reporting`: remote event reporting, analytics, crash upload, and update checks remain prohibited.

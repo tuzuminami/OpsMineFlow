@@ -39,6 +39,15 @@ Persistent databases use `PRAGMA user_version` together with an append-only `sch
 
 Schema version 3 introduced project isolation. It atomically rebuilds the scoped tables, creates a deterministic opaque `Migrated data` project for existing records, backfills every legacy row into that project, and records before/after row counts and content fingerprints in workspace metadata. A failed upgrade leaves the prior schema intact; a retry starts from the original legacy state rather than a partial project migration.
 
-Before upgrading an existing recognized database, the app creates a SQLite online-backup snapshot in the local `backups/` directory. The backup directory is owner-only and the snapshot file is owner-read/write only. The app retains at most the three newest migration snapshots after an attempt that created a snapshot, whether that attempt commits or rolls back. The app verifies database integrity and foreign-key consistency before and after migration, then checkpoints WAL after a successful upgrade. A post-commit WAL checkpoint warning does not roll back a completed schema migration; diagnostics reports it separately for follow-up.
+Schema version 4 rewrites each project-scoped event payload through the safe
+event allowlist and replaces import-history filenames with generic import
+types. It clears freeform automation-review notes and derives case, source,
+and event identifiers with a project-scoped HMAC using a local owner-only key.
+This migration is idempotent for already safe identifiers and runs in the same
+startup transaction as the migration ledger update. The database stores a
+non-secret HMAC verifier for that key; a missing or mismatched key fails closed
+rather than being regenerated for an existing dataset.
 
-If a database was created by a newer app version, has an unknown migration ledger, or is not a recognized legacy schema, OpsMineFlow fails closed. It does not create tables, overwrite the database, seed sample data, or attempt an automatic restore. Keep the original database and use the pre-upgrade snapshot for manual recovery with a compatible build. Clearing a project never removes workspace-level migration snapshots; backup retention and all-data deletion are separately defined lifecycle operations. Filesystem or Time Machine backups are outside the app's control.
+Before upgrading a recognized pre-v4 database, the app rewrites it in one SQLite transaction without creating a plaintext pre-upgrade snapshot. A failed migration leaves the original database untouched; a successful migration leaves only the minimized database. The app verifies database integrity and foreign-key consistency before and after migration, then securely compacts and checkpoints WAL. If that final privacy cleanup cannot be verified, startup fails closed. Encrypted backup and recovery lifecycle policy are tracked separately.
+
+If a database was created by a newer app version, has an unknown migration ledger, or is not a recognized legacy schema, OpsMineFlow fails closed. It does not create tables, overwrite the database, seed sample data, or attempt an automatic restore. Keep the original database and use a compatible build to recover it. Encrypted backup retention and all-data deletion are separately defined lifecycle operations. Filesystem or Time Machine backups are outside the app's control.

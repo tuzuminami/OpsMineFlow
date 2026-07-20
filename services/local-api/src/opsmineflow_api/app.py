@@ -8,6 +8,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import socket
 import stat
@@ -43,6 +44,8 @@ MAX_EVENT_PAGE_RESPONSE_BYTES = 3_000_000
 MAX_ANALYTICS_LIST_ITEMS = 500
 MAX_PROCESS_MAP_NODES = 500
 MAX_PROCESS_MAP_EDGES = 1_000
+_OPAQUE_CASE_REFERENCE_PATTERN = re.compile(r"^case_v1_[0-9a-f]{32}$")
+_OPAQUE_EVENT_REFERENCE_PATTERN = re.compile(r"^evt_v1_[0-9a-f]{32}$")
 
 from opsmineflow_drawio import build_drawio_xml
 from opsmineflow_mining.analysis import correlation_for, parse_utc
@@ -65,6 +68,7 @@ from opsmineflow_mining import (
     suggest_csv_mapping,
 )
 from opsmineflow_mining.pipeline import metrics_to_dict
+from opsmineflow_mining.privacy import extract_domain
 
 from .activitywatch import import_activitywatch_local
 from .child_process import sanitized_subprocess_environment
@@ -722,7 +726,7 @@ def _quality_item(
     analysis_excluded: bool = False,
 ) -> dict[str, Any]:
     return {
-        "event_id": event.event_id,
+        "event_id": _safe_event_reference(event.event_id),
         "case_id": event.case_id,
         "case_correlation": _case_correlation_to_dict(event),
         "case_correlation_review": _case_correlation_review_to_dict(event),
@@ -892,16 +896,17 @@ def _parse_event_time(value: str) -> datetime:
 
 
 def event_to_api_dict(event: Any, settings: dict[str, object]) -> dict[str, object]:
+    # ``settings`` remains an argument for endpoint compatibility, but no
+    # setting can opt an API caller back into raw capture data.
+    del settings
     return {
-        "event_id": event.event_id,
-        "case_id": event.case_id,
-        "user_hash": event.user_hash,
+        "event_id": _safe_event_reference(event.event_id),
+        "case_id": _safe_case_reference(event.case_id),
+        "user_hash": "",
         "app_name": event.app_name,
-        "window_title_masked": event.window_title_masked
-        if settings.get("mask_window_titles", True)
-        else event.window_title,
-        "url_masked": event.url_masked if settings.get("mask_url_paths", True) else event.url,
-        "domain": event.domain,
+        "window_title_masked": "[redacted]" if event.window_title or event.window_title_masked else "",
+        "url_masked": "[redacted-url]" if event.url or event.url_masked else "",
+        "domain": extract_domain(str(event.domain or "")),
         "activity_raw": event.activity_raw,
         "timestamp_start": event.timestamp_start,
         "timestamp_end": event.timestamp_end,
@@ -911,6 +916,21 @@ def event_to_api_dict(event: Any, settings: dict[str, object]) -> dict[str, obje
         "case_correlation": _case_correlation_to_dict(event),
         "case_correlation_review": _case_correlation_review_to_dict(event),
     }
+
+
+def _safe_case_reference(value: object) -> str:
+    case_id = str(value or "")
+    if _OPAQUE_CASE_REFERENCE_PATTERN.fullmatch(case_id):
+        return case_id
+    # Preview and direct helper callers may still hold a parser-bound raw
+    # value.  They do not own the local project key, so fail closed rather
+    # than emitting a deterministic, dictionary-reversible substitute.
+    return ""
+
+
+def _safe_event_reference(value: object) -> str:
+    event_id = str(value or "")
+    return event_id if _OPAQUE_EVENT_REFERENCE_PATTERN.fullmatch(event_id) else ""
 
 
 def _case_correlation_to_dict(event: Any) -> dict[str, str]:
@@ -931,10 +951,16 @@ def _case_correlation_review_to_dict(event: Any) -> dict[str, str] | None:
     review = metadata.get("opsmineflow_case_correlation_review") if isinstance(metadata, dict) else None
     if not isinstance(review, dict):
         return None
-    required = ("action", "previous_case_id", "reason", "operator", "changed_at")
+    required = ("action", "changed_at")
     if any(not isinstance(review.get(key), str) for key in required):
         return None
-    return {key: str(review[key]) for key in required}
+    return {
+        "action": str(review["action"]),
+        "previous_case_id": _safe_case_reference(review.get("previous_case_id")),
+        "reason": "",
+        "operator": "",
+        "changed_at": str(review["changed_at"]),
+    }
 
 
 def load_events_for_import(
@@ -977,8 +1003,10 @@ def create_import_preview(
     if format_name == "csv":
         inspection = inspect_csv_columns(path)
         columns = [str(column) for column in inspection["columns"]]
+        # Column mapping needs names, but row values can contain arbitrary
+        # customer content. Do not expose those values through the preview API.
         sample_rows = [
-            {str(key): str(value) for key, value in row.items()}
+            {str(key): "[redacted]" for key in row}
             for row in inspection["sample_rows"]  # type: ignore[union-attr]
         ]
         suggested_mapping = suggest_csv_mapping(columns)
@@ -993,7 +1021,7 @@ def create_import_preview(
         mapping_warnings.append(str(exc))
     return {
         "format": format_name,
-        "display_name": _safe_display_name(path),
+        "display_name": f"{format_name.upper()} import",
         "event_count": len(events),
         "confidential_count": sum(1 for event in events if event.confidential_flag),
         "columns": columns,
@@ -1005,7 +1033,7 @@ def create_import_preview(
         "timezone": timezone_name,
         "sample_events": [
             {
-                "case_id": event.case_id,
+                "case_id": _safe_case_reference(event.case_id),
                 "activity": event.activity_raw,
                 "app_name": event.app_name,
                 "domain": event.domain,
@@ -1076,7 +1104,9 @@ def import_activitywatch_into_store(
             import_source=f"activitywatch_local_{normalized_mode}",
             import_path=base_url,
         )
-        skipped_duplicates = sum(1 for event in importable_events if event.event_id in existing_ids)
+        skipped_duplicates = sum(
+            1 for event in importable_events if active_store.event_reference_for_input(event.event_id) in existing_ids
+        )
 
     return {
         "imported_events": imported_events,
@@ -1105,12 +1135,14 @@ def _activitywatch_preview_payload(
     store_snapshot = store.snapshot()
     filtered_events = store.filter_events(list(events), store_snapshot)
     existing_ids = {event.event_id for event in store_snapshot.events}
-    duplicate_count = sum(1 for event in filtered_events if event.event_id in existing_ids)
+    duplicate_count = sum(
+        1 for event in filtered_events if store.event_reference_for_input(event.event_id) in existing_ids
+    )
     period_start, period_end = _event_period(events)
     return {
         "enabled": enabled,
         "local_only": True,
-        "base_url": base_url,
+        "base_url": "127.0.0.1",
         "event_count": len(events),
         "importable_event_count": len(filtered_events),
         "duplicate_count": duplicate_count,
@@ -1122,7 +1154,7 @@ def _activitywatch_preview_payload(
         "app_usage_seconds": _app_usage_seconds(events),
         "sample_events": [
             {
-                "case_id": event.case_id,
+                "case_id": _safe_case_reference(event.case_id),
                 "activity": event.activity_raw,
                 "app_name": event.app_name,
                 "domain": event.domain,
@@ -1159,6 +1191,12 @@ def _app_usage_seconds(events: list[StandardEvent]) -> dict[str, float]:
 def create_export_artifact(format_name: str, store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
     store_snapshot = active_store.snapshot()
+    confidential_count = sum(1 for event in store_snapshot.events if event.confidential_flag)
+    if confidential_count:
+        raise ValueError(
+            "Export is blocked because the current dataset contains confidential events. "
+            "Remove or relabel those events before creating a shareable artifact."
+        )
     if format_name == "llm-handoff":
         bundle = build_handoff_bundle(
             store_snapshot.events,
@@ -1202,7 +1240,7 @@ def create_export_artifact(format_name: str, store: EventStore | None = None) ->
             if format_name == "csv"
             else str(content)[:2000]
         )
-        warning = "Review masked fields and confidential flags before sharing this export."
+        warning = "Review activity labels, application names, and confidential flags before sharing this export."
 
     byte_content = content if isinstance(content, bytes) else content.encode("utf-8")
     return {
@@ -1212,7 +1250,7 @@ def create_export_artifact(format_name: str, store: EventStore | None = None) ->
         "content": content,
         "byte_size": len(byte_content),
         "preview": preview,
-        "confidential_count": sum(1 for event in store_snapshot.events if event.confidential_flag),
+        "confidential_count": confidential_count,
         "warning": warning,
     }
 
@@ -1406,7 +1444,7 @@ def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
             "status": _activitywatch_status(activitywatch_enabled),
             "remediation": "Enable ActivityWatch import only when the user explicitly wants localhost ActivityWatch data.",
         },
-        "recording": recording_manager.status(store_snapshot.project_id),
+        "recording": _diagnostic_recording_status(recording_manager.status(store_snapshot.project_id)),
         "privacy_evidence": privacy_capture_evidence(),
         "guardrails": {
             "license_policy": {
@@ -1435,12 +1473,61 @@ def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
     }
 
 
+def _diagnostic_recording_status(status: Mapping[str, Any]) -> dict[str, object]:
+    """Expose recording health without leaking user-entered recording context."""
+
+    return {
+        "supported": bool(status.get("supported")),
+        "installed": bool(status.get("installed")),
+        "available": bool(status.get("available")),
+        "active": bool(status.get("active")),
+        "paused": bool(status.get("paused")),
+        "capture_ended": bool(status.get("capture_ended")),
+        "recorded_events": int(status.get("recorded_events") or 0),
+        "capture_scope": str(status.get("capture_scope") or ""),
+        "remediation": str(status.get("remediation") or ""),
+    }
+
+
+def recording_status_to_api_dict(status: Mapping[str, Any]) -> dict[str, object]:
+    """Return recording progress without session secrets or operator text."""
+
+    intervals = status.get("pause_intervals")
+    safe_intervals = []
+    if isinstance(intervals, list):
+        safe_intervals = [
+            {
+                "started_at": str(item.get("started_at") or ""),
+                "ended_at": str(item.get("ended_at") or ""),
+            }
+            for item in intervals
+            if isinstance(item, Mapping)
+        ]
+    return {
+        "supported": bool(status.get("supported")),
+        "installed": bool(status.get("installed")),
+        "available": bool(status.get("available")),
+        "remediation": str(status.get("remediation") or ""),
+        "active": bool(status.get("active")),
+        "paused": bool(status.get("paused")),
+        "case_id": _safe_case_reference(status.get("case_id")),
+        "activity_label": str(status.get("activity_label") or "").strip()[:160],
+        "started_at": str(status.get("started_at") or ""),
+        "paused_at": str(status.get("paused_at") or ""),
+        "pause_intervals": safe_intervals,
+        "capture_ended": bool(status.get("capture_ended")),
+        "current_app": str(status.get("current_app") or "").strip()[:120],
+        "recorded_events": int(status.get("recorded_events") or 0),
+        "capture_scope": str(status.get("capture_scope") or ""),
+    }
+
+
 def privacy_capture_evidence() -> dict[str, Any]:
     prohibited = [
         ("keystrokes", "No keyboard hooks, input-monitoring APIs, or key event capture are implemented."),
         ("typed_text", "Collectors do not read form values, document text, clipboard contents, or page body text."),
         ("window_titles", "Native recording stores an empty window_title and does not request title metadata."),
-        ("urls", "Native recording stores an empty URL; CSV/JSON imports are masked by the privacy pipeline."),
+        ("urls", "Native recording stores an empty URL; CSV/JSON imports discard raw URLs in the privacy boundary."),
         ("screenshots", "No screenshot or screen-recording API is called by runtime collectors."),
         ("audio_camera", "No microphone or camera API is called by runtime collectors."),
         ("remote_reporting", "Runtime policy forbids remote event reporting, crash uploaders, analytics, and update checks."),
@@ -1680,7 +1767,7 @@ if app is not None:
     @app.get("/recording/status")
     def recording_status(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
         store = project_store(x_opsmineflow_project)
-        return project_response(store, recording_manager.status(store.project_id))
+        return project_response(store, recording_status_to_api_dict(recording_manager.status(store.project_id)))
 
     @app.post("/recording/start")
     def recording_start(
@@ -1691,7 +1778,9 @@ if app is not None:
             store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
             return project_response(
                 store,
-                recording_manager.start(request.case_id, request.activity_label, request.consent, store=store),
+                recording_status_to_api_dict(
+                    recording_manager.start(request.case_id, request.activity_label, request.consent, store=store)
+                ),
             )
         except (ValueError, RuntimeError) as exc:
             raise _bad_request(str(exc))
@@ -1706,7 +1795,7 @@ if app is not None:
         # immutable project context, otherwise a start-time revision traps the
         # user in an un-stoppable active session.
         store = project_store(x_opsmineflow_project)
-        return project_response(store, recording_manager.stop(store))
+        return project_response(store, recording_status_to_api_dict(recording_manager.stop(store)))
 
     @app.post("/recording/pause")
     def recording_pause(
@@ -1715,7 +1804,10 @@ if app is not None:
     ) -> dict[str, Any]:
         try:
             store = project_store(x_opsmineflow_project)
-            return project_response(store, recording_manager.pause(request.reason, project_id=store.project_id))
+            return project_response(
+                store,
+                recording_status_to_api_dict(recording_manager.pause(request.reason, project_id=store.project_id)),
+            )
         except ValueError as exc:
             raise _bad_request(str(exc))
 
@@ -1726,7 +1818,10 @@ if app is not None:
     ) -> dict[str, Any]:
         try:
             store = project_store(x_opsmineflow_project)
-            return project_response(store, recording_manager.resume(project_id=store.project_id))
+            return project_response(
+                store,
+                recording_status_to_api_dict(recording_manager.resume(project_id=store.project_id)),
+            )
         except ValueError as exc:
             raise _bad_request(str(exc))
 
@@ -1861,7 +1956,10 @@ if app is not None:
             store.set_label(request.event_id, request.label)
         except KeyError:
             raise _not_found("Event was not found")
-        return project_response(store, {"event_id": request.event_id, "label": request.label})
+        return project_response(
+            store,
+            {"event_id": store.event_reference_for_input(request.event_id), "label": request.label},
+        )
 
     @app.post("/events/activity")
     def update_event_activity(

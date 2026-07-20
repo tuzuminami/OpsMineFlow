@@ -31,7 +31,7 @@ The project is licensed under Apache-2.0. Direct dependencies must be commercial
 - Optional ActivityWatch localhost import, enabled only by explicit user action
 - Explicit start/stop recording of frontmost macOS applications
 - Standard event schema
-- URL and window-title masking
+- Mandatory raw-field minimization before local storage and export
 - Rule-based business labeling
 - App usage and business-label duration analysis
 - Directly-Follows Graph generation
@@ -176,12 +176,14 @@ CSV imports support columns such as:
 - `activity`
 - `timestamp_start`
 - `timestamp_end`
-- `user`
 - `app_name`
-- `url`
-- `memo`
+- `domain`
 
-JSON imports normalize generic arrays and ActivityWatch-style exports into the OpsMineFlow standard event schema.
+CSV activity labels must come from an explicit activity column. Alias, window
+title, URL, and memo columns are never accepted as labels and are discarded;
+a URL can contribute only a normalized domain host for excluded-domain
+filtering. JSON imports normalize generic arrays and ActivityWatch-style
+exports into the same safe event profile.
 
 ## Export Mermaid/SVG/draw.io
 
@@ -193,7 +195,7 @@ Runtime data is stored in a local SQLite database under the user's application d
 
 ## Privacy and Security
 
-OpsMineFlow does not collect passwords, keystrokes, input text, screenshots, video, audio, or camera data. The standard workflow uses imported event logs and masking before analysis. Exports include a privacy warning and should be reviewed before sharing with clients.
+OpsMineFlow does not collect passwords, keystrokes, input text, screenshots, video, audio, or camera data. Before an event is stored, raw aliases, titles, URLs, memos, freeform metadata, and import filenames are removed; case, source, and event IDs become project-scoped opaque references. All API and export formats use this safe profile, and confidential events fail closed at export. Activity labels and application names remain to describe the observed flow, so review them before sharing with clients.
 
 ## Disclaimer
 

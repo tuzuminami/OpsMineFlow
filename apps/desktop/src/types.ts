@@ -101,7 +101,6 @@ export type Summary = {
   period_end: string;
   app_usage_seconds: Record<string, number>;
   label_usage_seconds: Record<string, number>;
-  user_usage_seconds: Record<string, number>;
   average_event_duration_seconds: number;
   analysis_receipt: AnalysisReceipt;
 };
@@ -251,28 +250,19 @@ export type RecordingStatus = {
   installed: boolean;
   available: boolean;
   remediation: string;
-  agent_path: string;
-  agent_version: string;
-  log_path: string;
-  token_ttl_seconds: number;
-  rate_limit_per_minute: number;
   active: boolean;
   paused: boolean;
-  session_id: string;
   case_id: string;
   activity_label: string;
   started_at: string;
   paused_at: string;
-  pause_reason: string;
   pause_intervals: Array<{
     started_at: string;
     ended_at: string;
-    reason: string;
   }>;
   current_app: string;
   recorded_events: number;
-  last_heartbeat_at: string;
-  last_error: string;
+  capture_ended: boolean;
   capture_scope: "frontmost_app_only";
 };
 
