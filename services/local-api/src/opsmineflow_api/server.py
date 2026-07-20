@@ -2,23 +2,40 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
 from .app import (
+    DELETE_CHALLENGES,
+    LOCAL_API_POLICY,
     allowed_webui_origins,
     create_api_snapshot,
     create_activitywatch_preview,
+    create_app_switching,
+    create_automation_candidates,
     create_diagnostics,
     create_event_quality_report,
+    create_event_page,
     create_export_artifact,
     create_import_preview,
+    create_markdown_report,
+    create_process_map,
+    create_public_health,
     create_runtime_health,
+    create_summary,
     import_activitywatch_into_store,
     import_path_into_store,
     run_diagnostic_checks,
     save_export_artifact,
+)
+from .auth import (
+    DELETE_CHALLENGE_HEADER,
+    RUNTIME_PROBE_CHALLENGE_HEADER,
+    LocalApiPolicy,
+    RequestRejected,
 )
 from .recording import recording_manager
 from .storage import default_store
@@ -28,38 +45,73 @@ PORT = int(os.environ.get("OPSMINEFLOW_API_PORT", "8765"))
 
 
 class LocalApiHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def do_OPTIONS(self) -> None:
+        if not self._authorize_request():
+            return
         self.send_response(204)
         self._send_cors_headers()
         self.end_headers()
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if not self._authorize_request(path):
+            return
+        if path == "/health":
+            self._send_json(create_public_health())
+            return
         if path == "/runtime/health":
-            self._send_json(create_runtime_health())
+            self._send_json(create_runtime_health(self.headers.get(RUNTIME_PROBE_CHALLENGE_HEADER, "")))
             return
-        snapshot = create_api_snapshot()
-        routes: dict[str, Any] = {
-            "/health": snapshot["health"],
-            "/diagnostics": create_diagnostics(),
-            "/settings": default_store().get_settings(),
-            "/import/history": default_store().list_import_history(),
-            "/recording/status": recording_manager.status(),
-            "/events": snapshot["events"],
-            "/analytics/summary": snapshot["summary"],
-            "/analytics/app-switching": snapshot["app_switching"],
-            "/analytics/automation-candidates": snapshot["automation_candidates"],
-            "/analytics/event-quality": create_event_quality_report(),
-            "/analytics/process-map": snapshot["process_map"],
-            "/reports/markdown": {"markdown": snapshot["markdown_report"]},
-        }
-        if path not in routes:
-            self._send_json({"error": "not found"}, status=404)
+        if path == "/diagnostics":
+            self._send_json(create_diagnostics())
             return
-        self._send_json(routes[path])
+        if path == "/settings":
+            self._send_json(default_store().get_settings())
+            return
+        if path == "/import/history":
+            self._send_json(default_store().list_import_history())
+            return
+        if path == "/recording/status":
+            self._send_json(recording_manager.status())
+            return
+        if path == "/events":
+            self._send_json(create_event_page(0, 500)["events"])
+            return
+        if path == "/analytics/summary":
+            self._send_json(create_summary())
+            return
+        if path == "/analytics/app-switching":
+            self._send_json(create_app_switching())
+            return
+        if path == "/analytics/automation-candidates":
+            self._send_json(create_automation_candidates())
+            return
+        if path == "/analytics/event-quality":
+            self._send_json(create_event_quality_report())
+            return
+        if path == "/analytics/process-map":
+            self._send_json(create_process_map())
+            return
+        if path == "/reports/markdown":
+            self._send_json({"markdown": create_markdown_report()})
+            return
+        self._send_json({"error": "not found"}, status=404)
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if not self._authorize_request(path):
+            return
+        if path == "/data/delete":
+            self._read_json()
+            if not DELETE_CHALLENGES.consume(self.headers.get(DELETE_CHALLENGE_HEADER, "")):
+                self._send_json({"error": "delete challenge is invalid or expired"}, status=403)
+                return
+            recording_manager.stop(default_store())
+            default_store().clear()
+            self._send_json({"deleted": True})
+            return
         try:
             payload = self._read_json()
             if path == "/recording/start":
@@ -95,6 +147,14 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                         self.headers.get("X-OpsMineFlow-Session", ""),
                         str(payload.get("session_id") or ""),
                         str(payload.get("current_app") or ""),
+                    )
+                )
+                return
+            if path == "/events/page":
+                self._send_json(
+                    create_event_page(
+                        int(payload.get("offset") or 0),
+                        int(payload.get("limit") or 250),
                     )
                 )
                 return
@@ -218,27 +278,38 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     )
                 )
                 return
-            if path == "/data/delete":
-                recording_manager.stop(default_store())
-                default_store().clear()
-                self._send_json({"deleted": True})
+            if path == "/data/delete/challenge":
+                self._send_json({"challenge": DELETE_CHALLENGES.issue()})
                 return
-            export_routes: dict[str, Any] = {
-                "/export/mermaid": {"mermaid": create_export_artifact("mermaid")["content"]},
-                "/export/drawio": {"drawio": create_export_artifact("drawio")["content"]},
-                "/export/svg": {"status": "planned", "message": "SVG export will use a local renderer."},
-                "/export/csv": {"csv": create_export_artifact("csv")["content"], "events": create_api_snapshot()["events"]},
-                "/export/json": {"json": create_export_artifact("json")["content"], "snapshot": create_api_snapshot()},
-            }
-            if path in export_routes:
-                self._send_json(export_routes[path])
+            if path == "/export/mermaid":
+                self._send_json({"mermaid": create_export_artifact("mermaid")["content"]})
+                return
+            if path == "/export/drawio":
+                self._send_json({"drawio": create_export_artifact("drawio")["content"]})
+                return
+            if path == "/export/svg":
+                self._send_json({"status": "planned", "message": "SVG export will use a local renderer."})
+                return
+            if path == "/export/csv":
+                artifact = create_export_artifact("csv")
+                self._send_json({"csv": artifact["content"]})
+                return
+            if path == "/export/json":
+                artifact = create_export_artifact("json")
+                self._send_json({"json": artifact["content"]})
                 return
             if path == "/export/preview":
                 artifact = create_export_artifact(str(payload.get("format") or ""))
                 self._send_json({key: artifact[key] for key in ("format", "filename", "byte_size", "preview", "confidential_count", "warning")})
                 return
             if path == "/export/save":
-                self._send_json(save_export_artifact(str(payload.get("format") or ""), str(payload.get("path") or "")))
+                self._send_json(
+                    save_export_artifact(
+                        str(payload.get("format") or ""),
+                        str(payload.get("path") or ""),
+                        overwrite_confirmed=bool(payload.get("overwrite_confirmed")),
+                    )
+                )
                 return
         except FileNotFoundError as exc:
             self._send_json({"error": str(exc)}, status=404)
@@ -273,15 +344,49 @@ class LocalApiHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode("utf-8")
         return json.loads(body)
 
+    def _authorize_request(self, path: str | None = None) -> bool:
+        policy = getattr(self.server, "security_policy", LOCAL_API_POLICY)
+        assert isinstance(policy, LocalApiPolicy)
+        try:
+            policy.authorize(
+                self.command,
+                path if path is not None else urlparse(self.path).path,
+                self.headers,
+                self.headers.get("Content-Length"),
+            )
+        except RequestRejected as exc:
+            self.close_connection = True
+            self._send_json({"error": exc.message}, status=exc.status_code)
+            return False
+        return True
+
     def _send_cors_headers(self) -> None:
         origin = self.headers.get("Origin", "")
         if origin in allowed_webui_origins():
             self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "content-type")
+        self.send_header("Access-Control-Allow-Headers", f"content-type, {DELETE_CHALLENGE_HEADER}")
 
 
 def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), LocalApiHandler)
+    server.security_policy = LOCAL_API_POLICY  # type: ignore[attr-defined]
+    _start_parent_watchdog(server, os.environ.get("OPSMINEFLOW_PARENT_PID", ""))
     print(f"OpsMineFlow local API listening on http://127.0.0.1:{PORT}")
     server.serve_forever()
+
+
+def _start_parent_watchdog(server: ThreadingHTTPServer, parent_pid_value: str) -> None:
+    try:
+        parent_pid = int(parent_pid_value)
+    except ValueError:
+        return
+    if parent_pid <= 0:
+        return
+
+    def stop_after_parent_exit() -> None:
+        while os.getppid() == parent_pid:
+            time.sleep(0.25)
+        server.shutdown()
+
+    threading.Thread(target=stop_after_parent_exit, name="opsmineflow-parent-watchdog", daemon=True).start()

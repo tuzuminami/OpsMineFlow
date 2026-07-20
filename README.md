@@ -52,35 +52,12 @@ Requirements:
 - macOS Sonoma or newer
 - Python 3.11 or newer
 - Node.js 20 or newer
-- npm
 
-From a fresh Mac terminal, install once:
+## macOS Desktop App
 
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuzuminami/OpsMineFlow/main/scripts/bootstrap_mac.sh)"
-```
+For normal use, download the signed `OpsMineFlow_*.dmg` from [GitHub Releases](https://github.com/tuzuminami/OpsMineFlow/releases), drag **OpsMineFlow.app** to Applications, and open it. The managed desktop runtime starts and stops its local services itself; no Terminal, Python, Node.js, browser URL, API key, or LLM is required.
 
-If the repository is already cloned at the default location, reinstall with:
-
-```bash
-cd ~/OpsMineFlow && ./scripts/install_mac.sh
-```
-
-Start each time:
-
-```bash
-cd ~/OpsMineFlow && ./scripts/run_local.sh
-```
-
-Stop from another terminal:
-
-```bash
-cd ~/OpsMineFlow && ./scripts/stop_local.sh
-```
-
-You can also press `Control-C` in the terminal running OpsMineFlow. Re-running the start command safely reuses an existing healthy instance. `./scripts/...` commands work only from the OpsMineFlow repository directory. The bootstrap installs to `~/OpsMineFlow` by default; if you chose another location, use that actual directory instead.
-
-The browser opens automatically at `http://127.0.0.1:5173`. Normal use after startup is completed in the WebUI.
+Source scripts are for contributors only. In particular, `./scripts/run_local.sh` is an explicitly insecure browser-development helper and refuses to run unless `OPSMINEFLOW_INSECURE_BROWSER_DEV_API=1` is set. Use it only with disposable test data, never with client or participant data.
 
 ## Beginner Guide
 

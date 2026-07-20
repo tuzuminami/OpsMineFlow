@@ -308,9 +308,10 @@ class EventStore:
 
     def record_import(self, source: str, path: str, event_count: int) -> None:
         imported_at = datetime.now(timezone.utc).isoformat()
+        display_name = _safe_import_display_name(source, path)
         item: dict[str, object] = {
             "source": source,
-            "path": path,
+            "path": display_name,
             "event_count": event_count,
             "imported_at": imported_at,
         }
@@ -320,7 +321,7 @@ class EventStore:
         with self._connect() as conn:
             cursor = conn.execute(
                 "INSERT INTO import_history(source, path, event_count, imported_at) VALUES(?, ?, ?, ?)",
-                (source, path, event_count, imported_at),
+                (source, display_name, event_count, imported_at),
             )
             item["id"] = cursor.lastrowid
         self.import_history.append(item)
@@ -430,12 +431,21 @@ class EventStore:
             {
                 "id": int(row_id),
                 "source": str(source),
-                "path": str(path),
+                "path": _safe_import_display_name(str(source), str(path)),
                 "event_count": int(event_count),
                 "imported_at": str(imported_at),
             }
             for row_id, source, path, event_count, imported_at in import_rows
         ]
+
+
+def _safe_import_display_name(source: str, path_value: str) -> str:
+    """Keep import history useful without retaining an absolute local path."""
+
+    if source.startswith("activitywatch_local"):
+        return "ActivityWatch (local)"
+    name = Path(path_value).name.strip()
+    return name or "Imported file"
 
 
 _STORE: EventStore | None = None

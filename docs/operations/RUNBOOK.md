@@ -2,33 +2,17 @@
 
 ## User Workflow
 
-Commands beginning with `./scripts/` must be run from the OpsMineFlow repository directory. The default bootstrap location is `~/OpsMineFlow`.
-
 ### 1. Install Once
 
-```bash
-./scripts/install_mac.sh
-```
+Download the signed `OpsMineFlow_*.dmg` from [GitHub Releases](https://github.com/tuzuminami/OpsMineFlow/releases), then drag **OpsMineFlow.app** to Applications.
 
 ### 2. Start
 
-```bash
-cd ~/OpsMineFlow && ./scripts/run_local.sh
-```
-
-The command starts the API and WebUI on localhost and opens the browser. Keep the terminal open. Press `Control-C` to stop both services.
-
-If OpsMineFlow is already healthy, running the same command opens it without treating its ports as an error.
+Open **OpsMineFlow.app** from Applications. The app starts its managed local runtime and presents its own window; it does not require a browser URL or Terminal session.
 
 ### 3. Stop
 
-From another terminal:
-
-```bash
-cd ~/OpsMineFlow && ./scripts/stop_local.sh
-```
-
-The stop script verifies that the listeners belong to OpsMineFlow before terminating them. It leaves unrelated programs untouched.
+Quit **OpsMineFlow.app**. It stops only the local runtime it owns and leaves unrelated processes untouched.
 
 ### 4. Record a Work Session
 
@@ -45,7 +29,7 @@ The recorder stores only frontmost application names, bundle identifiers, timest
 
 1. Open **Home > Import**.
 2. Choose CSV or JSON.
-3. Enter the local file path.
+3. Choose the file in Finder.
 4. Choose **Preview**.
 5. Confirm the event count, confidential count, and masked sample.
 6. Choose **Import Previewed File**.
@@ -67,10 +51,9 @@ Automation review states are stored in the local SQLite database and included in
 
 1. Open **Home > Exports**.
 2. Choose Markdown, JSON, CSV, Mermaid, or draw.io.
-3. Enter a local save path or use browser download.
-4. Choose **Preview**.
-5. Review masked fields, confidential flags, and the privacy warning.
-6. Save or download the artifact.
+3. Choose **Preview**.
+4. Review masked fields, confidential flags, and the privacy warning.
+5. Choose **Save** and select the destination in Finder.
 
 Treat export preview as the final manual checkpoint before sharing output with a client.
 
@@ -121,7 +104,10 @@ Run all checks:
 ./scripts/lint.sh
 ./scripts/check_licenses.sh
 ./scripts/check_no_external_network.sh
+./scripts/perf_smoke.sh
 ```
+
+`./scripts/perf_smoke.sh` generates 1k, 10k, and 100k-event CSV/JSON datasets. It protects bounded event paging, analysis, real localhost API import and dashboard responses, staged CSV/JSON exports, and rendering of the 500-row Event Explorer page. The time limits are intentionally generous regression guards for supported Macs, not a performance promise for every workload.
 
 `./scripts/lint.sh` runs `./scripts/check_migrations.sh`. The migration registry check rejects gaps and checksum changes to applied migrations, so schema changes must be introduced as a new migration.
 
@@ -143,7 +129,11 @@ Run the Tauri desktop shell with its explicitly owned development sidecar:
 ./scripts/dev_desktop.sh
 ```
 
-The development command is intentionally separate from `npm run tauri -- dev`: it passes the local Python interpreter and source import paths only to the Rust-owned child process. A packaged app never falls back to a repository checkout, Terminal, Node.js, or a system Python. Until #78 bundles the signed local runtime, a packaged build fails closed with a recovery action instead of starting an arbitrary executable.
+The development command is intentionally separate from `npm run tauri -- dev`: it passes the local Python interpreter and source import paths only to the Rust-owned child process. A packaged app never falls back to a repository checkout, Terminal, Node.js, or a system Python. It starts only the bundled local runtime after integrity verification, and fails closed with a recovery action instead of starting an arbitrary executable.
+
+In the packaged app, the WebUI does not call `127.0.0.1` directly. It sends named, allowlisted operations to the Rust runtime, which holds the per-launch local API secret. Do not add a browser-side API secret, a direct production `fetch`, or a generic URL/method proxy. `./scripts/dev.sh` and `./scripts/run_local.sh` are browser-only helpers that require an explicit insecure-development opt-in and must only use disposable test data.
+
+For CSV/JSON import, choose the source through Finder. For saved exports, choose the destination through Finder. Do not ask users to type local paths; the desktop runtime holds a short-lived selection scope and rechecks the selected item before use.
 
 If the desktop app asks to repair prior runtime state, first make sure no other OpsMineFlow process is running. Then choose **Repair local runtime state** and confirm the safety prompt. OpsMineFlow keeps the unverified ownership record in a private quarantine location and starts a replacement only after confirming that the local port is free. Do not delete runtime ownership records manually.
 

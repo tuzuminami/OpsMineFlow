@@ -26,6 +26,8 @@ CSV_MAPPING_TARGETS = (
     "source_event_id",
     "event_type",
 )
+MAX_EVENT_FIELD_BYTES = 64 * 1024
+MAX_EVENT_METADATA_BYTES = 256 * 1024
 
 CSV_COLUMN_SYNONYMS = {
     "case_id": ("case_id", "case", "case id", "案件", "案件id", "ケース", "ケースid"),
@@ -44,9 +46,14 @@ CSV_COLUMN_SYNONYMS = {
 }
 
 
-def load_events_from_csv(path: str | Path, source: str = "csv") -> list[StandardEvent]:
+def load_events_from_csv(
+    path: str | Path,
+    source: str = "csv",
+    *,
+    max_events: int | None = None,
+) -> list[StandardEvent]:
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+        rows = _read_limited_csv_rows(csv.DictReader(handle), max_events)
     return [_event_from_csv_row(row, index, source) for index, row in enumerate(rows, start=1)]
 
 
@@ -94,10 +101,11 @@ def load_events_from_csv_with_mapping(
     date_format: str = "",
     timezone_name: str = "UTC",
     source: str = "csv_mapped",
+    max_events: int | None = None,
 ) -> list[StandardEvent]:
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
-        rows = list(reader)
+        rows = _read_limited_csv_rows(reader, max_events)
         columns = set(reader.fieldnames or [])
     cleaned_mapping = {
         target: column
@@ -114,16 +122,43 @@ def load_events_from_csv_with_mapping(
     ]
 
 
-def load_events_from_json(path: str | Path, source: str = "json") -> list[StandardEvent]:
+def load_events_from_json(
+    path: str | Path,
+    source: str = "json",
+    *,
+    max_events: int | None = None,
+) -> list[StandardEvent]:
     with Path(path).open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if isinstance(payload, list):
+        _ensure_event_limit(len(payload), max_events)
         return [_event_from_generic_json(item, index, source) for index, item in enumerate(payload, start=1)]
     if isinstance(payload, dict) and "buckets" in payload:
-        return list(_events_from_activitywatch_export(payload))
+        events = list(_events_from_activitywatch_export(payload))
+        _ensure_event_limit(len(events), max_events)
+        return events
     if isinstance(payload, dict) and "events" in payload and isinstance(payload["events"], list):
-        return [_event_from_generic_json(item, index, source) for index, item in enumerate(payload["events"], start=1)]
+        event_rows = payload["events"]
+        _ensure_event_limit(len(event_rows), max_events)
+        return [_event_from_generic_json(item, index, source) for index, item in enumerate(event_rows, start=1)]
     raise ValueError("Unsupported JSON event format")
+
+
+def _read_limited_csv_rows(
+    reader: csv.DictReader,
+    max_events: int | None,
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for row in reader:
+        if max_events is not None and len(rows) >= max_events:
+            raise ValueError(f"Import is limited to {max_events:,} events per file.")
+        rows.append(row)
+    return rows
+
+
+def _ensure_event_limit(event_count: int, max_events: int | None) -> None:
+    if max_events is not None and event_count > max_events:
+        raise ValueError(f"Import is limited to {max_events:,} events per file.")
 
 
 def build_native_app_event(
@@ -316,6 +351,25 @@ def _build_event(
     idle_flag: bool,
     metadata: dict[str, Any],
 ) -> StandardEvent:
+    _validate_event_text_sizes(
+        {
+            "source": source,
+            "source event id": source_event_id,
+            "case id": case_id,
+            "user": user_alias,
+            "app name": app_name,
+            "app bundle id": app_bundle_id,
+            "window title": window_title,
+            "URL": url,
+            "activity": activity_raw,
+            "event type": event_type,
+        }
+    )
+    metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    if len(metadata_json.encode("utf-8")) > MAX_EVENT_METADATA_BYTES:
+        raise ValueError(
+            f"Import event metadata exceeds the {MAX_EVENT_METADATA_BYTES // 1024} KiB safety limit."
+        )
     timestamp_start_iso = _to_iso(timestamp_start)
     timestamp_end_iso = _to_iso(timestamp_end)
     created_at = _to_iso(datetime.now(timezone.utc))
@@ -346,9 +400,15 @@ def _build_event(
         duration_seconds=duration_seconds,
         idle_flag=idle_flag,
         confidential_flag=looks_confidential(window_title, url, activity_raw),
-        metadata_json=json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+        metadata_json=metadata_json,
         created_at=created_at,
     )
+
+
+def _validate_event_text_sizes(values: dict[str, str]) -> None:
+    for name, value in values.items():
+        if len(value.encode("utf-8")) > MAX_EVENT_FIELD_BYTES:
+            raise ValueError(f"Import event {name} exceeds the {MAX_EVENT_FIELD_BYTES // 1024} KiB safety limit.")
 
 
 def _parse_datetime(value: str) -> datetime:

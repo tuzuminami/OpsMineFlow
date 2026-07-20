@@ -14,6 +14,7 @@ from opsmineflow_api.app import (
     create_api_snapshot,
     create_activitywatch_preview,
     create_diagnostics,
+    create_event_page,
     create_event_quality_report,
     create_export_artifact,
     create_import_preview,
@@ -24,6 +25,7 @@ from opsmineflow_api.app import (
     save_export_artifact,
 )
 from opsmineflow_api.child_process import sanitized_subprocess_environment
+from opsmineflow_api.auth import LocalApiPolicy
 from opsmineflow_api.recording import RecordingManager, _recording_agent_environment, native_event_from_payload
 from opsmineflow_api.server import LocalApiHandler
 from opsmineflow_api.storage import EventStore
@@ -213,11 +215,17 @@ class ApiLogicTests(unittest.TestCase):
         self.assertIn("<mxfile", snapshot["drawio"])
 
     def test_runtime_health_identity_is_present_only_for_an_owned_sidecar(self) -> None:
-        with patch("opsmineflow_api.app._RUNTIME_NONCE", "sidecar-owner-nonce"):
-            health = create_runtime_health()
+        with (
+            patch("opsmineflow_api.app._RUNTIME_NONCE", "sidecar-owner-nonce"),
+            patch("opsmineflow_api.app._RUNTIME_PROBE_SECRET", "probe-secret"),
+        ):
+            health = create_runtime_health("a" * 64)
+            public_health = create_runtime_health()
 
         self.assertEqual(health["runtime"]["nonce"], "sidecar-owner-nonce")
         self.assertIsInstance(health["runtime"]["pid"], int)
+        self.assertEqual(len(health["runtime"]["proof"]), 64)
+        self.assertNotIn("runtime", public_health)
         self.assertNotIn("storage_mode", health)
         self.assertNotIn("event_count", health)
 
@@ -225,6 +233,12 @@ class ApiLogicTests(unittest.TestCase):
         from http.server import ThreadingHTTPServer
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), LocalApiHandler)
+        server.security_policy = LocalApiPolicy(  # type: ignore[attr-defined]
+            api_session_token="",
+            port=server.server_port,
+            allowed_origins=set(),
+            development_mode=False,
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=2)
@@ -255,6 +269,7 @@ class ApiLogicTests(unittest.TestCase):
                 "PATH": "/usr/bin:/bin",
                 "OPSMINEFLOW_RUNTIME_SECRET": "runtime-secret",
                 "OPSMINEFLOW_RUNTIME_NONCE": "runtime-nonce",
+                "OPSMINEFLOW_RUNTIME_PROBE_SECRET": "runtime-probe-secret",
                 "PYTHONPATH": "/private/pythonpath",
             },
             clear=True,
@@ -401,8 +416,81 @@ class ApiLogicTests(unittest.TestCase):
         result = import_path_into_store("csv", "data/sample/sample_events.csv", store=store)
 
         self.assertEqual(preview["event_count"], 7)
+        self.assertEqual(preview["display_name"], "sample_events.csv")
         self.assertEqual(result["imported_events"], 7)
         self.assertEqual(store.list_import_history()[0]["source"], "csv")
+        self.assertEqual(store.list_import_history()[0]["path"], "sample_events.csv")
+
+    def test_event_page_bounds_dashboard_transport(self) -> None:
+        store = EventStore(events=load_events_from_csv("data/sample/sample_events.csv"))
+
+        page = create_event_page(offset=2, limit=3, store=store)
+
+        self.assertEqual(len(page["events"]), 3)
+        self.assertEqual(page["offset"], 2)
+        self.assertEqual(page["total"], 7)
+        self.assertTrue(page["has_more"])
+        with self.assertRaisesRegex(ValueError, "between 1 and 500"):
+            create_event_page(offset=0, limit=501, store=store)
+        with self.assertRaisesRegex(ValueError, "must not be negative"):
+            create_event_page(offset=-1, limit=1, store=store)
+
+    def test_event_page_projects_only_the_webui_contract(self) -> None:
+        source_event = load_events_from_csv("data/sample/sample_events.csv")[0]
+        event = replace(
+            source_event,
+            window_title="PRIVATE WINDOW TITLE",
+            url="private-secret-path",
+            metadata_json=json.dumps({"unbounded": "x" * (512 * 1024)}),
+        )
+
+        page = create_event_page(store=EventStore(events=[event]))
+        record = page["events"][0]
+
+        self.assertEqual(
+            set(record),
+            {
+                "event_id",
+                "case_id",
+                "user_hash",
+                "app_name",
+                "window_title_masked",
+                "url_masked",
+                "domain",
+                "activity_raw",
+                "timestamp_start",
+                "timestamp_end",
+                "duration_seconds",
+                "confidential_flag",
+                "quality_review_status",
+            },
+        )
+        self.assertNotIn("window_title", record)
+        self.assertNotIn("url", record)
+        self.assertNotIn("metadata_json", record)
+        self.assertNotIn("user_alias", record)
+        self.assertNotIn("PRIVATE WINDOW TITLE", json.dumps(page))
+        self.assertLess(len(json.dumps(page)), 16 * 1024)
+
+    def test_event_page_stays_below_the_ipc_response_budget(self) -> None:
+        source_event = load_events_from_csv("data/sample/sample_events.csv")[0]
+        events = [
+            replace(
+                source_event,
+                event_id=f"evt-page-{index}",
+                window_title="x" * (64 * 1024),
+                window_title_masked="masked",
+            )
+            for index in range(60)
+        ]
+        store = EventStore(events=events)
+        store.update_settings({"mask_window_titles": False})
+
+        page = create_event_page(offset=0, limit=500, store=store)
+
+        self.assertLess(len(json.dumps(page, ensure_ascii=False).encode("utf-8")), 3_100_000)
+        self.assertLess(len(page["events"]), 60)
+        self.assertTrue(page["has_more"])
 
     def test_csv_import_preview_accepts_column_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -524,13 +612,45 @@ class ApiLogicTests(unittest.TestCase):
         artifact = create_export_artifact("markdown", store=store)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = save_export_artifact("drawio", str(Path(temp_dir) / "map"), store=store)
-            saved_path = Path(str(result["path"]))
+            requested_path = Path(temp_dir) / "map"
+            result = save_export_artifact("drawio", str(requested_path), store=store)
+            saved_path = requested_path.with_suffix(".drawio")
 
         self.assertEqual(artifact["format"], "markdown")
         self.assertIn("Review masked fields", artifact["warning"])
         self.assertTrue(saved_path.name.endswith(".drawio"))
+        self.assertEqual(result["filename"], "map.drawio")
+        self.assertNotIn("path", result)
         self.assertGreater(result["byte_size"], 0)
+
+    def test_export_save_requires_explicit_overwrite_and_uses_the_selected_existing_folder(self) -> None:
+        store = EventStore(events=load_events_from_csv("data/sample/sample_events.csv"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "existing.md"
+            target.write_text("previous export", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Confirm replacement"):
+                save_export_artifact("markdown", str(target), store=store)
+
+            result = save_export_artifact("markdown", str(target), store=store, overwrite_confirmed=True)
+
+            self.assertTrue(result["saved"])
+            self.assertNotEqual(target.read_text(encoding="utf-8"), "previous export")
+            self.assertEqual(list(Path(temp_dir).glob(".opsmineflow-export-*")), [])
+
+    def test_export_save_rejects_a_symlink_or_directory_target(self) -> None:
+        store = EventStore(events=load_events_from_csv("data/sample/sample_events.csv"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            directory_target = root / "selected.md"
+            directory_target.mkdir()
+            symlink_target = root / "linked.md"
+            symlink_target.symlink_to(directory_target, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "regular export filename"):
+                save_export_artifact("markdown", str(directory_target), store=store)
+            with self.assertRaisesRegex(ValueError, "regular export filename"):
+                save_export_artifact("markdown", str(symlink_target), store=store)
 
     def test_automation_review_state_is_exposed_and_exported(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")

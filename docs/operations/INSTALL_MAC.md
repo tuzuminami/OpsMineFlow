@@ -5,47 +5,22 @@
 Requirements:
 
 - macOS Sonoma or newer
-- Python 3.11 or newer
-- Node.js 20 or newer
-- npm
 
-From a fresh Mac terminal, install once:
+1. Download the signed `OpsMineFlow_*.dmg` from [GitHub Releases](https://github.com/tuzuminami/OpsMineFlow/releases).
+2. Open the disk image and drag **OpsMineFlow.app** to Applications.
+3. Open **OpsMineFlow.app** from Applications.
 
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/tuzuminami/OpsMineFlow/main/scripts/bootstrap_mac.sh)"
-```
-
-The bootstrap clones to `~/OpsMineFlow` by default. The installer selects an available Python 3.11 or newer, creates `.venv`, installs the local Python packages and WebUI dependencies, and runs install checks.
-
-For an existing clone at the default location:
-
-```bash
-cd ~/OpsMineFlow && ./scripts/install_mac.sh
-```
-
-Start OpsMineFlow:
-
-```bash
-cd ~/OpsMineFlow && ./scripts/run_local.sh
-```
-
-Stop OpsMineFlow from another terminal:
-
-```bash
-cd ~/OpsMineFlow && ./scripts/stop_local.sh
-```
-
-The browser opens automatically. Keep the startup terminal window open while using OpsMineFlow. Press `Control-C` there or run the stop command above to stop the local API and WebUI. Re-running the start command reuses an existing healthy instance. If the checkout is not under `~/OpsMineFlow`, use its actual directory.
+The desktop app owns its local runtime and starts it only after validation. No Terminal, Python, Node.js, browser URL, cloud account, API key, or LLM is required for normal use.
 
 Docker, a cloud account, an API key, and an LLM are not required.
 
-Review the downloaded bootstrap script before using it in a client-managed environment.
+Do not use source checkout scripts for client or participant data. `./scripts/run_local.sh` is an intentionally insecure browser-development helper, protected by the explicit `OPSMINEFLOW_INSECURE_BROWSER_DEV_API=1` opt-in.
 
 ## First Run Check
 
 After startup:
 
-1. Confirm the browser opens the local WebUI.
+1. Confirm the desktop window opens.
 2. Open **Home > Diagnostics**.
 3. Confirm the API bind is `127.0.0.1`.
 4. Confirm external network is blocked by policy.
@@ -54,6 +29,12 @@ After startup:
 If startup fails, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ## For Developers
+
+Python 3.11 or newer, Node.js 20 or newer, and Rust 1.85 or newer are required for source development. Run `./scripts/dev_desktop.sh` for a managed local desktop runtime. The browser-only helper may be used only with disposable test data:
+
+```bash
+OPSMINEFLOW_INSECURE_BROWSER_DEV_API=1 ./scripts/run_local.sh
+```
 
 Run the complete local checks:
 

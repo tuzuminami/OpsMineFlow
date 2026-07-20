@@ -61,6 +61,9 @@ jobs:
           ./scripts/check_licenses.sh
           ./scripts/check_no_external_network.sh
 
+      - name: Run large-event performance smoke
+        run: ./scripts/perf_smoke.sh
+
   macos-package-smoke:
     name: macos-package-smoke
     needs: macos-core
