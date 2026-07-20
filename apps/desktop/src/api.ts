@@ -4,6 +4,7 @@ import type {
   ActivityWatchImportMode,
   ActivityWatchPreview,
   AutomationCandidate,
+  AutomationCandidatesResponse,
   AutomationReviewStatus,
   CsvMapping,
   DiagnosticChecks,
@@ -63,6 +64,7 @@ const DEVELOPMENT_ROUTES: Record<string, { method: "GET" | "POST"; path: string 
   settings_update: { method: "POST", path: "/settings" },
   automation_review: { method: "POST", path: "/automation/review" },
   event_activity: { method: "POST", path: "/events/activity" },
+  event_case_correlation: { method: "POST", path: "/events/case-correlation" },
   event_exclude: { method: "POST", path: "/events/exclude" },
   event_quality_review: { method: "POST", path: "/events/quality-review" },
   event_split: { method: "POST", path: "/events/split" },
@@ -130,7 +132,7 @@ export async function loadDashboardData() {
     getJson<EventQualityReport>("event_quality"),
     getJson<Summary>("summary"),
     getJson<ProcessMap>("process_map"),
-    getJson<AutomationCandidate[]>("automation_candidates"),
+    getJson<AutomationCandidatesResponse>("automation_candidates"),
     getJson<AppSwitching>("app_switching"),
     getJson<{ markdown: string }>("report_markdown")
   ]);
@@ -146,7 +148,7 @@ export async function loadDashboardData() {
     quality,
     summary,
     processMap,
-    candidates,
+    candidates: candidates.candidates,
     appSwitching,
     markdown: report.markdown
   };
@@ -255,6 +257,14 @@ export async function updateEventActivity(eventId: string, activity: string) {
   return postJson<{ event: EventRecord }>("event_activity", { event_id: eventId, activity });
 }
 
+export async function updateEventCaseCorrelation(eventId: string, caseId: string, reason: string) {
+  return postJson<{ event: EventRecord }>("event_case_correlation", {
+    event_id: eventId,
+    case_id: caseId,
+    reason
+  });
+}
+
 export async function excludeEvent(eventId: string) {
   return postJson<{ excluded: boolean; event_id: string }>("event_exclude", { event_id: eventId });
 }
@@ -298,7 +308,7 @@ export async function exportArtifact(format: ExportFormat) {
   if (isTauri()) throw new Error("Packaged exports must use the native save dialog.");
   if (format === "markdown") return getJson<{ markdown: string }>("report_markdown");
   if (format === "json") return postJson<{ json: string }>("export_json");
-  if (format === "csv") return postJson<{ csv: string }>("export_csv");
+  if (format === "csv") return postJson<{ filename: string; zip_base64: string }>("export_csv");
   if (format === "mermaid") return postJson<{ mermaid: string }>("export_mermaid");
   if (format === "llm-handoff") return postJson<{ filename: string; zip_base64: string }>("export_llm_handoff");
   return postJson<{ drawio: string }>("export_drawio");

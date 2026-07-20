@@ -171,9 +171,11 @@ review = request("/automation/review", {"activity": "社内確認", "status": "a
 assert isinstance(review, dict)
 assert review["review_status"] == "adopted"
 
-candidates = request("/analytics/automation-candidates")
-assert isinstance(candidates, list)
-reviewed = next(item for item in candidates if item["activity"] == "社内確認")
+candidates_payload = request("/analytics/automation-candidates")
+assert isinstance(candidates_payload, dict)
+assert isinstance(candidates_payload["candidates"], list)
+assert isinstance(candidates_payload["analysis_receipt"], dict)
+reviewed = next(item for item in candidates_payload["candidates"] if item["activity"] == "社内確認")
 assert reviewed["review_status"] == "adopted"
 
 drawio = request("/export/drawio", {})

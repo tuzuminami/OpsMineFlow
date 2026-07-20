@@ -8,8 +8,10 @@ from dataclasses import replace
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import RLock
 
 from opsmineflow_mining import load_events_from_csv
+from opsmineflow_mining.analysis import event_sort_key
 from opsmineflow_mining.models import StandardEvent
 from opsmineflow_mining.privacy import extract_domain, looks_confidential, mask_url, mask_window_title
 
@@ -20,6 +22,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "mask_url_paths": True,
     "mask_window_titles": True,
     "retention_days": 30,
+    "session_gap_minutes": 30,
     "activitywatch_enabled": False,
     "excluded_apps": [],
     "excluded_domains": [],
@@ -49,9 +52,12 @@ class EventStore:
     db_path: Path | None = None
     migration_fault_injector: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
     _migration_report: MigrationReport | None = field(default=None, init=False, repr=False)
+    _analysis_cache: dict[object, object] = field(default_factory=dict, init=False, repr=False, compare=False)
+    _analysis_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.db_path is None:
+            self.events = _uniquify_event_ids(self._filter_events(list(self.events)))
             return
         self.db_path = Path(self.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -66,8 +72,9 @@ class EventStore:
             self._load()
 
     def replace(self, events: list[StandardEvent], import_source: str = "", import_path: str = "") -> None:
-        self.events = self._filter_events(list(events))
+        self.events = _uniquify_event_ids(self._filter_events(list(events)))
         self.manual_labels = {}
+        self._invalidate_analysis()
         if self.db_path is None:
             if import_source:
                 self.record_import(import_source, import_path, len(self.events))
@@ -86,7 +93,11 @@ class EventStore:
 
     def append(self, events: list[StandardEvent]) -> int:
         existing_ids = {event.event_id for event in self.events}
-        new_events = [event for event in self._filter_events(list(events)) if event.event_id not in existing_ids]
+        candidates = [event for event in self._filter_events(list(events)) if event.event_id not in existing_ids]
+        new_events = [
+            event
+            for event in _uniquify_event_ids(candidates, reserved_ids=existing_ids)
+        ]
         if not new_events:
             return 0
         self.events.extend(new_events)
@@ -146,6 +157,34 @@ class EventStore:
         )
         self._persist_events()
         return {"event_id": event_id, "quality_review_status": normalized_status}
+
+    def update_event_case_correlation(self, event_id: str, case_id: str, reason: str) -> dict[str, object]:
+        """Apply a local human case correction without inventing source evidence.
+
+        A reviewer-supplied case ID is useful evidence, but it is distinct
+        from a source-observed ID, so its provenance remains manual.
+        """
+
+        normalized_case_id = case_id.strip()
+        if not normalized_case_id:
+            raise ValueError("Case identifier is required.")
+        if len(normalized_case_id) > 256 or any(character in "\r\n\t" for character in normalized_case_id):
+            raise ValueError("Case identifier must be a single line of at most 256 characters.")
+        normalized_reason = reason.strip()
+        if not normalized_reason:
+            raise ValueError("A review reason is required for a manual case correction.")
+        if len(normalized_reason) > 500 or any(character in "\r\n\t" for character in normalized_reason):
+            raise ValueError("Review reason must be a single line of at most 500 characters.")
+        index = self._find_event_index(event_id)
+        event = self.events[index]
+        self.events[index] = _replace_event(
+            event,
+            case_id=normalized_case_id,
+            session_id=f"{normalized_case_id}:manual-review",
+            metadata_json=_case_correlation_metadata(event, "manual_case_correction", normalized_reason),
+        )
+        self._persist_events()
+        return self.events[self._find_event_index(event_id)].to_dict()
 
     def split_event(
         self,
@@ -246,6 +285,7 @@ class EventStore:
         self.manual_labels = {}
         self.automation_reviews = {}
         self.automation_review_notes = {}
+        self._invalidate_analysis()
         if self.db_path is None:
             self.import_history = []
             return
@@ -293,6 +333,7 @@ class EventStore:
             if key in allowed:
                 self.settings[key] = _normalize_setting(key, value)
         self.events = self._filter_events(self.events)
+        self._invalidate_analysis()
         if self.db_path is not None:
             with self._connect() as conn:
                 conn.execute("DELETE FROM events")
@@ -359,7 +400,8 @@ class EventStore:
         raise KeyError(event_id)
 
     def _persist_events(self) -> None:
-        self.events.sort(key=lambda event: (event.case_id, event.timestamp_start, event.event_id))
+        self._invalidate_analysis()
+        self.events.sort(key=event_sort_key)
         live_event_ids = {event.event_id for event in self.events}
         self.manual_labels = {event_id: label for event_id, label in self.manual_labels.items() if event_id in live_event_ids}
         if self.db_path is not None:
@@ -414,7 +456,7 @@ class EventStore:
             import_rows = conn.execute(
                 "SELECT id, source, path, event_count, imported_at FROM import_history ORDER BY id"
             ).fetchall()
-        self.events = [StandardEvent(**json.loads(row[0])) for row in event_rows]
+        self.events = sorted((StandardEvent(**json.loads(row[0])) for row in event_rows), key=event_sort_key)
         self.manual_labels = {str(event_id): str(label) for event_id, label in label_rows}
         self.settings = dict(DEFAULT_SETTINGS)
         for key, value_json in setting_rows:
@@ -437,6 +479,27 @@ class EventStore:
             }
             for row_id, source, path, event_count, imported_at in import_rows
         ]
+        self._invalidate_analysis()
+
+    def get_or_create_analysis(self, cache_key: object, builder: Callable[[], object]) -> object:
+        """Return one immutable analysis per local data/configuration snapshot.
+
+        Dashboard routes arrive concurrently from the WebUI.  Preparing the
+        same 100k-event receipt in every request both wastes CPU and can make
+        otherwise bounded localhost requests time out.  Holding this small
+        per-store lock means the first route prepares the result while the
+        others reuse exactly that immutable result.  Every event/settings
+        mutation clears the cache through ``_invalidate_analysis``.
+        """
+
+        with self._analysis_lock:
+            if cache_key not in self._analysis_cache:
+                self._analysis_cache[cache_key] = builder()
+            return self._analysis_cache[cache_key]
+
+    def _invalidate_analysis(self) -> None:
+        with self._analysis_lock:
+            self._analysis_cache.clear()
 
 
 def _safe_import_display_name(source: str, path_value: str) -> str:
@@ -471,6 +534,12 @@ def _normalize_setting(key: str, value: object) -> object:
         except (TypeError, ValueError):
             return DEFAULT_SETTINGS[key]
         return min(max(number, 1), 365)
+    if key == "session_gap_minutes":
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return DEFAULT_SETTINGS[key]
+        return min(max(number, 0), 24 * 60)
     if key in {"excluded_apps", "excluded_domains"}:
         if isinstance(value, str):
             items = value.replace("\n", ",").split(",")
@@ -502,7 +571,9 @@ def _parse_iso(value: str) -> datetime:
 
 
 def _to_iso(value: datetime) -> str:
-    return value.isoformat()
+    if value.tzinfo is None:
+        raise ValueError("timestamp must include a timezone before storage")
+    return value.astimezone(timezone.utc).isoformat()
 
 
 def _event_time_bounds(event: StandardEvent) -> tuple[datetime, datetime, float]:
@@ -516,6 +587,38 @@ def _event_time_bounds(event: StandardEvent) -> tuple[datetime, datetime, float]
 
 def _normalize_activity(activity: str) -> str:
     return " ".join((activity or "unlabeled activity").strip().lower().split())
+
+
+def _uniquify_event_ids(
+    events: list[StandardEvent], *, reserved_ids: set[str] | None = None
+) -> list[StandardEvent]:
+    """Preserve every imported source row while keeping SQLite event IDs unique.
+
+    Source identity is ``(source, source_event_id)``.  Exact re-imports and
+    conflicts are deliberately retained here so ``prepare_analysis`` can count
+    them in the analysis receipt rather than silently hiding the evidence at
+    storage time.
+    """
+
+    grouped: dict[str, list[StandardEvent]] = {}
+    for event in events:
+        grouped.setdefault(event.event_id, []).append(event)
+    used = set(reserved_ids or set())
+    result: list[StandardEvent] = []
+    for original_id in sorted(grouped):
+        group = sorted(grouped[original_id], key=_event_identity_sort_key)
+        for occurrence, event in enumerate(group):
+            event_id = original_id if original_id not in used else _derived_event_id(original_id, f"stored-{occurrence}")
+            while event_id in used:
+                occurrence += 1
+                event_id = _derived_event_id(original_id, f"stored-{occurrence}")
+            used.add(event_id)
+            result.append(event if event_id == event.event_id else _replace_event(event, event_id=event_id))
+    return sorted(result, key=event_sort_key)
+
+
+def _event_identity_sort_key(event: StandardEvent) -> tuple[object, ...]:
+    return (*event_sort_key(event), json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
 def _derived_event_id(event_id: str, suffix: str) -> str:
@@ -540,4 +643,27 @@ def _edited_metadata(event: StandardEvent, action: str, **extra: object) -> str:
             **extra,
         }
     )
+    return json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+
+
+def _case_correlation_metadata(event: StandardEvent, action: str, reason: str) -> str:
+    try:
+        metadata = json.loads(event.metadata_json) if event.metadata_json else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+    except json.JSONDecodeError:
+        metadata = {}
+    metadata["opsmineflow_case_correlation"] = {
+        "origin": "manual",
+        "strategy": "local_reviewer_case_id",
+        "confidence": "medium",
+        "evidence": "A local reviewer supplied this case identifier.",
+    }
+    metadata["opsmineflow_case_correlation_review"] = {
+        "action": action,
+        "previous_case_id": event.case_id,
+        "reason": reason,
+        "operator": "local-reviewer",
+        "changed_at": datetime.now(timezone.utc).isoformat(),
+    }
     return json.dumps(metadata, ensure_ascii=False, sort_keys=True)

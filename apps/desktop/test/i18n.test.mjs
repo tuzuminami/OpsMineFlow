@@ -82,3 +82,13 @@ test("recording polling stays lightweight and dashboard refreshes are single-fli
   assert.match(appSource, /Promise\.all\(\[getNativeRuntimeStatus\(\), getRecordingStatus\(\)\]\)/);
   assert.doesNotMatch(appSource, /setInterval\(\(\) => void refresh\(true\), 2000\)/);
 });
+
+test("quality repair exposes provenance and the timeline orders explicit-offset instants", () => {
+  assert.match(appSource, /item\.case_correlation\.strategy/);
+  assert.match(appSource, /item\.case_correlation\.evidence/);
+  assert.match(appSource, /case_correlation_review/);
+  assert.match(appSource, /function compareTimelineEvents/);
+  assert.match(appSource, /Date\.parse\(left\.timestamp_start\)/);
+  assert.match(appSource, /sort\(compareTimelineEvents\)/);
+  assert.match(apiSource, /AutomationCandidatesResponse/);
+});

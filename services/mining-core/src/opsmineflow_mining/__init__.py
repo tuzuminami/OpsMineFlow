@@ -7,6 +7,15 @@ from .importers import (
     suggest_csv_mapping,
 )
 from .models import StandardEvent
+from .analysis import (
+    ANALYSIS_ALGORITHM_VERSION,
+    DEFAULT_SESSION_GAP_MINUTES,
+    AnalysisExclusion,
+    AnalysisReceipt,
+    MiningConfig,
+    PreparedAnalysis,
+    prepare_analysis,
+)
 from .pipeline import (
     analyze_variants,
     assign_activity_labels,
@@ -27,6 +36,12 @@ from .privacy import mask_url, mask_window_title
 
 __all__ = [
     "StandardEvent",
+    "ANALYSIS_ALGORITHM_VERSION",
+    "DEFAULT_SESSION_GAP_MINUTES",
+    "AnalysisReceipt",
+    "AnalysisExclusion",
+    "MiningConfig",
+    "PreparedAnalysis",
     "analyze_variants",
     "assign_activity_labels",
     "build_directly_follows_graph",
@@ -46,6 +61,7 @@ __all__ = [
     "mask_url",
     "mask_window_title",
     "normalize_events",
+    "prepare_analysis",
     "score_automation_candidates",
     "sessionize_events",
     "suggest_csv_mapping",

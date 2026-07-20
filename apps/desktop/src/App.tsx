@@ -26,7 +26,8 @@ import {
   splitEvent,
   startRecording,
   stopRecording,
-  updateEventActivity
+  updateEventActivity,
+  updateEventCaseCorrelation
 } from "./api";
 import { useI18n } from "./i18n";
 import type { TranslationKey } from "./i18n";
@@ -84,6 +85,7 @@ type AppActions = {
   saveSettings: (settings: Partial<AppSettings>) => Promise<void>;
   saveAutomationReview: (activity: string, status: AutomationReviewStatus, note?: string) => Promise<void>;
   updateEventActivity: (eventId: string, activity: string) => Promise<void>;
+  updateEventCaseCorrelation: (eventId: string, caseId: string, reason: string) => Promise<void>;
   excludeEvent: (eventId: string) => Promise<void>;
   approveEventQuality: (eventId: string) => Promise<void>;
   splitEvent: (eventId: string, splitAfterSeconds: number, firstActivity?: string, secondActivity?: string) => Promise<void>;
@@ -400,6 +402,11 @@ export function App() {
         await updateEventActivity(eventId, activity);
         return t("message.timelineActivityUpdated");
       }),
+    updateEventCaseCorrelation: (eventId, caseId, reason) =>
+      runAction(async () => {
+        await updateEventCaseCorrelation(eventId, caseId, reason);
+        return t("message.caseCorrelationUpdated");
+      }),
     excludeEvent: (eventId) =>
       runAction(async () => {
         await excludeEvent(eventId);
@@ -582,8 +589,8 @@ function downloadExport(
     filename?: string;
     zip_base64?: string;
   };
-  const filename = format === "llm-handoff"
-    ? typed.filename || "opsmineflow-mermaid-handoff.zip"
+  const filename = format === "llm-handoff" || format === "csv"
+    ? typed.filename || (format === "csv" ? "opsmineflow-events-with-analysis-receipt.zip" : "opsmineflow-mermaid-handoff.zip")
     : `opsmineflow-export.${format === "markdown" ? "md" : format === "drawio" ? "drawio" : format}`;
   let content = "";
   let mime = "text/plain;charset=utf-8";
@@ -595,17 +602,14 @@ function downloadExport(
   } else if (format === "json") {
     content = typed.json || "";
     mime = "application/json;charset=utf-8";
-  } else if (format === "csv") {
-    content = typed.csv || "";
-    mime = "text/csv;charset=utf-8";
-  } else if (format === "mermaid") {
-    content = typed.mermaid || "";
-  } else if (format === "llm-handoff") {
+  } else if (format === "csv" || format === "llm-handoff") {
     const binary = atob(typed.zip_base64 || "");
     const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
     binaryContent = new ArrayBuffer(bytes.byteLength);
     new Uint8Array(binaryContent).set(bytes);
     mime = "application/zip";
+  } else if (format === "mermaid") {
+    content = typed.mermaid || "";
   } else {
     content = typed.drawio || "";
     mime = "application/xml;charset=utf-8";
@@ -1008,6 +1012,16 @@ function HomeView({
             max="365"
             value={settingsDraft.retention_days}
             onChange={(event) => setSettingsDraft({ ...settingsDraft, retention_days: Number(event.target.value) })}
+          />
+        </label>
+        <label className="number-row">
+          <span>{t("settings.sessionGap")}</span>
+          <input
+            type="number"
+            min="0"
+            max="1440"
+            value={settingsDraft.session_gap_minutes}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, session_gap_minutes: Number(event.target.value) })}
           />
         </label>
         <label className="text-row">
@@ -1428,7 +1442,7 @@ function RecordingPanel({ data, actions, working }: { data: DashboardData; actio
 function RecordingTimeline({ events, actions, working }: { events: EventRecord[]; actions: AppActions; working: boolean }) {
   const { formatDateTime, t } = useI18n();
   const orderedEvents = useMemo(
-    () => [...events].sort((a, b) => `${a.case_id}|${a.timestamp_start}|${a.event_id}`.localeCompare(`${b.case_id}|${b.timestamp_start}|${b.event_id}`)),
+    () => [...events].sort(compareTimelineEvents),
     [events]
   );
   const breakCandidates = useMemo(() => findBreakCandidates(orderedEvents), [orderedEvents]);
@@ -1581,6 +1595,22 @@ type BreakCandidate = {
   eventId?: string;
 };
 
+function compareTimelineEvents(left: EventRecord, right: EventRecord): number {
+  const leftStart = Date.parse(left.timestamp_start);
+  const rightStart = Date.parse(right.timestamp_start);
+  const startDifference = safeTimelineEpoch(leftStart) - safeTimelineEpoch(rightStart);
+  if (startDifference !== 0) return startDifference;
+  const leftEnd = Date.parse(left.timestamp_end);
+  const rightEnd = Date.parse(right.timestamp_end);
+  const endDifference = safeTimelineEpoch(leftEnd) - safeTimelineEpoch(rightEnd);
+  if (endDifference !== 0) return endDifference;
+  return left.case_id.localeCompare(right.case_id) || left.event_id.localeCompare(right.event_id);
+}
+
+function safeTimelineEpoch(value: number): number {
+  return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+
 function findBreakCandidates(events: EventRecord[]): BreakCandidate[] {
   const candidates: BreakCandidate[] = [];
   for (const event of events) {
@@ -1652,6 +1682,8 @@ function PrivacyEvidencePanel({ data }: { data: DashboardData }) {
 function DashboardView({ data }: { data: DashboardData }) {
   const { t } = useI18n();
   const totalMinutes = Math.round(data.summary.total_active_seconds / 60);
+  const receipt = data.summary.analysis_receipt;
+  const lowConfidenceCases = receipt.confidence_counts.low ?? 0;
   return (
     <section className="view-grid">
       <Metric label={t("dashboard.events")} value={data.summary.total_events.toString()} />
@@ -1677,6 +1709,27 @@ function DashboardView({ data }: { data: DashboardData }) {
             value: t("unit.secondsAverage", { count: node.average_duration_seconds.toFixed(0) })
           }))}
       />
+      <section className="panel">
+        <h2>{t("dashboard.analysisScope")}</h2>
+        <p>
+          {t("dashboard.analysisScopeValue", {
+            used: receipt.used_event_count,
+            input: receipt.input_event_count,
+            sessions: receipt.analysis_case_count,
+            gap: receipt.session_gap_minutes
+          })}
+        </p>
+        <p>
+          {receipt.excluded_event_count > 0
+            ? t("dashboard.analysisExcluded", { count: receipt.excluded_event_count })
+            : t("dashboard.analysisNoExclusions")}
+        </p>
+        <p>
+          {lowConfidenceCases > 0
+            ? t("dashboard.analysisLowConfidence", { count: lowConfidenceCases })
+            : t("dashboard.analysisConfidenceReady")}
+        </p>
+      </section>
     </section>
   );
 }
@@ -1742,11 +1795,20 @@ function QualityView({
   const { formatDateTime, t } = useI18n();
   const unresolved = quality.items.filter((item) => item.quality_review_status !== "approved");
   const [activityDrafts, setActivityDrafts] = useState<Record<string, string>>({});
+  const [caseDrafts, setCaseDrafts] = useState<Record<string, string>>({});
+  const [caseReasons, setCaseReasons] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setActivityDrafts((current) => {
       const next: Record<string, string> = {};
       for (const item of quality.items) next[item.event_id] = current[item.event_id] ?? item.activity;
+      return next;
+    });
+  }, [quality.items]);
+  useEffect(() => {
+    setCaseDrafts((current) => {
+      const next: Record<string, string> = {};
+      for (const item of quality.items) next[item.event_id] = current[item.event_id] ?? item.case_id;
       return next;
     });
   }, [quality.items]);
@@ -1758,12 +1820,20 @@ function QualityView({
         <Metric label={t("quality.affected")} value={quality.summary.affected_event_count.toString()} />
         <Metric label={t("quality.issues")} value={quality.summary.issue_count.toString()} />
         <Metric label={t("quality.approved")} value={quality.summary.approved_count.toString()} />
+        <Metric label={t("quality.analysisUsed")} value={quality.analysis_receipt.used_event_count.toString()} />
+        <Metric label={t("quality.analysisExcluded")} value={quality.analysis_receipt.excluded_event_count.toString()} />
       </div>
       <div className="quality-issue-grid">
-        {(["missing_fields", "invalid_time", "zero_duration", "short_duration", "long_duration", "unlabeled", "low_confidence"] as const).map((key) => (
+        {(["missing_fields", "invalid_time", "zero_duration", "short_duration", "long_duration", "unlabeled", "low_confidence", "case_correlation_low_confidence", "duration_interval_mismatch"] as const).map((key) => (
           <div key={key}>
             <span>{t(`quality.${key}` as TranslationKey)}</span>
             <b>{quality.summary[key]}</b>
+          </div>
+        ))}
+        {Object.entries(quality.analysis_receipt.excluded_by_reason).map(([reason, count]) => (
+          <div key={`analysis-${reason}`}>
+            <span>{t("quality.analysisExclusionReason", { reason })}</span>
+            <b>{count}</b>
           </div>
         ))}
       </div>
@@ -1777,6 +1847,8 @@ function QualityView({
         ) : (
           quality.items.map((item) => {
             const draft = activityDrafts[item.event_id] ?? item.activity;
+            const caseDraft = caseDrafts[item.event_id] ?? item.case_id;
+            const caseReason = caseReasons[item.event_id] ?? "";
             const approved = item.quality_review_status === "approved";
             return (
               <article className={approved ? "quality-card is-approved" : "quality-card"} key={item.event_id}>
@@ -1787,6 +1859,10 @@ function QualityView({
                   </div>
                   <div className="quality-meta">
                     <span>{item.case_id}</span>
+                    <span>{t("quality.caseCorrelation")}: {item.case_correlation.origin}/{item.case_correlation.confidence}</span>
+                    <span>{t("quality.caseStrategy")}: {item.case_correlation.strategy}</span>
+                    <span>{t("quality.caseEvidence")}: {item.case_correlation.evidence}</span>
+                    {item.case_correlation_review ? <span>{t("quality.caseReview")}: {item.case_correlation_review.reason}</span> : null}
                     <span>{item.app_name || t("import.unknown")}</span>
                     <span>{formatDateTime(item.timestamp_start)} - {formatDateTime(item.timestamp_end)}</span>
                     <span>{formatElapsed(item.duration_seconds)}</span>
@@ -1811,6 +1887,20 @@ function QualityView({
                   >
                     {t("timeline.saveLabel")}
                   </button>
+                  <label>
+                    <span>{t("quality.caseId")}</span>
+                    <input value={caseDraft} onChange={(event) => setCaseDrafts({ ...caseDrafts, [item.event_id]: event.target.value })} disabled={working} />
+                  </label>
+                  <label>
+                    <span>{t("quality.caseCorrectionReason")}</span>
+                    <input value={caseReason} onChange={(event) => setCaseReasons({ ...caseReasons, [item.event_id]: event.target.value })} disabled={working} />
+                  </label>
+                  <button
+                    onClick={() => void actions.updateEventCaseCorrelation(item.event_id, caseDraft, caseReason)}
+                    disabled={working || !caseDraft.trim() || !caseReason.trim()}
+                  >
+                    {t("quality.saveCaseCorrection")}
+                  </button>
                   <button onClick={() => void actions.approveEventQuality(item.event_id)} disabled={working || approved}>
                     {t("quality.approve")}
                   </button>
@@ -1834,6 +1924,7 @@ function QualityView({
 }
 
 function localizeQualityIssue(code: string, t: (key: TranslationKey, params?: Record<string, string | number>) => string): string {
+  if (code.startsWith("analysis_")) return "";
   const key = `quality.issue.${code}` as TranslationKey;
   return t(key);
 }
@@ -2216,6 +2307,16 @@ function SettingsView({ data, actions, working }: { data: DashboardData; actions
             max="365"
             value={settingsDraft.retention_days}
             onChange={(event) => setSettingsDraft({ ...settingsDraft, retention_days: Number(event.target.value) })}
+          />
+        </label>
+        <label className="number-row">
+          <span>{t("settings.sessionGap")}</span>
+          <input
+            type="number"
+            min="0"
+            max="1440"
+            value={settingsDraft.session_gap_minutes}
+            onChange={(event) => setSettingsDraft({ ...settingsDraft, session_gap_minutes: Number(event.target.value) })}
           />
         </label>
         <label className="text-row">

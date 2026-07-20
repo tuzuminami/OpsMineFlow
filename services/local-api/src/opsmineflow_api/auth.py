@@ -47,6 +47,7 @@ PROTECTED_ROUTES = {
     ("POST", "/import/activitywatch-local"),
     ("POST", "/events/label"),
     ("POST", "/events/activity"),
+    ("POST", "/events/case-correlation"),
     ("POST", "/events/exclude"),
     ("POST", "/events/quality-review"),
     ("POST", "/events/split"),

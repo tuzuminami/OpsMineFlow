@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import threading
@@ -220,6 +221,23 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                     return
                 self._send_json({"event": event})
                 return
+            if path == "/events/case-correlation":
+                try:
+                    event = default_store().update_event_case_correlation(
+                        str(payload.get("event_id") or ""),
+                        str(payload.get("case_id") or ""),
+                        str(payload.get("reason") or ""),
+                    )
+                except KeyError:
+                    self._send_json({"error": "Event was not found"}, status=404)
+                    return
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                    return
+                from .app import event_to_api_dict
+
+                self._send_json({"event": event_to_api_dict(event, default_store().get_settings())})
+                return
             if path == "/events/exclude":
                 try:
                     self._send_json(default_store().exclude_event(str(payload.get("event_id") or "")))
@@ -293,7 +311,15 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 return
             if path == "/export/csv":
                 artifact = create_export_artifact("csv")
-                self._send_json({"csv": artifact["content"]})
+                content = artifact["content"]
+                if not isinstance(content, bytes):
+                    raise RuntimeError("CSV export must be a ZIP bundle.")
+                self._send_json(
+                    {
+                        "filename": artifact["filename"],
+                        "zip_base64": base64.b64encode(content).decode("ascii"),
+                    }
+                )
                 return
             if path == "/export/json":
                 artifact = create_export_artifact("json")

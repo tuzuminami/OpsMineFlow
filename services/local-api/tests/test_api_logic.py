@@ -10,17 +10,21 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZipFile
+from xml.etree import ElementTree
 
 from opsmineflow_api.app import (
     allowed_webui_origins,
     create_api_snapshot,
     create_activitywatch_preview,
+    create_automation_candidates,
     create_diagnostics,
     create_event_page,
     create_event_quality_report,
     create_export_artifact,
     create_import_preview,
+    create_process_map,
     create_runtime_health,
+    create_summary,
     import_activitywatch_into_store,
     import_path_into_store,
     run_diagnostic_checks,
@@ -33,9 +37,42 @@ from opsmineflow_api.recording import RecordingManager, _recording_agent_environ
 from opsmineflow_api.server import LocalApiHandler
 from opsmineflow_api.storage import EventStore
 from opsmineflow_mining import load_events_from_csv, load_events_from_json
+from opsmineflow_mining.analysis import prepare_analysis
 
 
 class ApiLogicTests(unittest.TestCase):
+    def test_analysis_cache_reuses_concurrent_snapshot_and_invalidates_after_mutation(self) -> None:
+        store = EventStore(events=load_events_from_csv("data/sample/sample_events.csv"))
+        started = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def delayed_prepare(events, config):
+            nonlocal calls
+            calls += 1
+            started.set()
+            self.assertTrue(release.wait(timeout=2))
+            return prepare_analysis(events, config)
+
+        with patch("opsmineflow_api.app.prepare_analysis", side_effect=delayed_prepare):
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                futures = [executor.submit(create_summary, store) for _ in range(6)]
+                self.assertTrue(started.wait(timeout=2))
+                release.set()
+                summaries = [future.result(timeout=2) for future in futures]
+
+            self.assertEqual(calls, 1)
+            self.assertEqual({summary["analysis_receipt"]["scope_fingerprint"] for summary in summaries}, {
+                summaries[0]["analysis_receipt"]["scope_fingerprint"]
+            })
+
+            store.update_event_activity(store.events[0].event_id, "Corrected activity")
+            create_summary(store)
+
+        self.assertEqual(calls, 2)
+
     def test_native_recording_event_appends_and_persists(self) -> None:
         session = {
             "session_id": "rec-test",
@@ -66,6 +103,9 @@ class ApiLogicTests(unittest.TestCase):
         self.assertEqual(reopened.events[0].window_title, "")
         self.assertEqual(reopened.events[0].url, "")
         self.assertIn("frontmost_app_only", reopened.events[0].metadata_json)
+        correlation = json.loads(reopened.events[0].metadata_json)["opsmineflow_case_correlation"]
+        self.assertEqual(correlation["origin"], "manual")
+        self.assertEqual(correlation["confidence"], "medium")
 
     def test_native_recording_respects_excluded_apps(self) -> None:
         session = {"session_id": "rec-test", "case_id": "CASE", "activity_label": "Work"}
@@ -341,8 +381,8 @@ class ApiLogicTests(unittest.TestCase):
         self.assertGreaterEqual(report["summary"]["invalid_time"], 1)
         self.assertGreaterEqual(report["summary"]["long_duration"], 1)
         self.assertGreaterEqual(report["summary"]["unlabeled"], 1)
-        self.assertEqual(reviewed_report["summary"]["approved_count"], 1)
-        self.assertEqual(reviewed_report["summary"]["affected_event_count"], 2)
+        self.assertEqual(reviewed_report["summary"]["approved_count"], 0)
+        self.assertEqual(reviewed_report["summary"]["affected_event_count"], 3)
 
     def test_sqlite_store_persists_events_labels_and_settings(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
@@ -466,6 +506,8 @@ class ApiLogicTests(unittest.TestCase):
                 "duration_seconds",
                 "confidential_flag",
                 "quality_review_status",
+                "case_correlation",
+                "case_correlation_review",
             },
         )
         self.assertNotIn("window_title", record)
@@ -659,8 +701,12 @@ class ApiLogicTests(unittest.TestCase):
 
         validate_handoff_json(manifest, process)
         self.assertEqual(manifest["format"], "opsmineflow-mermaid-handoff")
-        self.assertEqual(manifest["dataset"]["timezone"], "UTC+09:00")
+        self.assertEqual(manifest["format_version"], "1.1.0")
+        self.assertEqual(manifest["dataset"]["timezone"], "UTC internal instants")
         self.assertEqual(process["coverage"]["events_observed"], 7)
+        self.assertEqual(process["coverage"]["events_input"], 7)
+        self.assertEqual(process["analysis_receipt"]["excluded_event_count"], 0)
+        self.assertEqual(process["nodes"][0]["case_correlation"]["origins"], {"observed": 1})
         self.assertEqual(process["coverage"]["cases_observed"], 2)
         self.assertEqual(sum(node["frequency"] for node in process["nodes"]), 7)
         self.assertEqual(sum(edge["frequency"] for edge in process["edges"]), 5)
@@ -742,6 +788,15 @@ class ApiLogicTests(unittest.TestCase):
         numeric_metadata_collision = replace(event, activity_raw="12345", metadata_json='{"customer_id":12345}')
         with self.assertRaisesRegex(ValueError, "safety check failed"):
             create_export_artifact("llm-handoff", store=EventStore(events=[numeric_metadata_collision]))
+
+    def test_llm_handoff_does_not_treat_system_case_provenance_as_sensitive_input(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        store = EventStore(events=events)
+        store.update_event_activity(events[0].event_id, "observed request")
+
+        artifact = create_export_artifact("llm-handoff", store=store)
+
+        self.assertIsInstance(artifact["content"], bytes)
 
     def test_llm_handoff_accepts_activity_only_csv_title_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -847,7 +902,189 @@ class ApiLogicTests(unittest.TestCase):
         with ZipFile(BytesIO(artifact["content"])) as archive:  # type: ignore[arg-type]
             process = json.loads(archive.read("process.json"))
 
-        self.assertEqual(process["app_handoffs"], [{"source_app": "Safari", "target_app": "Excel", "count": 1}])
+        self.assertEqual(process["app_handoffs"], [])
+        self.assertEqual(process["analysis_receipt"]["case_origin_counts"], {"unassigned": 2})
+        self.assertEqual(
+            process["analysis_parameters"]["case_correlation"],
+            "source case IDs are observed; inferred or unassigned input is isolated until reviewed",
+        )
+
+    def test_session_gap_setting_changes_process_and_manual_handoff_receipt(self) -> None:
+        imported = load_events_from_csv("data/sample/sample_events.csv")
+        spaced_events = [
+            imported[0],
+            replace(
+                imported[1],
+                timestamp_start="2026-06-01T00:10:00+00:00",
+                timestamp_end="2026-06-01T00:17:00+00:00",
+            ),
+        ]
+        store = EventStore(events=spaced_events)
+        store.update_settings({"session_gap_minutes": 1})
+
+        process_map = create_process_map(store)
+        artifact = create_export_artifact("llm-handoff", store=store)
+        with ZipFile(BytesIO(artifact["content"])) as archive:  # type: ignore[arg-type]
+            handoff = json.loads(archive.read("process.json"))
+
+        self.assertEqual(store.get_settings()["session_gap_minutes"], 1)
+        self.assertEqual(process_map["analysis_receipt"]["session_gap_minutes"], 1)
+        self.assertEqual(process_map["analysis_receipt"]["analysis_case_count"], 2)
+        self.assertEqual(process_map["edges"], [])
+        self.assertEqual(handoff["edges"], [])
+        self.assertEqual(handoff["analysis_receipt"]["session_gap_minutes"], 1)
+
+    def test_store_preserves_duplicate_source_rows_for_the_analysis_receipt(self) -> None:
+        event = load_events_from_csv("data/sample/sample_events.csv")[0]
+        duplicate = replace(event, created_at="2026-07-20T00:00:00+00:00")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            EventStore(events=[event, duplicate], db_path=db_path)
+            store = EventStore(db_path=db_path)
+            process_map = create_process_map(store)
+
+        self.assertEqual(len(store.events), 2)
+        self.assertEqual(len({item.event_id for item in store.events}), 2)
+        self.assertEqual(process_map["analysis_receipt"]["input_event_count"], 2)
+        self.assertEqual(process_map["analysis_receipt"]["excluded_by_reason"], {"duplicate_event": 1})
+
+    def test_manual_case_correction_is_auditable_and_enables_reviewed_flow(self) -> None:
+        first, second = load_events_from_csv("data/sample/sample_events.csv")[:2]
+        unassigned_metadata = json.dumps(
+            {
+                "opsmineflow_case_correlation": {
+                    "origin": "unassigned",
+                    "strategy": "fixture_singleton",
+                    "confidence": "low",
+                    "evidence": "No source case identifier was available.",
+                }
+            }
+        )
+        first = replace(first, case_id="CASE-UNASSIGNED-00000001", session_id="CASE-UNASSIGNED-00000001:session-1", metadata_json=unassigned_metadata)
+        second = replace(second, case_id="CASE-UNASSIGNED-00000002", session_id="CASE-UNASSIGNED-00000002:session-1", metadata_json=unassigned_metadata)
+        store = EventStore(events=[first, second])
+
+        before = create_event_quality_report(store)
+        corrected_first = store.update_event_case_correlation(first.event_id, "CASE-REVIEWED", "Same invoice number in the approved source record.")
+        store.update_event_case_correlation(second.event_id, "CASE-REVIEWED", "Same invoice number in the approved source record.")
+        after = create_event_quality_report(store)
+        process_map = create_process_map(store)
+        review = json.loads(str(corrected_first["metadata_json"]))["opsmineflow_case_correlation_review"]
+
+        self.assertEqual(before["summary"]["case_correlation_low_confidence"], 2)
+        self.assertEqual(after["summary"]["case_correlation_low_confidence"], 0)
+        self.assertEqual(review["previous_case_id"], "CASE-UNASSIGNED-00000001")
+        self.assertEqual(review["reason"], "Same invoice number in the approved source record.")
+        self.assertEqual(review["operator"], "local-reviewer")
+        self.assertEqual(process_map["analysis_receipt"]["case_origin_counts"], {"manual": 1})
+        self.assertEqual(len(process_map["edges"]), 1)
+
+    def test_every_export_carries_the_identical_analysis_receipt(self) -> None:
+        store = EventStore(events=load_events_from_csv("data/sample/sample_events.csv"))
+        expected = create_api_snapshot(store)["analysis_receipt"]
+
+        json_export = json.loads(str(create_export_artifact("json", store=store)["content"]))
+        markdown_export = str(create_export_artifact("markdown", store=store)["content"])
+        mermaid_export = str(create_export_artifact("mermaid", store=store)["content"])
+        drawio_export = str(create_export_artifact("drawio", store=store)["content"])
+        csv_export = create_export_artifact("csv", store=store)
+        llm_export = create_export_artifact("llm-handoff", store=store)
+
+        markdown_receipt = markdown_export.split("## Analysis Receipt\n```json\n", 1)[1].split("\n```", 1)[0]
+        mermaid_receipt = next(
+            line.split(": ", 1)[1]
+            for line in mermaid_export.splitlines()
+            if line.startswith("%% opsmineflow_analysis_receipt: ")
+        )
+        drawio_receipt = ElementTree.fromstring(drawio_export).attrib["opsmineflowAnalysisReceipt"]
+        with ZipFile(BytesIO(csv_export["content"])) as archive:  # type: ignore[arg-type]
+            self.assertEqual(set(archive.namelist()), {"events.csv", "analysis-receipt.json"})
+            csv_receipt = json.loads(archive.read("analysis-receipt.json"))["analysis_receipt"]
+        with ZipFile(BytesIO(llm_export["content"])) as archive:  # type: ignore[arg-type]
+            llm_receipt = json.loads(archive.read("process.json"))["analysis_receipt"]
+
+        self.assertEqual(json_export["snapshot"]["analysis_receipt"], expected)
+        self.assertEqual(json.loads(markdown_receipt), expected)
+        self.assertEqual(json.loads(mermaid_receipt), expected)
+        self.assertEqual(json.loads(drawio_receipt), expected)
+        self.assertEqual(csv_receipt, expected)
+        self.assertEqual(llm_receipt, expected)
+
+    def test_quality_report_exposes_every_analysis_exclusion_for_repair(self) -> None:
+        base = load_events_from_csv("data/sample/sample_events.csv")[0]
+        duplicate = replace(base, created_at="2026-07-20T00:00:00+00:00")
+        idle = replace(
+            base,
+            event_id="evt-idle",
+            source_event_id="idle",
+            idle_flag=True,
+            timestamp_start="2026-07-02T00:00:00+00:00",
+            timestamp_end="2026-07-02T00:01:00+00:00",
+            duration_seconds=60,
+        )
+        mismatched = replace(
+            base,
+            event_id="evt-mismatch",
+            source_event_id="mismatch",
+            timestamp_start="2026-07-02T01:00:00+00:00",
+            timestamp_end="2026-07-02T01:10:00+00:00",
+            duration_seconds=1,
+        )
+        overlap_left = replace(
+            base,
+            event_id="evt-overlap-left",
+            source_event_id="overlap-left",
+            case_id="CASE-OVERLAP",
+            timestamp_start="2026-07-02T02:00:00+00:00",
+            timestamp_end="2026-07-02T02:10:00+00:00",
+            duration_seconds=600,
+        )
+        overlap_right = replace(
+            base,
+            event_id="evt-overlap-right",
+            source_event_id="overlap-right",
+            case_id="CASE-OVERLAP",
+            timestamp_start="2026-07-02T02:05:00+00:00",
+            timestamp_end="2026-07-02T02:15:00+00:00",
+            duration_seconds=600,
+        )
+        report = create_event_quality_report(EventStore(events=[base, duplicate, idle, mismatched, overlap_left, overlap_right]))
+        codes = {issue["code"] for item in report["items"] for issue in item["issues"]}
+
+        self.assertTrue({"analysis_duplicate_event", "analysis_idle_event", "analysis_duration_interval_mismatch", "analysis_overlapping_or_parallel_session"}.issubset(codes))
+        self.assertEqual(report["summary"]["affected_event_count"], 5)
+        self.assertTrue(all(item["analysis_excluded"] for item in report["items"]))
+        self.assertTrue(all(item["quality_review_status"] == "requires_correction" for item in report["items"]))
+        analysis_issues = [issue for item in report["items"] for issue in item["issues"] if issue["code"].startswith("analysis_")]
+        self.assertTrue(all(issue.get("evidence") and issue["remediation"] for issue in analysis_issues))
+
+    def test_standalone_automation_endpoint_envelopes_the_shared_receipt(self) -> None:
+        store = EventStore(events=load_events_from_csv("data/sample/sample_events.csv"))
+        automation = create_automation_candidates(store)
+        process_map = create_process_map(store)
+
+        self.assertIn("candidates", automation)
+        self.assertGreater(len(automation["candidates"]), 0)
+        self.assertEqual(automation["analysis_receipt"], process_map["analysis_receipt"])
+
+    def test_quality_and_analysis_both_reject_naive_timestamps(self) -> None:
+        event = replace(
+            load_events_from_csv("data/sample/sample_events.csv")[0],
+            timestamp_start="2026-06-01T00:00:00",
+            timestamp_end="2026-06-01T00:05:00",
+        )
+        store = EventStore(events=[event])
+
+        quality = create_event_quality_report(store)
+        process_map = create_process_map(store)
+        artifact = create_export_artifact("llm-handoff", store=store)
+        with ZipFile(BytesIO(artifact["content"])) as archive:  # type: ignore[arg-type]
+            handoff = json.loads(archive.read("process.json"))
+
+        self.assertEqual(quality["summary"]["invalid_time"], 1)
+        self.assertEqual(process_map["analysis_receipt"]["excluded_by_reason"], {"invalid_timestamp": 1})
+        self.assertEqual(handoff["data_quality"]["timestamps_with_parse_errors"], 2)
 
     def test_export_save_requires_explicit_overwrite_and_uses_the_selected_existing_folder(self) -> None:
         store = EventStore(events=load_events_from_csv("data/sample/sample_events.csv"))

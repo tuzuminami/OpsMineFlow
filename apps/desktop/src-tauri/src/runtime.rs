@@ -1133,7 +1133,7 @@ fn export_file_details(format: &str) -> Result<(&'static str, &'static str), Str
     match format {
         "markdown" => Ok(("md", "opsmineflow-report.md")),
         "json" => Ok(("json", "opsmineflow-export.json")),
-        "csv" => Ok(("csv", "opsmineflow-events.csv")),
+        "csv" => Ok(("zip", "opsmineflow-events-with-analysis-receipt.zip")),
         "mermaid" => Ok(("mmd", "opsmineflow-flow.mmd")),
         "drawio" => Ok(("drawio", "opsmineflow-flow.drawio")),
         "llm-handoff" => Ok(("zip", "opsmineflow-mermaid-handoff.zip")),
@@ -1804,6 +1804,12 @@ fn resolve_api_operation(name: &str) -> Option<ApiOperation<'_>> {
             name,
             method: "POST",
             path: "/events/activity",
+            requires_payload: true,
+        },
+        "event_case_correlation" => ApiOperation {
+            name,
+            method: "POST",
+            path: "/events/case-correlation",
             requires_payload: true,
         },
         "event_exclude" => ApiOperation {

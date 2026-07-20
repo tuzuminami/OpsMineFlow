@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -177,7 +178,7 @@ def build_native_app_event(
     end = _parse_datetime(timestamp_end)
     measured_duration = max((end - start).total_seconds(), 0.0)
     duration = max(min(float(duration_seconds), measured_duration + 1.0), 0.0)
-    return _build_event(
+    event = _build_event(
         source="native_mac_agent",
         source_event_id=f"{session_id}:{sequence}",
         case_id=case_id,
@@ -193,7 +194,16 @@ def build_native_app_event(
         duration_seconds=duration,
         idle_flag=False,
         metadata={"session_id": session_id, "sequence": sequence, "capture_scope": "frontmost_app_only"},
+        case_source_provided=True,
     )
+    metadata = json.loads(event.metadata_json)
+    metadata["opsmineflow_case_correlation"] = {
+        "origin": "manual",
+        "strategy": "native_recording_case_label",
+        "confidence": "medium",
+        "evidence": "A local operator named this work unit before native recording started.",
+    }
+    return replace(event, metadata_json=json.dumps(metadata, ensure_ascii=False, sort_keys=True))
 
 
 def _event_from_csv_row(row: dict[str, str], index: int, source: str) -> StandardEvent:
@@ -209,7 +219,8 @@ def _event_from_csv_row(row: dict[str, str], index: int, source: str) -> Standar
     window_title = explicit_window_title or memo or activity
     window_title_origin = "provided" if explicit_window_title else "memo" if memo else "activity_fallback"
     source_event_id = row.get("source_event_id") or str(index)
-    case_id = row.get("case_id") or _fallback_case_id(url, activity, index)
+    source_case_id = row.get("case_id") or ""
+    case_id = source_case_id or _fallback_case_id(url, activity, index)
     return _build_event(
         source=source,
         source_event_id=source_event_id,
@@ -226,6 +237,7 @@ def _event_from_csv_row(row: dict[str, str], index: int, source: str) -> Standar
         duration_seconds=duration,
         idle_flag=_to_bool(row.get("idle_flag")),
         metadata={"memo": memo, "opsmineflow_window_title_origin": window_title_origin},
+        case_source_provided=bool(source_case_id),
     )
 
 
@@ -254,10 +266,11 @@ def _event_from_mapped_csv_row(
     window_title = explicit_window_title or memo or activity
     window_title_origin = "provided" if explicit_window_title else "memo" if memo else "activity_fallback"
     source_event_id = value("source_event_id") or str(index)
+    source_case_id = value("case_id")
     return _build_event(
         source=source,
         source_event_id=source_event_id,
-        case_id=value("case_id") or _fallback_case_id(url, activity, index),
+        case_id=source_case_id or _fallback_case_id(url, activity, index),
         user_alias=value("user") or "unknown",
         app_name=value("app_name"),
         app_bundle_id=value("app_bundle_id"),
@@ -276,6 +289,7 @@ def _event_from_mapped_csv_row(
             "date_format": date_format,
             "timezone": timezone_name,
         },
+        case_source_provided=bool(source_case_id),
     )
 
 
@@ -292,6 +306,7 @@ def _event_from_generic_json(item: dict[str, Any], index: int, source: str) -> S
     data_title = _optional_json_string(data.get("title"), "data.title")
     data_app = _optional_json_string(data.get("app"), "data.app")
     top_level_app = _optional_json_string(item.get("app_name"), "app_name")
+    explicit_case_id = _optional_json_string(item.get("case_id"), "case_id").strip()
     activity = explicit_activity or explicit_activity_raw or data_title or data_app or "Unlabeled activity"
     allowed_metadata_paths: list[str] = []
     if explicit_activity:
@@ -313,7 +328,7 @@ def _event_from_generic_json(item: dict[str, Any], index: int, source: str) -> S
     return _build_event(
         source=source,
         source_event_id=str(item.get("source_event_id") or item.get("id") or index),
-        case_id=str(item.get("case_id") or _fallback_case_id(url, activity, index)),
+        case_id=explicit_case_id or _fallback_case_id(url, activity, index),
         user_alias=str(item.get("user") or item.get("user_alias") or "unknown"),
         app_name=top_level_app or data_app,
         app_bundle_id=str(item.get("app_bundle_id") or data.get("app_bundle_id") or ""),
@@ -326,6 +341,7 @@ def _event_from_generic_json(item: dict[str, Any], index: int, source: str) -> S
         duration_seconds=duration,
         idle_flag=bool(item.get("idle_flag") or data.get("status") == "afk"),
         metadata=metadata,
+        case_source_provided=bool(explicit_case_id),
     )
 
 
@@ -366,6 +382,7 @@ def _events_from_activitywatch_export(payload: dict[str, Any]) -> Iterable[Stand
                     "event": item,
                     "opsmineflow_handoff_allowed_metadata_paths": allowed_metadata_paths,
                 },
+                case_source_provided=False,
             )
             index += 1
 
@@ -387,6 +404,7 @@ def _build_event(
     duration_seconds: float,
     idle_flag: bool,
     metadata: dict[str, Any],
+    case_source_provided: bool | None = None,
 ) -> StandardEvent:
     _validate_event_text_sizes(
         {
@@ -402,7 +420,11 @@ def _build_event(
             "event type": event_type,
         }
     )
-    metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
+    normalized_metadata = {
+        **metadata,
+        "opsmineflow_case_correlation": _case_correlation_metadata(case_id, case_source_provided),
+    }
+    metadata_json = json.dumps(normalized_metadata, ensure_ascii=False, sort_keys=True)
     if len(metadata_json.encode("utf-8")) > MAX_EVENT_METADATA_BYTES:
         raise ValueError(
             f"Import event metadata exceeds the {MAX_EVENT_METADATA_BYTES // 1024} KiB safety limit."
@@ -462,7 +484,7 @@ def _parse_datetime(value: str) -> datetime:
     normalized = value.replace("Z", "+00:00")
     parsed = datetime.fromisoformat(normalized)
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
+        raise ValueError("timestamp must include an explicit UTC offset or use mapped import timezone")
     return parsed
 
 
@@ -472,19 +494,23 @@ def _parse_mapped_datetime(value: str, date_format: str, timezone_name: str) -> 
     if date_format.strip():
         parsed = datetime.strptime(value, date_format.strip())
         if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=_timezone_from_name(timezone_name))
+            return _attach_import_timezone(parsed, timezone_name)
         return parsed
     try:
         return _parse_datetime(value)
     except ValueError:
         parsed = datetime.fromisoformat(value.replace("/", "-"))
         if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=_timezone_from_name(timezone_name))
+            return _attach_import_timezone(parsed, timezone_name)
         return parsed
 
 
 def _to_iso(value: datetime) -> str:
-    return value.isoformat()
+    """Persist UTC instants; source/display timezones belong in provenance."""
+
+    if value.tzinfo is None:
+        raise ValueError("timestamp must include a timezone before storage")
+    return value.astimezone(timezone.utc).isoformat()
 
 
 def _to_bool(value: str | None) -> bool:
@@ -524,9 +550,59 @@ def _timezone_from_name(value: str) -> timezone | ZoneInfo:
         raise ValueError(f"Unknown timezone: {cleaned}") from exc
 
 
+def _attach_import_timezone(value: datetime, timezone_name: str) -> datetime:
+    """Attach a user-selected zone without silently resolving DST ambiguity."""
+
+    zone = _timezone_from_name(timezone_name)
+    if not isinstance(zone, ZoneInfo):
+        return value.replace(tzinfo=zone)
+    candidates: list[datetime] = []
+    for fold in (0, 1):
+        candidate = value.replace(tzinfo=zone, fold=fold)
+        round_trip = candidate.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None)
+        if round_trip == value:
+            candidates.append(candidate)
+    if not candidates:
+        raise ValueError(f"Local timestamp does not exist in {timezone_name}; provide an explicit UTC offset.")
+    offsets = {candidate.utcoffset() for candidate in candidates}
+    if len(offsets) > 1:
+        raise ValueError(f"Local timestamp is ambiguous in {timezone_name}; provide an explicit UTC offset.")
+    return candidates[0]
+
+
 def _fallback_case_id(url: str, activity: str, index: int) -> str:
-    domain = extract_domain(url)
-    if domain:
-        return f"CASE-DOMAIN-{domain}"
-    normalized = _normalize_activity(activity).replace(" ", "-")[:24]
-    return f"CASE-INFERRED-{normalized or index}"
+    # A domain or activity is not evidence that two events belong to the same
+    # business instance. Keep unassigned events as reviewable singletons until
+    # a user supplies or corrects a case identifier.
+    del url, activity
+    return f"CASE-UNASSIGNED-{index:08d}"
+
+
+def _case_correlation_metadata(case_id: str, case_source_provided: bool | None) -> dict[str, str]:
+    if case_source_provided is True:
+        return {
+            "origin": "observed",
+            "strategy": "source_case_id",
+            "confidence": "high",
+            "evidence": "The source provided a case identifier.",
+        }
+    if case_source_provided is False or case_id.startswith("CASE-UNASSIGNED-"):
+        return {
+            "origin": "unassigned",
+            "strategy": "singleton_without_source_case_id",
+            "confidence": "low",
+            "evidence": "The source did not provide a case identifier; this event is isolated until reviewed.",
+        }
+    if case_id.startswith(("CASE-INFERRED-", "CASE-DOMAIN-")):
+        return {
+            "origin": "inferred",
+            "strategy": "legacy_fallback_case_id",
+            "confidence": "low",
+            "evidence": "A legacy fallback case identifier was supplied; it requires review before interpreting a flow.",
+        }
+    return {
+        "origin": "observed",
+        "strategy": "source_case_id",
+        "confidence": "high",
+        "evidence": "The source provided a case identifier.",
+    }
