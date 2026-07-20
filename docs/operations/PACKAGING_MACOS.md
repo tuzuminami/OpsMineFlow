@@ -84,6 +84,8 @@ Then start the packaged app with the local API and confirm the WebUI Diagnostics
 - license guardrail passed
 - LLM integration not supported
 
+Also confirm the packaged WebUI operates through the managed runtime: it must not contain a direct `127.0.0.1:8765` API endpoint or local API session header. The local API secret is created per launch, stays in Rust and the API process, and is not a release configuration value.
+
 ## Release Checklist
 
 - Version updated in `apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, and `apps/desktop/src-tauri/tauri.conf.json`.

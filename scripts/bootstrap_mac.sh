@@ -29,5 +29,5 @@ cd "$INSTALL_DIR"
 ./scripts/install_mac.sh
 
 printf '\nOpsMineFlow is installed at:\n  %s\n' "$INSTALL_DIR"
-printf 'Start it with:\n  cd "%s" && ./scripts/run_local.sh\n' "$INSTALL_DIR"
-printf 'Stop it with:\n  cd "%s" && ./scripts/stop_local.sh\n' "$INSTALL_DIR"
+printf 'For managed desktop development, run:\n  cd "%s" && ./scripts/dev_desktop.sh\n' "$INSTALL_DIR"
+printf 'The browser helper is intentionally insecure and requires disposable test data:\n  cd "%s" && OPSMINEFLOW_INSECURE_BROWSER_DEV_API=1 ./scripts/run_local.sh\n' "$INSTALL_DIR"

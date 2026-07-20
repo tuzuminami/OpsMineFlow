@@ -24,6 +24,7 @@ PY
 export OPSMINEFLOW_DATA_DIR="$DATA_DIR"
 export OPSMINEFLOW_API_HOST="127.0.0.1"
 export OPSMINEFLOW_API_PORT="$API_PORT"
+export OPSMINEFLOW_INSECURE_BROWSER_DEV_API=1
 
 cleanup() {
   if [[ "${API_PID:-}" != "" ]]; then
@@ -49,7 +50,11 @@ base_dir = sys.argv[2]
 base = f"http://127.0.0.1:{port}"
 
 
-def request(path: str, payload: dict[str, object] | None = None) -> dict[str, object] | list[object]:
+def request(
+    path: str,
+    payload: dict[str, object] | None = None,
+    headers: dict[str, str] | None = None,
+) -> dict[str, object] | list[object]:
     if payload is None:
         with urllib.request.urlopen(base + path, timeout=2) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -57,7 +62,7 @@ def request(path: str, payload: dict[str, object] | None = None) -> dict[str, ob
     req = urllib.request.Request(
         base + path,
         data=data,
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", **(headers or {})},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=2) as response:
@@ -182,9 +187,12 @@ assert export_preview["byte_size"] > 0
 saved_export = request("/export/save", {"format": "drawio", "path": f"{base_dir}/smoke-map"})
 assert isinstance(saved_export, dict)
 assert saved_export["saved"] is True
-assert saved_export["path"].endswith(".drawio")
+assert saved_export["filename"] == "smoke-map.drawio"
+assert os.path.exists(os.path.join(base_dir, "smoke-map.drawio"))
 
-deleted = request("/data/delete", {})
+challenge = request("/data/delete/challenge", {})
+assert isinstance(challenge, dict)
+deleted = request("/data/delete", {}, {"X-OpsMineFlow-Delete-Challenge": str(challenge["challenge"])})
 assert isinstance(deleted, dict)
 assert deleted["deleted"] is True
 

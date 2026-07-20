@@ -83,6 +83,43 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(events[0].duration_seconds, 420)
         self.assertTrue(events[0].timestamp_start.endswith("+09:00"))
 
+    def test_import_limits_are_enforced_before_csv_rows_accumulate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "events.csv"
+            path.write_text(
+                "timestamp_start,activity\n"
+                "2026-06-01T01:00:00+00:00,First\n"
+                "2026-06-01T01:01:00+00:00,Second\n"
+                "2026-06-01T01:02:00+00:00,Third\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "2 events"):
+                load_events_from_csv(path, max_events=2)
+
+    def test_import_limits_are_enforced_for_json_event_arrays(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "events.json"
+            path.write_text(json.dumps([{}, {}, {}]), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "2 events"):
+                load_events_from_json(path, max_events=2)
+
+    def test_import_rejects_an_oversized_event_metadata_payload(self) -> None:
+        payload = [
+            {
+                "timestamp_start": "2026-06-01T01:00:00+00:00",
+                "activity": "Review",
+                "data": {"unbounded": "x" * (256 * 1024 + 1)},
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "oversized-event.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "metadata exceeds"):
+                load_events_from_json(path, max_events=10)
+
 
 if __name__ == "__main__":
     unittest.main()

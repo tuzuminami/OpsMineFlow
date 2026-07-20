@@ -30,6 +30,7 @@ export OPSMINEFLOW_API_PORT="$API_PORT"
 export OPSMINEFLOW_WEB_PORT="$WEB_PORT"
 export OPSMINEFLOW_DATA_DIR="$SMOKE_DIR/data"
 export OPSMINEFLOW_NO_OPEN=1
+export OPSMINEFLOW_INSECURE_BROWSER_DEV_API=1
 
 cleanup() {
   ./scripts/stop_local.sh >/dev/null 2>&1 || true
@@ -83,12 +84,12 @@ from pathlib import Path
 
 base = f"http://127.0.0.1:{sys.argv[1]}"
 
-def request(path, payload=None):
+def request(path, payload=None, headers=None):
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         base + path,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **(headers or {})},
         method="GET" if payload is None else "POST",
     )
     with urllib.request.urlopen(req, timeout=2) as response:
@@ -167,11 +168,11 @@ export_preview = request("/export/preview", {"format": "markdown"})
 assert export_preview["byte_size"] > 0
 assert "Review masked fields" in export_preview["warning"]
 
-delete_result = request("/data/delete", {})
+delete_challenge = request("/data/delete/challenge", {})
+delete_result = request("/data/delete", {}, {"X-OpsMineFlow-Delete-Challenge": delete_challenge["challenge"]})
 assert delete_result["deleted"] is True
 
-health = request("/health")
-assert health["event_count"] == 0
+assert request("/events") == []
 PY
 
 SECOND_OUTPUT="$(./scripts/run_local.sh)"

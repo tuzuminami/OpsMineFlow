@@ -2,19 +2,13 @@
 
 ## Start Here
 
-When the WebUI opens, use **Home > Diagnostics** first. Confirm the API, WebUI, storage, dependencies, and ports, then choose **Run Checks**.
+When the desktop app opens, use **Home > Diagnostics** first. Confirm the API, desktop runtime, storage, dependencies, and ports, then choose **Run Checks**.
 
-When the WebUI does not open, rerun:
-
-```bash
-cd ~/OpsMineFlow && ./scripts/run_local.sh
-```
-
-If OpsMineFlow is already healthy, the command reuses it and opens the WebUI. If another program owns a required port, read the first `ERROR:` line in the terminal. The startup script does not silently kill another program or choose a different port.
+If the desktop window does not open, quit OpsMineFlow, open it again from Applications, and review the recovery action shown by the app. Do not start the browser-development helper with client data.
 
 ## Dependencies Are Missing
 
-Run the installer again:
+For a packaged app, reinstall the signed disk image from GitHub Releases. For source development, run the installer again:
 
 ```bash
 ./scripts/install_mac.sh
@@ -31,7 +25,7 @@ cargo --version
 
 Python 3.11 or newer and Node.js 20 or newer are required. Rust 1.85 or newer is required only for Tauri packaging.
 
-## API Does Not Start
+## API Does Not Start (Developer Diagnostics)
 
 The API must bind to `127.0.0.1:8765`. Check its health locally:
 
@@ -39,31 +33,18 @@ The API must bind to `127.0.0.1:8765`. Check its health locally:
 curl http://127.0.0.1:8765/health
 ```
 
-If port 8765 is already in use:
+If port 8765 is already in use during source development:
 
 ```bash
 lsof -nP -iTCP:8765 -sTCP:LISTEN
 cd ~/OpsMineFlow && ./scripts/stop_local.sh
 ```
 
-The stop script terminates the listener only when the health response identifies it as OpsMineFlow. Then rerun the start command. Do not bind the API to `0.0.0.0`.
+The stop script terminates the listener only when the health response identifies it as OpsMineFlow. Do not bind the API to `0.0.0.0`.
 
-## WebUI Does Not Open
+## Desktop Window Does Not Open
 
-Open the local URL manually:
-
-```text
-http://127.0.0.1:5173
-```
-
-Check for a port conflict:
-
-```bash
-lsof -nP -iTCP:5173 -sTCP:LISTEN
-cd ~/OpsMineFlow && ./scripts/stop_local.sh
-```
-
-The stop script leaves an unrelated listener untouched and reports it as an error. Stop that application yourself, then rerun the start command.
+Open OpsMineFlow from Applications. If it presents a runtime recovery action, follow that action and do not manually delete runtime files. The managed runtime rejects unrelated listeners rather than reusing them.
 
 ## Mac Recording Is Unavailable
 
@@ -72,7 +53,7 @@ Open **Home > Diagnostics** and check **Mac recording agent**. If it is unavaila
 ```bash
 cd ~/OpsMineFlow && ./scripts/install_mac.sh
 cd ~/OpsMineFlow && ./scripts/stop_local.sh
-cd ~/OpsMineFlow && ./scripts/run_local.sh
+cd ~/OpsMineFlow && ./scripts/dev_desktop.sh
 ```
 
 Recording starts only from **Home > Record work** after a case, work label, and explicit consent are supplied. Opening or reloading the WebUI does not start a session. If an active session appears stuck, choose **Stop recording** before restarting OpsMineFlow.

@@ -32,6 +32,12 @@ fail() {
   exit 1
 }
 
+if [[ "${OPSMINEFLOW_INSECURE_BROWSER_DEV_API:-}" != "1" ]]; then
+  fail "run_local.sh is an insecure browser-development helper. Use the packaged OpsMineFlow.app for normal operation, or set OPSMINEFLOW_INSECURE_BROWSER_DEV_API=1 only with disposable test data."
+fi
+
+export OPSMINEFLOW_INSECURE_BROWSER_DEV_API=1
+
 port_is_open() {
   local host="$1"
   local port="$2"

@@ -101,6 +101,6 @@ for module in ("opsmineflow_mining", "opsmineflow_drawio", "opsmineflow_api"):
 PY
 npm --prefix apps/desktop run lint
 
-info "Install complete"
-printf '\nStart OpsMineFlow with:\n  cd "%s" && ./scripts/run_local.sh\n' "$ROOT_DIR"
-printf 'Stop OpsMineFlow with:\n  cd "%s" && ./scripts/stop_local.sh\n' "$ROOT_DIR"
+info "Developer install complete"
+printf '\nFor the managed desktop runtime, run:\n  cd "%s" && ./scripts/dev_desktop.sh\n' "$ROOT_DIR"
+printf 'The browser helper is intentionally insecure and requires disposable test data:\n  cd "%s" && OPSMINEFLOW_INSECURE_BROWSER_DEV_API=1 ./scripts/run_local.sh\n' "$ROOT_DIR"

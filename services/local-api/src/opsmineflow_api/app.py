@@ -1,24 +1,43 @@
 from __future__ import annotations
 
 import csv
+import hmac
+import hashlib
 import json
 import os
 import platform
 import shutil
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Any
 
-# A launcher secret belongs to the Rust parent, not to this long-running Python
-# process or any diagnostics it may invoke. Capture the ownership nonce needed
-# for the loopback health check, then remove both launcher values before loading
-# the rest of the application.
-_RUNTIME_NONCE = os.environ.pop("OPSMINEFLOW_RUNTIME_NONCE", "").strip()
-os.environ.pop("OPSMINEFLOW_RUNTIME_SECRET", None)
+from .auth import (
+    DELETE_CHALLENGE_HEADER,
+    DeleteChallengeStore,
+    LocalApiPolicy,
+    RUNTIME_PROBE_CHALLENGE_HEADER,
+    RequestRejected,
+    consume_runtime_credentials,
+)
+
+# Launcher credentials are captured once into module-private state and removed
+# from the process environment before the rest of the application is imported.
+_RUNTIME_CREDENTIALS = consume_runtime_credentials()
+_RUNTIME_NONCE = _RUNTIME_CREDENTIALS.nonce
+_RUNTIME_PROBE_SECRET = _RUNTIME_CREDENTIALS.runtime_probe_secret
+MAX_IMPORT_EVENTS = 100_000
+DEFAULT_EVENT_PAGE_SIZE = 250
+MAX_EVENT_PAGE_SIZE = 500
+MAX_EVENT_PAGE_RESPONSE_BYTES = 3_000_000
+MAX_ANALYTICS_LIST_ITEMS = 500
+MAX_PROCESS_MAP_NODES = 500
+MAX_PROCESS_MAP_EDGES = 1_000
 
 from opsmineflow_drawio import build_drawio_xml
 from opsmineflow_mining import (
@@ -45,7 +64,8 @@ from .recording import recording_manager
 from .storage import EventStore, default_store
 
 try:
-    from fastapi import FastAPI, Header, HTTPException
+    from fastapi import FastAPI, Header, HTTPException, Request
+    from fastapi.responses import JSONResponse
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel
 except ModuleNotFoundError:
@@ -53,6 +73,8 @@ except ModuleNotFoundError:
     HTTPException = Exception  # type: ignore[assignment]
     CORSMiddleware = None  # type: ignore[assignment]
     Header = None  # type: ignore[assignment]
+    Request = object  # type: ignore[assignment,misc]
+    JSONResponse = None  # type: ignore[assignment]
     BaseModel = object  # type: ignore[assignment]
 
 
@@ -103,6 +125,11 @@ class EventMergeRequest(BaseModel):  # type: ignore[misc, valid-type]
     activity: str = ""
 
 
+class EventPageRequest(BaseModel):  # type: ignore[misc, valid-type]
+    offset: int = 0
+    limit: int = DEFAULT_EVENT_PAGE_SIZE
+
+
 class ActivityWatchImportRequest(BaseModel):  # type: ignore[misc, valid-type]
     enabled: bool = False
     base_url: str = "http://127.0.0.1:5600"
@@ -136,6 +163,7 @@ class ExportPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
 class ExportSaveRequest(BaseModel):  # type: ignore[misc, valid-type]
     format: str
     path: str
+    overwrite_confirmed: bool = False
 
 
 class RecordingStartRequest(BaseModel):  # type: ignore[misc, valid-type]
@@ -172,6 +200,19 @@ def allowed_webui_origins() -> list[str]:
     ]
 
 
+def local_api_policy() -> LocalApiPolicy:
+    return LocalApiPolicy(
+        api_session_token=_RUNTIME_CREDENTIALS.api_session_token,
+        port=int(os.environ.get("OPSMINEFLOW_API_PORT", "8765")),
+        allowed_origins=set(allowed_webui_origins()),
+        development_mode=os.environ.get("OPSMINEFLOW_INSECURE_BROWSER_DEV_API") == "1",
+    )
+
+
+LOCAL_API_POLICY = local_api_policy()
+DELETE_CHALLENGES = DeleteChallengeStore()
+
+
 def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     active_store = store or default_store()
     events = active_store.events
@@ -181,7 +222,7 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     store_diagnostics = active_store.diagnostics()
     automation_candidates = apply_automation_reviews(score_automation_candidates(events), active_store, events)
     health = {
-        **create_runtime_health(),
+        **create_public_health(),
         "storage_mode": store_diagnostics["storage_mode"],
         "event_count": store_diagnostics["event_count"],
     }
@@ -201,18 +242,115 @@ def create_api_snapshot(store: EventStore | None = None) -> dict[str, Any]:
     }
 
 
-def create_runtime_health() -> dict[str, Any]:
-    """Return a constant-time loopback ownership payload for the Rust launcher."""
+def create_event_page(
+    offset: int = 0,
+    limit: int = DEFAULT_EVENT_PAGE_SIZE,
+    store: EventStore | None = None,
+) -> dict[str, Any]:
+    if offset < 0:
+        raise ValueError("Event page offset must not be negative.")
+    if limit < 1 or limit > MAX_EVENT_PAGE_SIZE:
+        raise ValueError(f"Event page size must be between 1 and {MAX_EVENT_PAGE_SIZE}.")
+    active_store = store or default_store()
+    settings = active_store.get_settings()
+    total = len(active_store.events)
+    page: list[dict[str, object]] = []
+    response_bytes = 0
+    for event in active_store.events[offset : offset + limit]:
+        record = event_to_api_dict(event, settings)
+        record_bytes = len(json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        if page and response_bytes + record_bytes > MAX_EVENT_PAGE_RESPONSE_BYTES:
+            break
+        page.append(record)
+        response_bytes += record_bytes
+    return {
+        "events": page,
+        "offset": offset,
+        "limit": len(page),
+        "total": total,
+        "has_more": offset + len(page) < total,
+    }
 
-    health: dict[str, Any] = {
+
+def create_summary(store: EventStore | None = None) -> dict[str, Any]:
+    return metrics_to_dict(calculate_duration_metrics((store or default_store()).events))
+
+
+def create_app_switching(store: EventStore | None = None) -> dict[str, Any]:
+    switching = detect_app_switches((store or default_store()).events)
+    return {
+        "transition_ranking": list(switching["transition_ranking"])[:MAX_ANALYTICS_LIST_ITEMS],
+        "round_trips": list(switching["round_trips"])[:MAX_ANALYTICS_LIST_ITEMS],
+    }
+
+
+def create_automation_candidates(store: EventStore | None = None) -> list[dict[str, Any]]:
+    active_store = store or default_store()
+    candidates = apply_automation_reviews(
+        score_automation_candidates(active_store.events), active_store, active_store.events
+    )
+    return candidates[:MAX_ANALYTICS_LIST_ITEMS]
+
+
+def create_process_map(store: EventStore | None = None) -> dict[str, Any]:
+    graph = build_directly_follows_graph((store or default_store()).events)
+    nodes = list(graph["nodes"])[:MAX_PROCESS_MAP_NODES]
+    visible_activities = {str(node["activity"]) for node in nodes}
+    edges = [
+        edge
+        for edge in graph["edges"]
+        if str(edge["source"]) in visible_activities and str(edge["target"]) in visible_activities
+    ][:MAX_PROCESS_MAP_EDGES]
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "start_activities": {
+            activity: count
+            for activity, count in dict(graph["start_activities"]).items()
+            if activity in visible_activities
+        },
+        "end_activities": {
+            activity: count
+            for activity, count in dict(graph["end_activities"]).items()
+            if activity in visible_activities
+        },
+    }
+
+
+def create_markdown_report(store: EventStore | None = None) -> str:
+    active_store = store or default_store()
+    candidates = create_automation_candidates(active_store)
+    return append_automation_review_section(export_markdown_report(active_store.events), candidates)
+def create_public_health() -> dict[str, Any]:
+    """Return the unauthenticated, constant-time local readiness payload."""
+
+    return {
         "status": "ok",
         "bind": "127.0.0.1",
         "local_only": True,
         "llm_supported": False,
     }
-    if _RUNTIME_NONCE:
-        health["runtime"] = {"nonce": _RUNTIME_NONCE, "pid": os.getpid()}
+
+
+def create_runtime_health(probe_challenge: str = "") -> dict[str, Any]:
+    """Return ownership metadata only after a same-connection proof request."""
+
+    health: dict[str, Any] = create_public_health()
+    if _RUNTIME_NONCE and _RUNTIME_PROBE_SECRET and _valid_runtime_probe_challenge(probe_challenge):
+        health["runtime"] = {
+            "nonce": _RUNTIME_NONCE,
+            "pid": os.getpid(),
+            "proof": hmac.new(
+                _RUNTIME_PROBE_SECRET.encode("utf-8"),
+                probe_challenge.encode("ascii"),
+                hashlib.sha256,
+            ).hexdigest(),
+        }
     return health
+
+
+def _valid_runtime_probe_challenge(challenge: str) -> bool:
+    return len(challenge) == 64 and all(character in "0123456789abcdef" for character in challenge)
 
 
 def apply_automation_reviews(
@@ -550,13 +688,23 @@ def _parse_event_time(value: str) -> datetime:
 
 
 def event_to_api_dict(event: Any, settings: dict[str, object]) -> dict[str, object]:
-    payload = event.to_dict()
-    payload["quality_review_status"] = _event_quality_status(event)
-    if not settings.get("mask_window_titles", True):
-        payload["window_title_masked"] = payload["window_title"]
-    if not settings.get("mask_url_paths", True):
-        payload["url_masked"] = payload["url"]
-    return payload
+    return {
+        "event_id": event.event_id,
+        "case_id": event.case_id,
+        "user_hash": event.user_hash,
+        "app_name": event.app_name,
+        "window_title_masked": event.window_title_masked
+        if settings.get("mask_window_titles", True)
+        else event.window_title,
+        "url_masked": event.url_masked if settings.get("mask_url_paths", True) else event.url,
+        "domain": event.domain,
+        "activity_raw": event.activity_raw,
+        "timestamp_start": event.timestamp_start,
+        "timestamp_end": event.timestamp_end,
+        "duration_seconds": event.duration_seconds,
+        "confidential_flag": event.confidential_flag,
+        "quality_review_status": _event_quality_status(event),
+    }
 
 
 def load_events_for_import(
@@ -570,10 +718,16 @@ def load_events_for_import(
         raise FileNotFoundError(f"{format_name.upper()} file was not found")
     if format_name == "csv":
         if mapping is not None and any(value.strip() for value in mapping.values()):
-            return load_events_from_csv_with_mapping(path, mapping, date_format=date_format, timezone_name=timezone_name)
-        return load_events_from_csv(path)
+            return load_events_from_csv_with_mapping(
+                path,
+                mapping,
+                date_format=date_format,
+                timezone_name=timezone_name,
+                max_events=MAX_IMPORT_EVENTS,
+            )
+        return load_events_from_csv(path, max_events=MAX_IMPORT_EVENTS)
     if format_name == "json":
-        return load_events_from_json(path)
+        return load_events_from_json(path, max_events=MAX_IMPORT_EVENTS)
     raise ValueError("Import format must be csv or json.")
 
 
@@ -609,7 +763,7 @@ def create_import_preview(
         mapping_warnings.append(str(exc))
     return {
         "format": format_name,
-        "path": str(path),
+        "display_name": _safe_display_name(path),
         "event_count": len(events),
         "confidential_count": sum(1 for event in events if event.confidential_flag),
         "columns": columns,
@@ -643,7 +797,7 @@ def import_path_into_store(
     path = Path(path_value)
     events = load_events_for_import(format_name, path, mapping, date_format, timezone_name)
     active_store = store or default_store()
-    active_store.replace(events, import_source=format_name, import_path=str(path))
+    active_store.replace(events, import_source=format_name, import_path=_safe_display_name(path))
     return {"imported_events": len(events), "source": format_name}
 
 
@@ -800,24 +954,67 @@ def create_export_artifact(format_name: str, store: EventStore | None = None) ->
     }
 
 
-def save_export_artifact(format_name: str, path_value: str, store: EventStore | None = None) -> dict[str, Any]:
+def save_export_artifact(
+    format_name: str,
+    path_value: str,
+    store: EventStore | None = None,
+    overwrite_confirmed: bool = False,
+) -> dict[str, Any]:
     if not path_value.strip():
         raise ValueError("Export path is required.")
     artifact = create_export_artifact(format_name, store=store)
     path = Path(path_value).expanduser()
-    if path.exists() and path.is_dir():
-        path = path / str(artifact["filename"])
-    elif not path.suffix:
+    if not path.suffix:
         path = path.with_suffix(f".{artifact['extension']}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(artifact["content"]), encoding="utf-8")
+    try:
+        parent_metadata = os.lstat(path.parent)
+    except OSError as exc:
+        raise ValueError("Choose an existing local folder before saving the export.") from exc
+    if stat.S_ISLNK(parent_metadata.st_mode) or not stat.S_ISDIR(parent_metadata.st_mode):
+        raise ValueError("Choose a regular local folder, not a link, before saving the export.")
+    try:
+        target_metadata = os.lstat(path)
+    except FileNotFoundError:
+        target_metadata = None
+    if target_metadata is not None and (
+        stat.S_ISLNK(target_metadata.st_mode) or not stat.S_ISREG(target_metadata.st_mode)
+    ):
+        raise ValueError("Choose a regular export filename, not a folder or link.")
+    if not path.parent.is_dir():
+        raise ValueError("Choose an existing local folder before saving the export.")
+    if target_metadata is not None and not overwrite_confirmed:
+        raise ValueError("Confirm replacement in the save dialog before overwriting an existing file.")
+    file_descriptor, temporary_path = tempfile.mkstemp(prefix=".opsmineflow-export-", dir=path.parent)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as export_file:
+            export_file.write(str(artifact["content"]))
+            export_file.flush()
+            os.fsync(export_file.fileno())
+        os.replace(temporary_path, path)
+        _fsync_directory(path.parent)
+    except Exception:
+        Path(temporary_path).unlink(missing_ok=True)
+        raise
     return {
         "saved": True,
         "format": artifact["format"],
-        "path": str(path),
+        "filename": path.name,
         "byte_size": artifact["byte_size"],
         "warning": artifact["warning"],
     }
+
+
+def _safe_display_name(path: Path) -> str:
+    name = path.name.strip()
+    return name or "Selected file"
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def events_to_csv(events: list[dict[str, object]]) -> str:
@@ -865,7 +1062,7 @@ def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
         "webui": {
             "status": "reachable" if _tcp_open("127.0.0.1", webui_port) else "not_detected",
             "expected_url": f"http://127.0.0.1:{webui_port}",
-            "remediation": "Run ./scripts/run_local.sh if the browser UI is closed.",
+            "remediation": "Open or restart the managed OpsMineFlow desktop app.",
         },
         "storage": diagnostics,
         "dependencies": {
@@ -890,7 +1087,7 @@ def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
                 "host": "127.0.0.1",
                 "port": webui_port,
                 "status": "open" if _tcp_open("127.0.0.1", webui_port) else "not_open",
-                "remediation": "Run ./scripts/run_local.sh to start the WebUI.",
+                "remediation": "Open or restart the managed OpsMineFlow desktop app.",
             },
         },
         "activitywatch": {
@@ -920,7 +1117,7 @@ def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
         },
         "remediation": [
             "Run ./scripts/install_mac.sh when dependencies are missing.",
-            "Run ./scripts/run_local.sh when API or WebUI ports are not open.",
+            "Open or restart the managed OpsMineFlow desktop app when its local runtime is unavailable.",
             "Use Settings to keep ActivityWatch disabled unless explicitly needed.",
             "Run diagnostics checks before sharing exports or releases.",
         ],
@@ -1028,14 +1225,28 @@ def _run_guardrail_script(script_name: str) -> dict[str, object]:
 
 
 if FastAPI is not None:
-    app = FastAPI(title="OpsMineFlow Local API", version="0.1.0")
+    app = FastAPI(title="OpsMineFlow Local API", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_webui_origins(),
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["content-type"],
+        allow_headers=["content-type", DELETE_CHALLENGE_HEADER],
     )
+
+    @app.middleware("http")
+    async def enforce_local_api_policy(request: Request, call_next: Any):
+        try:
+            LOCAL_API_POLICY.authorize(
+                request.method,
+                request.url.path,
+                request.headers,
+                request.headers.get("content-length"),
+            )
+        except RequestRejected as exc:
+            assert JSONResponse is not None
+            return JSONResponse({"error": exc.message}, status_code=exc.status_code)
+        return await call_next(request)
 else:
     app = None
 
@@ -1062,11 +1273,11 @@ if app is not None:
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        return create_api_snapshot()["health"]
+        return create_public_health()
 
     @app.get("/runtime/health")
-    def runtime_health() -> dict[str, Any]:
-        return create_runtime_health()
+    def runtime_health(request: Request) -> dict[str, Any]:
+        return create_runtime_health(request.headers.get(RUNTIME_PROBE_CHALLENGE_HEADER, ""))
 
     @app.get("/diagnostics")
     def diagnostics() -> dict[str, Any]:
@@ -1190,7 +1401,14 @@ if app is not None:
 
     @app.get("/events")
     def events() -> list[dict[str, Any]]:
-        return create_api_snapshot()["events"]
+        return create_event_page(0, MAX_EVENT_PAGE_SIZE)["events"]
+
+    @app.post("/events/page")
+    def event_page(request: EventPageRequest) -> dict[str, Any]:
+        try:
+            return create_event_page(request.offset, request.limit)
+        except ValueError as exc:
+            raise _bad_request(str(exc))
 
     @app.post("/events/label")
     def label_event(request: LabelRequest) -> dict[str, Any]:
@@ -1253,22 +1471,28 @@ if app is not None:
             raise _bad_request(str(exc))
 
     @app.post("/data/delete")
-    def delete_data() -> dict[str, Any]:
+    def delete_data(x_opsmineflow_delete_challenge: str = Header(default="")) -> dict[str, Any]:
+        if not DELETE_CHALLENGES.consume(x_opsmineflow_delete_challenge):
+            raise _forbidden("delete challenge is invalid or expired")
         recording_manager.stop(default_store())
         default_store().clear()
         return {"deleted": True}
 
+    @app.post("/data/delete/challenge")
+    def delete_challenge() -> dict[str, str]:
+        return {"challenge": DELETE_CHALLENGES.issue()}
+
     @app.get("/analytics/summary")
     def analytics_summary() -> dict[str, Any]:
-        return create_api_snapshot()["summary"]
+        return create_summary()
 
     @app.get("/analytics/app-switching")
     def analytics_app_switching() -> dict[str, Any]:
-        return create_api_snapshot()["app_switching"]
+        return create_app_switching()
 
     @app.get("/analytics/automation-candidates")
     def analytics_automation_candidates() -> list[dict[str, Any]]:
-        return create_api_snapshot()["automation_candidates"]
+        return create_automation_candidates()
 
     @app.get("/analytics/event-quality")
     def analytics_event_quality() -> dict[str, Any]:
@@ -1283,11 +1507,11 @@ if app is not None:
 
     @app.get("/analytics/process-map")
     def analytics_process_map() -> dict[str, Any]:
-        return create_api_snapshot()["process_map"]
+        return create_process_map()
 
     @app.get("/reports/markdown")
     def report_markdown() -> dict[str, str]:
-        return {"markdown": create_api_snapshot()["markdown_report"]}
+        return {"markdown": create_markdown_report()}
 
     @app.post("/export/mermaid")
     def export_mermaid_endpoint() -> dict[str, str]:
@@ -1303,11 +1527,11 @@ if app is not None:
 
     @app.post("/export/csv")
     def export_csv_endpoint() -> dict[str, Any]:
-        return {"csv": str(create_export_artifact("csv")["content"]), "events": create_api_snapshot()["events"]}
+        return {"csv": str(create_export_artifact("csv")["content"])}
 
     @app.post("/export/json")
     def export_json_endpoint() -> dict[str, Any]:
-        return {"json": str(create_export_artifact("json")["content"]), "snapshot": create_api_snapshot()}
+        return {"json": str(create_export_artifact("json")["content"])}
 
     @app.post("/export/preview")
     def export_preview_endpoint(request: ExportPreviewRequest) -> dict[str, Any]:
@@ -1320,6 +1544,6 @@ if app is not None:
     @app.post("/export/save")
     def export_save_endpoint(request: ExportSaveRequest) -> dict[str, Any]:
         try:
-            return save_export_artifact(request.format, request.path)
+            return save_export_artifact(request.format, request.path, overwrite_confirmed=request.overwrite_confirmed)
         except ValueError as exc:
             raise _bad_request(str(exc))

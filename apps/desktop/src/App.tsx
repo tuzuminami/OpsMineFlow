@@ -1,13 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   approveEventQuality,
   deleteLocalData,
   excludeEvent,
   exportArtifact,
+  getRecordingStatus,
   getNativeRuntimeStatus,
   importActivityWatchLocal,
   importEvents,
+  chooseImportFile,
+  isManagedDesktop,
   loadDashboardData,
+  loadEventPage,
   mergeEvents,
   pauseRecording,
   previewActivityWatchLocal,
@@ -58,6 +62,7 @@ type DashboardData = {
   settings: AppSettings;
   importHistory: ImportHistoryEntry[];
   events: EventRecord[];
+  eventTotal: number;
   quality: EventQualityReport;
   summary: Summary;
   processMap: ProcessMap;
@@ -68,6 +73,7 @@ type DashboardData = {
 
 type AppActions = {
   refresh: () => Promise<void>;
+  loadMoreEvents: () => Promise<void>;
   previewImport: (format: "csv" | "json", path: string, mapping?: CsvMapping, dateFormat?: string, timezone?: string) => Promise<ImportPreview>;
   importEvents: (format: "csv" | "json", path: string, mapping?: CsvMapping, dateFormat?: string, timezone?: string) => Promise<void>;
   previewActivityWatch: (enabled: boolean) => Promise<ActivityWatchPreview>;
@@ -189,22 +195,31 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const refreshInFlight = useRef<Promise<void> | null>(null);
 
-  async function refresh(silent = false) {
-    if (!silent) setLoading(true);
-    setError("");
-    try {
-      const runtime = await getNativeRuntimeStatus();
-      setRuntimeStatus(runtime);
-      if (runtime && runtime.state !== "ready") {
-        throw new Error(runtimeRecoveryMessage(runtime, t));
+  function refresh(silent = false) {
+    if (refreshInFlight.current) return refreshInFlight.current;
+    const task = (async () => {
+      if (!silent) setLoading(true);
+      setError("");
+      try {
+        const runtime = await getNativeRuntimeStatus();
+        setRuntimeStatus(runtime);
+        if (runtime && runtime.state !== "ready") {
+          throw new Error(runtimeRecoveryMessage(runtime, t));
+        }
+        setData(await loadDashboardData());
+      } catch (err) {
+        setError(err instanceof Error ? err.message : t("message.apiUnavailable", { error: "" }));
+      } finally {
+        if (!silent) setLoading(false);
       }
-      setData(await loadDashboardData());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("message.apiUnavailable", { error: "" }));
-    } finally {
-      if (!silent) setLoading(false);
-    }
+    })();
+    refreshInFlight.current = task;
+    void task.finally(() => {
+      if (refreshInFlight.current === task) refreshInFlight.current = null;
+    });
+    return task;
   }
 
   async function repairRuntimeState() {
@@ -245,9 +260,21 @@ export function App() {
 
   useEffect(() => {
     if (!data?.recording.active) return;
-    const timer = window.setInterval(() => void refresh(true), 2000);
+    const refreshRecordingStatus = () => {
+      void Promise.all([getNativeRuntimeStatus(), getRecordingStatus()])
+        .then(([runtime, recording]) => {
+          setRuntimeStatus(runtime);
+          if (runtime && runtime.state !== "ready") {
+            setError(runtimeRecoveryMessage(runtime, t));
+            return;
+          }
+          setData((current) => (current ? { ...current, recording } : current));
+        })
+        .catch(() => setError(t("message.runtimeUnavailable")));
+    };
+    const timer = window.setInterval(refreshRecordingStatus, 2000);
     return () => window.clearInterval(timer);
-  }, [data?.recording.active]);
+  }, [data?.recording.active, t]);
 
   async function runAction(task: () => Promise<string>) {
     setWorking(true);
@@ -264,8 +291,31 @@ export function App() {
     }
   }
 
+  async function loadMoreEvents() {
+    if (!data || data.events.length >= data.eventTotal) return;
+    setWorking(true);
+    setError("");
+    try {
+      const page = await loadEventPage(data.events.length);
+      setData((current) => {
+        if (!current) return current;
+        const known = new Set(current.events.map((event) => event.event_id));
+        return {
+          ...current,
+          events: [...current.events, ...page.events.filter((event) => !known.has(event.event_id))],
+          eventTotal: page.total
+        };
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("message.actionFailed"));
+    } finally {
+      setWorking(false);
+    }
+  }
+
   const actions: AppActions = {
     refresh,
+    loadMoreEvents,
     previewImport: async (format, path, mapping, dateFormat, timezone) => {
       setWorking(true);
       setError("");
@@ -320,6 +370,10 @@ export function App() {
         if (!window.confirm(t("message.exportReview"))) {
           return t("message.exportCancelled");
         }
+        if (isManagedDesktop()) {
+          const result = await saveExport(format, "");
+          return t("message.savedExport", { format: result.format, path: result.filename });
+        }
         const filename = downloadExport(format, await exportArtifact(format));
         return t("message.downloaded", { filename });
       }),
@@ -329,7 +383,7 @@ export function App() {
           return t("message.exportCancelled");
         }
         const result = await saveExport(format, path);
-        return t("message.savedExport", { format: result.format, path: result.path });
+        return t("message.savedExport", { format: result.format, path: result.filename });
       }),
     saveSettings: (settings) =>
       runAction(async () => {
@@ -503,7 +557,9 @@ function View({
 }) {
   if (tab === "home") return <HomeView data={data} actions={actions} working={working} onNavigate={onNavigate} />;
   if (data.events.length === 0 && tab !== "settings") return <EmptyDataView onStart={onStart} />;
-  if (tab === "events") return <EventsView events={data.events} />;
+  if (tab === "events") {
+    return <EventsView events={data.events} total={data.eventTotal} onLoadMore={actions.loadMoreEvents} working={working} />;
+  }
   if (tab === "quality") return <QualityView quality={data.quality} actions={actions} working={working} />;
   if (tab === "process") return <ProcessView processMap={data.processMap} events={data.events} />;
   if (tab === "switching") return <SwitchingView switching={data.appSwitching} />;
@@ -569,6 +625,7 @@ function HomeView({
   const { formatDateTime, t } = useI18n();
   const [format, setFormat] = useState<"csv" | "json">("csv");
   const [path, setPath] = useState("");
+  const [selectedImportFile, setSelectedImportFile] = useState<{ handle: string; display_name: string } | null>(null);
   const [activityWatchEnabled, setActivityWatchEnabled] = useState(false);
   const [activityWatchMode, setActivityWatchMode] = useState<ActivityWatchImportMode>("skip_duplicates");
   const [activityWatchPreview, setActivityWatchPreview] = useState<ActivityWatchPreview | null>(null);
@@ -610,14 +667,16 @@ function HomeView({
     const mapping = format === "csv" ? csvMapping : undefined;
     const dateFormat = format === "csv" ? csvDateFormat : "";
     const timezone = format === "csv" ? csvTimezone : "UTC";
-    void actions.previewImport(format, path, mapping, dateFormat, timezone).then(setPreview);
+    const fileReference = isManagedDesktop() ? selectedImportFile?.handle || "" : path;
+    void actions.previewImport(format, fileReference, mapping, dateFormat, timezone).then(setPreview);
   };
 
   const importCurrentFile = () => {
     const mapping = format === "csv" ? csvMapping : undefined;
     const dateFormat = format === "csv" ? csvDateFormat : "";
     const timezone = format === "csv" ? csvTimezone : "UTC";
-    void actions.importEvents(format, path, mapping, dateFormat, timezone);
+    const fileReference = isManagedDesktop() ? selectedImportFile?.handle || "" : path;
+    void actions.importEvents(format, fileReference, mapping, dateFormat, timezone);
   };
 
   const previewActivityWatch = () => {
@@ -682,12 +741,27 @@ function HomeView({
             onChange={(event) => {
               setFormat(event.target.value as "csv" | "json");
               setPreview(null);
+              setSelectedImportFile(null);
             }}
             disabled={working}
           >
             <option value="csv">CSV</option>
             <option value="json">JSON</option>
           </select>
+          {isManagedDesktop() ? (
+            <button
+              onClick={() => {
+                void chooseImportFile(format).then((file) => {
+                  setSelectedImportFile(file);
+                  setPreview(null);
+                  setCsvMapping({});
+                });
+              }}
+              disabled={working}
+            >
+              {selectedImportFile?.display_name || t("action.chooseFile")}
+            </button>
+          ) : (
           <input
             value={path}
             onChange={(event) => {
@@ -699,9 +773,10 @@ function HomeView({
             placeholder={t("import.path")}
             aria-label={t("import.path")}
           />
+          )}
           <button
             onClick={previewCurrentImport}
-            disabled={working || path.trim() === ""}
+            disabled={working || (isManagedDesktop() ? !selectedImportFile : path.trim() === "")}
           >
             {t("action.preview")}
           </button>
@@ -749,7 +824,7 @@ function HomeView({
             working={working}
           />
         ) : null}
-        <button onClick={importCurrentFile} disabled={working || path.trim() === ""}>
+        <button onClick={importCurrentFile} disabled={working || (isManagedDesktop() ? !selectedImportFile : path.trim() === "")}>
           {t("import.previewed")}
         </button>
         <label className="check-row">
@@ -864,7 +939,7 @@ function HomeView({
               </option>
             ))}
           </select>
-          <input value={exportPath} onChange={(event) => setExportPath(event.target.value)} disabled={working} />
+          {!isManagedDesktop() ? <input value={exportPath} onChange={(event) => setExportPath(event.target.value)} disabled={working} /> : null}
           <button
             onClick={() => {
               void actions.previewExport(exportFormat).then(setExportPreview);
@@ -884,7 +959,7 @@ function HomeView({
           </div>
         ) : null}
         <div className="button-grid">
-          <button onClick={() => void actions.saveExport(exportFormat, exportPath)} disabled={working || !exportPath.trim()}>
+          <button onClick={() => void actions.saveExport(exportFormat, exportPath)} disabled={working || (!isManagedDesktop() && !exportPath.trim())}>
             {t("action.savePath")}
           </button>
           <button onClick={() => void actions.exportArtifact(exportFormat)} disabled={working}>
@@ -1595,7 +1670,17 @@ function DashboardView({ data }: { data: DashboardData }) {
   );
 }
 
-function EventsView({ events }: { events: EventRecord[] }) {
+export function EventsView({
+  events,
+  total,
+  onLoadMore,
+  working
+}: {
+  events: EventRecord[];
+  total: number;
+  onLoadMore: () => Promise<void>;
+  working: boolean;
+}) {
   const { t } = useI18n();
   return (
     <section className="table-wrap">
@@ -1625,6 +1710,11 @@ function EventsView({ events }: { events: EventRecord[] }) {
           ))}
         </tbody>
       </table>
+      {events.length < total ? (
+        <button className="secondary-button" onClick={() => void onLoadMore()} disabled={working}>
+          {t("events.loadMore", { shown: events.length, total })}
+        </button>
+      ) : null}
     </section>
   );
 }
@@ -2150,8 +2240,8 @@ function SettingsView({ data, actions, working }: { data: DashboardData; actions
         <Setting label={t("settings.apiBind")} value={data.health.bind} />
         <Setting label={t("diagnostics.external")} value={data.health.local_only ? t("status.blocked") : t("status.unknown")} />
         <Setting label={t("settings.llmIntegration")} value={data.health.llm_supported ? t("status.enabled") : t("status.notSupported")} />
-        <Setting label={t("settings.dataStorage")} value={data.health.storage_mode} />
-        <Setting label={t("settings.eventsLoaded")} value={data.health.event_count.toString()} />
+        <Setting label={t("settings.dataStorage")} value={data.diagnostics.storage.storage_mode} />
+        <Setting label={t("settings.eventsLoaded")} value={data.diagnostics.storage.event_count.toString()} />
         <Setting label={t("diagnostics.activitywatch")} value={t("status.optionalLocalImport")} />
         <Setting label={t("settings.sensitiveCapture")} value={t("status.noSensitiveCapture")} />
       </section>

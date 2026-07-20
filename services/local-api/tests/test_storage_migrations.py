@@ -51,6 +51,7 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertEqual(store.manual_labels[events[0].event_id], "Reviewed")
         self.assertEqual(store.get_settings()["retention_days"], 14)
         self.assertEqual(store.list_import_history()[0]["source"], "legacy_csv")
+        self.assertEqual(store.list_import_history()[0]["path"], "legacy.csv")
         self.assertEqual(store.automation_reviews["社内確認"], "adopted")
         self.assertEqual(diagnostics["schema_version"], CURRENT_SCHEMA_VERSION)
         self.assertEqual(diagnostics["migration_status"], "migrated")
@@ -62,7 +63,13 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertEqual(backup_dir_mode, 0o700)
         self.assertEqual(backup_event_count, len(events))
         self.assertNotIn("note", backup_columns)
-        self.assertEqual(ledger, [(1, "baseline_event_store", MIGRATIONS[0].checksum)])
+        self.assertEqual(
+            ledger,
+            [
+                (1, "baseline_event_store", MIGRATIONS[0].checksum),
+                (2, "redact_import_history_paths", MIGRATIONS[1].checksum),
+            ],
+        )
 
     def test_all_historical_v01_table_sets_upgrade_to_the_baseline_schema(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
@@ -154,7 +161,7 @@ class StorageMigrationTests(unittest.TestCase):
                 ledger_count = connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
 
         self.assertEqual(version, CURRENT_SCHEMA_VERSION)
-        self.assertEqual(ledger_count, 1)
+        self.assertEqual(ledger_count, CURRENT_SCHEMA_VERSION)
         self.assertEqual(store.diagnostics()["migration_status"], "migrated")
         self.assertEqual(store.diagnostics()["wal_status"], "warning")
 

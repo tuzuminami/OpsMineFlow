@@ -3,8 +3,6 @@ export type Health = {
   bind: string;
   local_only: boolean;
   llm_supported: boolean;
-  storage_mode: string;
-  event_count: number;
 };
 
 export type RuntimeStatus = {
@@ -27,6 +25,14 @@ export type EventRecord = {
   duration_seconds: number;
   confidential_flag: boolean;
   quality_review_status: string;
+};
+
+export type EventPage = {
+  events: EventRecord[];
+  offset: number;
+  limit: number;
+  total: number;
+  has_more: boolean;
 };
 
 export type Summary = {
@@ -237,7 +243,7 @@ export type CsvMapping = Record<string, string>;
 
 export type ImportPreview = {
   format: string;
-  path: string;
+  display_name: string;
   event_count: number;
   confidential_count: number;
   columns: string[];
@@ -303,7 +309,7 @@ export type ExportPreview = {
 export type ExportSaveResult = {
   saved: boolean;
   format: ExportFormat;
-  path: string;
+  filename: string;
   byte_size: number;
   warning: string;
 };

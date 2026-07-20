@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window-runtime-status",
-  "description": "Lets the main OpsMineFlow window read redacted local runtime status and explicitly repair quarantined runtime state.",
+  "description": "Lets the main OpsMineFlow window use only redacted runtime status, explicit repair, allowlisted local API operations, native-confirmed deletion, and Finder-selected import scopes.",
   "windows": ["main"],
-  "permissions": ["allow-runtime-status", "allow-repair-runtime-state"]
+  "permissions": ["allow-runtime-status", "allow-repair-runtime-state", "allow-local-api-operation", "allow-delete-local-data", "allow-choose-import-file", "allow-preview-selected-import", "allow-import-selected-file", "allow-save-export-with-dialog"]
 }

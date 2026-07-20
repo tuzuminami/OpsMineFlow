@@ -15,7 +15,7 @@ from pathlib import Path
 import fcntl
 
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 MAX_MIGRATION_BACKUPS = 3
 _MIGRATION_LOCK = threading.RLock()
 _KNOWN_LEGACY_TABLES = frozenset(
@@ -85,6 +85,10 @@ _SCHEMA_SIGNATURES: dict[
     }
 }
 
+# Schema version 2 changes data handling only: it removes historical absolute
+# import paths. The table layouts intentionally remain identical to v1.
+_SCHEMA_SIGNATURES[2] = _SCHEMA_SIGNATURES[1]
+
 
 class MigrationError(RuntimeError):
     """A database cannot be safely opened or migrated."""
@@ -117,6 +121,14 @@ class Migration:
                 }
                 if "note" not in columns:
                     connection.execute("ALTER TABLE automation_reviews ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+                continue
+            if step == "redact_import_history_paths":
+                rows = connection.execute("SELECT id, source, path FROM import_history").fetchall()
+                for row_id, source, path in rows:
+                    connection.execute(
+                        "UPDATE import_history SET path = ? WHERE id = ?",
+                        (_safe_import_display_name(str(source), str(path)), int(row_id)),
+                    )
                 continue
             raise MigrationInvariantError(f"Unknown legacy migration step: {step}")
 
@@ -175,6 +187,10 @@ _MIGRATION_001_STATEMENTS = (
 _MIGRATION_001_LEGACY_STEPS = ("add_automation_review_note",)
 _MIGRATION_001_CHECKSUM = "4791df32d17324b8769203b68e005319ca1c3cbf584bce4eb2a511690e1a17a2"
 
+_MIGRATION_002_STATEMENTS: tuple[str, ...] = ()
+_MIGRATION_002_LEGACY_STEPS = ("redact_import_history_paths",)
+_MIGRATION_002_CHECKSUM = "77ecd83da344c9734128dfa62c8c85fd8c34652d2811d3f4b2d8bb5530dfdb17"
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -183,7 +199,23 @@ MIGRATIONS: tuple[Migration, ...] = (
         statements=_MIGRATION_001_STATEMENTS,
         legacy_steps=_MIGRATION_001_LEGACY_STEPS,
     ),
+    Migration(
+        version=2,
+        name="redact_import_history_paths",
+        checksum=_MIGRATION_002_CHECKSUM,
+        statements=_MIGRATION_002_STATEMENTS,
+        legacy_steps=_MIGRATION_002_LEGACY_STEPS,
+    ),
 )
+
+
+def _safe_import_display_name(source: str, path_value: str) -> str:
+    """Return a non-sensitive label suitable for persistent import history."""
+
+    if source.startswith("activitywatch_local"):
+        return "ActivityWatch (local)"
+    name = Path(path_value).name.strip()
+    return name or "Imported file"
 
 
 @dataclass(frozen=True)

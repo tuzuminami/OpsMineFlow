@@ -42,5 +42,8 @@
 | Pydantic | https://github.com/pydantic/pydantic | Validation | MIT | Yes | Yes | Yes | direct-dependency | Used in local schema. |
 | uv | https://github.com/astral-sh/uv | Developer setup | MIT/Apache-2.0 | Yes | Yes | Yes | candidate | Optional developer tool. |
 | Tauri | https://github.com/tauri-apps/tauri | Desktop shell | MIT/Apache-2.0 | Yes | Yes | Yes | direct-dependency | Lock down external URLs. |
+| tauri-plugin-dialog | https://github.com/tauri-apps/plugins-workspace | Native open/save and confirmation dialogs | Apache-2.0/MIT | Yes | Yes | Yes | direct-dependency | Rust-only dialog use; WebView receives no arbitrary filesystem path. |
+| rfd | https://github.com/PolyMeilex/rfd | Native dialog backend | MIT | Yes | Yes | Yes | transitive-dependency | Pulled by tauri-plugin-dialog. |
+| hmac | https://github.com/RustCrypto/MACs | Runtime sidecar proof | MIT/Apache-2.0 | Yes | Yes | Yes | direct-dependency | HMAC-SHA256 only; no network use. |
 | React | https://github.com/facebook/react | UI | MIT | Yes | Yes | Yes | direct-dependency | Local bundle. |
 | Vite | https://github.com/vitejs/vite | UI build | MIT | Yes | Yes | Yes | direct-dependency | Dev server is local. |

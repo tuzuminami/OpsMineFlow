@@ -19,10 +19,22 @@ OpsMineFlow is designed for consent-based business improvement analysis.
 
 - Local files only.
 - Localhost-only API bind.
-- Restricted CORS.
+- A fresh, 256-bit local API session secret for every desktop runtime; it is held only by the Rust runtime and the local API process.
+- The packaged WebUI uses an allowlisted Tauri command rather than browser `fetch` to localhost. It cannot select an arbitrary HTTP method, path, or header.
+- Exact localhost Host validation, production Origin rejection, bounded JSON request bodies, and development-only CORS.
+- Minimal unauthenticated readiness endpoints only; user data, diagnostics, reports, and exports require the desktop runtime session.
+- One-time, short-lived delete challenges that remain inside the Rust runtime.
 - No external telemetry.
 - No LLM integrations.
 - Audit-friendly documentation.
+
+## Local API Trust Boundary
+
+The packaged desktop UI never receives the local API session secret and never sends a direct request to the loopback API. A Rust-owned sidecar launcher creates the secret for one runtime, passes it to the local API, and removes it from inherited child environments. Before a request carries that secret, Rust verifies the sidecar on the same TCP connection with a per-runtime HMAC probe; a listener that cannot prove ownership receives no API session secret. The Rust command layer maps each permitted UI action to a fixed local route and applies time and response-size limits.
+
+`GET /health` and `GET /runtime/health` are intentionally public so the launcher can safely determine whether it owns a previous local sidecar. Their public response is minimal operational metadata and does not read SQLite or disclose event counts. The runtime ownership nonce, PID, and HMAC proof appear only when Rust supplies a fresh probe challenge. All WebUI product routes require the per-runtime secret in production. Recorder ingestion uses its separate, explicit recording-session control instead of the WebUI secret. Browser-based development requires an explicit insecure-development opt-in and is not a packaged-product access path.
+
+Deletion requires a second, single-use challenge. The API issues and consumes that challenge atomically; the challenge is never returned to JavaScript in the packaged desktop app.
 
 ## Data Not Collected
 
