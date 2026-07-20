@@ -12,10 +12,12 @@ from unittest.mock import patch
 
 from opsmineflow_api.migrations import (
     CURRENT_SCHEMA_VERSION,
+    LEGACY_PROJECT_ID,
     MIGRATIONS,
     MigrationError,
     MigrationInvariantError,
     UnsupportedSchemaError,
+    migrate_database,
     validate_migration_registry,
 )
 from opsmineflow_api.storage import EventStore
@@ -23,6 +25,32 @@ from opsmineflow_mining import load_events_from_csv
 
 
 class StorageMigrationTests(unittest.TestCase):
+    def test_fresh_database_applies_v3_and_creates_a_durable_empty_legacy_project(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+
+            report = migrate_database(db_path)
+            reopened = migrate_database(db_path)
+
+            with sqlite3.connect(db_path) as connection:
+                project = connection.execute(
+                    "SELECT project_id, display_name, origin, revision FROM projects"
+                ).fetchone()
+                workspace_metadata = dict(connection.execute("SELECT key, value FROM workspace_metadata").fetchall())
+                empty_snapshot = _v3_dataset_snapshot(connection, LEGACY_PROJECT_ID)
+                ledger = connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+
+        self.assertEqual(report.previous_version, 0)
+        self.assertEqual(report.applied_migrations, (1, 2, 3))
+        self.assertEqual(reopened.status, "current")
+        self.assertEqual(project, (LEGACY_PROJECT_ID, "Migrated data", "legacy_migration", 0))
+        self.assertEqual(ledger, [(1,), (2,), (3,)])
+        self.assertEqual(workspace_metadata["active_project_id"], LEGACY_PROJECT_ID)
+        self.assertEqual(workspace_metadata["legacy_v2_before_hash"], _dataset_hash(empty_snapshot))
+        self.assertEqual(workspace_metadata["legacy_v3_after_hash"], _dataset_hash(empty_snapshot))
+        self.assertEqual(json.loads(workspace_metadata["legacy_v2_before_counts"]), _dataset_counts(empty_snapshot))
+        self.assertEqual(json.loads(workspace_metadata["legacy_v3_after_counts"]), _dataset_counts(empty_snapshot))
+
     def test_legacy_database_migrates_once_and_preserves_data(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -68,6 +96,7 @@ class StorageMigrationTests(unittest.TestCase):
             [
                 (1, "baseline_event_store", MIGRATIONS[0].checksum),
                 (2, "redact_import_history_paths", MIGRATIONS[1].checksum),
+                (3, "scope_records_to_projects", MIGRATIONS[2].checksum),
             ],
         )
 
@@ -98,8 +127,160 @@ class StorageMigrationTests(unittest.TestCase):
                         "import_history",
                         "automation_reviews",
                         "schema_migrations",
+                        "projects",
+                        "workspace_metadata",
                     },
                 )
+
+    def test_v2_backfill_creates_one_legacy_project_and_preserves_auditable_snapshot(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            _create_v2_database(db_path, events[:2])
+            before = _v2_dataset_snapshot(db_path)
+
+            report = migrate_database(db_path)
+            reopened = migrate_database(db_path)
+
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("PRAGMA foreign_keys = ON")
+                project = connection.execute(
+                    "SELECT project_id, display_name, origin, revision FROM projects"
+                ).fetchone()
+                workspace_metadata = dict(
+                    connection.execute("SELECT key, value FROM workspace_metadata ORDER BY key").fetchall()
+                )
+                after = _v3_dataset_snapshot(connection, LEGACY_PROJECT_ID)
+                table_names = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                    ).fetchall()
+                }
+                foreign_keys = {
+                    table_name: connection.execute(f"PRAGMA foreign_key_list({table_name})").fetchall()
+                    for table_name in (
+                        "events",
+                        "manual_labels",
+                        "settings",
+                        "metadata",
+                        "import_history",
+                        "automation_reviews",
+                    )
+                }
+
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        "INSERT INTO events(project_id, event_id, payload_json) VALUES(?, ?, ?)",
+                        ("missing-project", "event-1", "{}"),
+                    )
+                connection.execute(
+                    "INSERT INTO projects(project_id, display_name, origin, created_at, updated_at, revision) "
+                    "VALUES(?, ?, ?, ?, ?, ?)",
+                    ("d350dc56-7cfe-4df4-ae0a-bfcf9467d9e0", "Second project", "test", "now", "now", 0),
+                )
+                connection.execute(
+                    "INSERT INTO events(project_id, event_id, payload_json) VALUES(?, ?, ?)",
+                    ("d350dc56-7cfe-4df4-ae0a-bfcf9467d9e0", events[0].event_id, "{}"),
+                )
+                connection.execute(
+                    "INSERT INTO manual_labels(project_id, event_id, label) VALUES(?, ?, ?)",
+                    ("d350dc56-7cfe-4df4-ae0a-bfcf9467d9e0", events[0].event_id, "Second label"),
+                )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        "INSERT INTO manual_labels(project_id, event_id, label) VALUES(?, ?, ?)",
+                        ("d350dc56-7cfe-4df4-ae0a-bfcf9467d9e0", "missing-event", "Rejected"),
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        "INSERT INTO workspace_metadata(key, value) VALUES(?, ?)",
+                        ("active_project_id", "missing-project"),
+                    )
+                scoped_event_counts = connection.execute(
+                    "SELECT project_id, COUNT(*) FROM events GROUP BY project_id ORDER BY project_id"
+                ).fetchall()
+                scoped_label_counts = connection.execute(
+                    "SELECT project_id, COUNT(*) FROM manual_labels GROUP BY project_id ORDER BY project_id"
+                ).fetchall()
+                foreign_key_check = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+        self.assertEqual(report.previous_version, 2)
+        self.assertEqual(report.schema_version, 3)
+        self.assertEqual(report.applied_migrations, (3,))
+        self.assertEqual(reopened.status, "current")
+        self.assertEqual(project, (LEGACY_PROJECT_ID, "Migrated data", "legacy_migration", 0))
+        self.assertEqual(after, before)
+        self.assertEqual(workspace_metadata["active_project_id"], LEGACY_PROJECT_ID)
+        self.assertEqual(workspace_metadata["legacy_v2_before_hash"], workspace_metadata["legacy_v3_after_hash"])
+        self.assertEqual(workspace_metadata["legacy_v2_before_hash"], _dataset_hash(before))
+        self.assertEqual(json.loads(workspace_metadata["legacy_v2_before_counts"]), _dataset_counts(before))
+        self.assertEqual(json.loads(workspace_metadata["legacy_v3_after_counts"]), _dataset_counts(after))
+        self.assertEqual(
+            table_names,
+            {
+                "automation_reviews",
+                "events",
+                "import_history",
+                "manual_labels",
+                "metadata",
+                "projects",
+                "schema_migrations",
+                "settings",
+                "workspace_metadata",
+            },
+        )
+        self.assertTrue(all(foreign_keys.values()))
+        self.assertEqual(scoped_event_counts, [(LEGACY_PROJECT_ID, 2), ("d350dc56-7cfe-4df4-ae0a-bfcf9467d9e0", 1)])
+        self.assertEqual(scoped_label_counts, [(LEGACY_PROJECT_ID, 1), ("d350dc56-7cfe-4df4-ae0a-bfcf9467d9e0", 1)])
+        self.assertEqual(foreign_key_check, [])
+
+    def test_v3_interruption_rolls_back_to_v2_and_a_redo_backfills_once(self) -> None:
+        events = load_events_from_csv("data/sample/sample_events.csv")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            _create_v2_database(db_path, events[:1])
+
+            def fail_after_v3(version: int) -> None:
+                if version == 3:
+                    raise RuntimeError("intentional v3 migration interruption")
+
+            with self.assertRaises(MigrationError):
+                migrate_database(db_path, fault_injector=fail_after_v3)
+
+            with sqlite3.connect(db_path) as connection:
+                interrupted_version = connection.execute("PRAGMA user_version").fetchone()[0]
+                interrupted_ledger = connection.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                ).fetchall()
+                interrupted_tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                    ).fetchall()
+                }
+                interrupted_events = connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+            redo = migrate_database(db_path)
+            with sqlite3.connect(db_path) as connection:
+                project_count = connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+                active_project = connection.execute(
+                    "SELECT value FROM workspace_metadata WHERE key = 'active_project_id'"
+                ).fetchone()[0]
+                migrated_events = connection.execute(
+                    "SELECT COUNT(*) FROM events WHERE project_id = ?", (LEGACY_PROJECT_ID,)
+                ).fetchone()[0]
+                foreign_key_check = connection.execute("PRAGMA foreign_key_check").fetchall()
+
+        self.assertEqual(interrupted_version, 2)
+        self.assertEqual(interrupted_ledger, [(1,), (2,)])
+        self.assertNotIn("projects", interrupted_tables)
+        self.assertEqual(interrupted_events, 1)
+        self.assertEqual(redo.applied_migrations, (3,))
+        self.assertEqual(project_count, 1)
+        self.assertEqual(active_project, LEGACY_PROJECT_ID)
+        self.assertEqual(migrated_events, 1)
+        self.assertEqual(foreign_key_check, [])
 
     def test_wal_legacy_database_snapshot_includes_committed_rows(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
@@ -199,7 +380,7 @@ class StorageMigrationTests(unittest.TestCase):
 
         self.assertEqual(len(backup_paths), 3)
 
-    def test_delete_data_removes_migration_snapshots(self) -> None:
+    def test_project_clear_retains_workspace_migration_snapshots(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "opsmineflow.sqlite3"
@@ -212,7 +393,7 @@ class StorageMigrationTests(unittest.TestCase):
             store.clear()
             backup_paths = list((db_path.parent / "backups").glob("*.sqlite3*"))
 
-        self.assertEqual(backup_paths, [])
+        self.assertEqual(len(backup_paths), 2)
 
     def test_newer_schema_is_rejected_without_mutating_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -361,6 +542,91 @@ def _create_legacy_database(db_path: Path, events: list[object], *, table_count:
                 "INSERT INTO automation_reviews(activity, status, updated_at) VALUES(?, ?, ?)",
                 ("社内確認", "adopted", "2026-07-20T00:00:00+00:00"),
             )
+
+
+def _create_v2_database(db_path: Path, events: list[object]) -> None:
+    _create_legacy_database(db_path, events)
+    applied_at = "2026-07-20T00:00:00+00:00"
+    with sqlite3.connect(db_path) as connection:
+        for migration in MIGRATIONS[:2]:
+            migration.apply(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name, checksum, applied_at) VALUES(?, ?, ?, ?)",
+                (migration.version, migration.name, migration.checksum, applied_at),
+            )
+            connection.execute(f"PRAGMA user_version = {migration.version}")
+
+
+def _v2_dataset_snapshot(db_path: Path) -> dict[str, list[list[object]]]:
+    with sqlite3.connect(db_path) as connection:
+        return {
+            "events": _fetch_rows(connection, "SELECT event_id, payload_json FROM events ORDER BY event_id"),
+            "manual_labels": _fetch_rows(connection, "SELECT event_id, label FROM manual_labels ORDER BY event_id"),
+            "settings": _fetch_rows(connection, "SELECT key, value_json FROM settings ORDER BY key"),
+            "metadata": _fetch_rows(connection, "SELECT key, value FROM metadata ORDER BY key"),
+            "import_history": _fetch_rows(
+                connection,
+                "SELECT id, source, path, event_count, imported_at FROM import_history ORDER BY id",
+            ),
+            "automation_reviews": _fetch_rows(
+                connection,
+                "SELECT activity, status, note, updated_at FROM automation_reviews ORDER BY activity",
+            ),
+        }
+
+
+def _v3_dataset_snapshot(connection: sqlite3.Connection, project_id: str) -> dict[str, list[list[object]]]:
+    return {
+        "events": _fetch_rows(
+            connection,
+            "SELECT event_id, payload_json FROM events WHERE project_id = ? ORDER BY event_id",
+            (project_id,),
+        ),
+        "manual_labels": _fetch_rows(
+            connection,
+            "SELECT event_id, label FROM manual_labels WHERE project_id = ? ORDER BY event_id",
+            (project_id,),
+        ),
+        "settings": _fetch_rows(
+            connection,
+            "SELECT key, value_json FROM settings WHERE project_id = ? ORDER BY key",
+            (project_id,),
+        ),
+        "metadata": _fetch_rows(
+            connection,
+            "SELECT key, value FROM metadata WHERE project_id = ? ORDER BY key",
+            (project_id,),
+        ),
+        "import_history": _fetch_rows(
+            connection,
+            "SELECT id, source, path, event_count, imported_at FROM import_history "
+            "WHERE project_id = ? ORDER BY id",
+            (project_id,),
+        ),
+        "automation_reviews": _fetch_rows(
+            connection,
+            "SELECT activity, status, note, updated_at FROM automation_reviews "
+            "WHERE project_id = ? ORDER BY activity",
+            (project_id,),
+        ),
+    }
+
+
+def _fetch_rows(
+    connection: sqlite3.Connection,
+    statement: str,
+    parameters: tuple[object, ...] = (),
+) -> list[list[object]]:
+    return [list(row) for row in connection.execute(statement, parameters).fetchall()]
+
+
+def _dataset_counts(snapshot: dict[str, list[list[object]]]) -> dict[str, int]:
+    return {name: len(rows) for name, rows in snapshot.items()}
+
+
+def _dataset_hash(snapshot: dict[str, list[list[object]]]) -> str:
+    canonical = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _sha256(path: Path) -> str:

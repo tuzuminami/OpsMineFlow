@@ -51,6 +51,7 @@ from pathlib import Path
 api_port = int(sys.argv[1])
 root = Path(sys.argv[2])
 base_url = f"http://127.0.0.1:{api_port}"
+project_headers: dict[str, str] = {}
 limits = {
     "import": 15.0,
     "dashboard": 15.0,
@@ -62,12 +63,12 @@ limits = {
 def request(path: str, payload: dict[str, object] | None = None) -> tuple[object, float]:
     started = time.perf_counter()
     if payload is None:
-        request_object = urllib.request.Request(base_url + path, method="GET")
+        request_object = urllib.request.Request(base_url + path, headers=project_headers, method="GET")
     else:
         request_object = urllib.request.Request(
             base_url + path,
             data=json.dumps(payload).encode("utf-8"),
-            headers={"content-type": "application/json"},
+            headers={"content-type": "application/json", **project_headers},
             method="POST",
         )
     with urllib.request.urlopen(request_object, timeout=limits["export"] + 5) as response:
@@ -120,6 +121,10 @@ def write_sources(count: int) -> tuple[Path, Path]:
 
 
 wait_for_health()
+projects, _ = request("/projects")
+if not isinstance(projects, dict) or not isinstance(projects.get("active_project_id"), str):
+    raise SystemExit("local API did not return an active project")
+project_headers["X-OpsMineFlow-Project"] = projects["active_project_id"]
 results: list[dict[str, object]] = []
 dashboard_requests: tuple[tuple[str, dict[str, object] | None], ...] = (
     ("/health", None),

@@ -76,7 +76,13 @@ The seven events shown on the first launch are sample data. They demonstrate the
 
 To restore the example later, import `data/sample/sample_events.csv` from the repository.
 
-### 3. Record Work on This Mac
+### 3. Choose the Client or Workstream
+
+Use the project selector at the top of the app to choose the client, engagement, or workstream before working with data. Create and name a project for a new engagement. Events, settings, imports, automation reviews, reports, and exports stay within that selected project. The selector is locked while a recording is active, so a session cannot move between projects.
+
+An older database that is upgraded to project-aware storage appears as **Migrated data**. Review and rename that project when its contents are confirmed.
+
+### 4. Record Work on This Mac
 
 Use **Record work** at the top of Home to capture a normal work session:
 
@@ -98,7 +104,7 @@ cd ~/OpsMineFlow && ./scripts/install_mac.sh
 
 For existing logs, choose **Home > Start collecting data** and use CSV/JSON or the explicit ActivityWatch localhost import.
 
-### 4. Import a CSV or JSON File
+### 5. Import a CSV or JSON File
 
 1. Prepare a CSV or JSON event log.
 2. In Finder, select the file and press `Option-Command-C` to copy its full pathname.
@@ -109,7 +115,7 @@ For existing logs, choose **Home > Start collecting data** and use CSV/JSON or t
 
 CSV commonly uses `case_id`, `activity`, `timestamp_start`, `timestamp_end`, `user`, `app_name`, `url`, and `memo`. The import replaces the current analysis dataset and records the import in local history.
 
-### 5. Analyze the Work
+### 6. Analyze the Work
 
 - **Dashboard**: totals, application time, business-label time, bottlenecks, and top automation candidates.
 - **Event Explorer**: masked event-level records.
@@ -118,15 +124,15 @@ CSV commonly uses `case_id`, `activity`, `timestamp_start`, `timestamp_end`, `us
 - **Automation**: sort candidates and save Adopt, Hold, Reject, or Unreviewed states.
 - **Reports**: review the locally generated Markdown report.
 
-### 6. Export Results
+### 7. Export Results
 
 Open **Home > Exports**, choose Markdown, JSON, CSV, Mermaid, draw.io, or **LLM handoff (ZIP)**, and preview it. Review masking and confidential flags before choosing **Save to Path** or **Download**. The handoff ZIP is a local, manual transfer artifact: it contains aggregate process evidence and a versioned schema so an external LLM can write Mermaid Markdown, but OpsMineFlow never connects to an LLM or sends the file. See [the handoff bundle example](docs/samples/LLM_MERMAID_HANDOFF.md).
 
-### 7. Check or Remove Local Data
+### 8. Check or Remove Local Data
 
-Use **Home > Diagnostics** for API, WebUI, SQLite storage, dependencies, ports, ActivityWatch, and local-only policy. Use **Settings > Delete Data** when the current analysis must be removed. This deletion cannot be undone unless the source file still exists and is imported again.
+Use **Home > Diagnostics** for API, WebUI, SQLite storage, dependencies, ports, ActivityWatch, and local-only policy. Use **Settings > Delete Data** when the selected project's analysis must be removed; it does not affect other projects. After clearing its event data, an unneeded project can be deleted from the project selector. These actions cannot be undone unless the source file still exists and is imported again.
 
-### 8. Stop OpsMineFlow
+### 9. Stop OpsMineFlow
 
 Press `Control-C` in the startup terminal, or run this from another terminal:
 

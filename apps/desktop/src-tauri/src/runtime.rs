@@ -31,6 +31,7 @@ const MAX_API_PROXY_BODY_BYTES: usize = 1_048_576;
 const MAX_API_PROXY_RESPONSE_BYTES: usize = 4_194_304;
 const API_SESSION_HEADER: &str = "X-OpsMineFlow-Api-Session";
 const DELETE_CHALLENGE_HEADER: &str = "X-OpsMineFlow-Delete-Challenge";
+const PROJECT_HEADER: &str = "X-OpsMineFlow-Project";
 const RUNTIME_PROBE_CHALLENGE_HEADER: &str = "X-OpsMineFlow-Runtime-Probe-Challenge";
 const MAX_API_PROXY_HEADER_BYTES: usize = 16_384;
 const FILE_SCOPE_TTL: Duration = Duration::from_secs(300);
@@ -439,43 +440,68 @@ impl RuntimeState {
         if operation.requires_payload && payload.is_none() {
             return Err("local API operation requires a payload".to_owned());
         }
-        if !operation.requires_payload && payload.is_some() {
+        let requires_project = operation_requires_project(operation.name);
+        if !operation.requires_payload && payload.is_some() && !requires_project {
             return Err("local API operation does not accept a payload".to_owned());
         }
-        send_local_api_request(
+        let (request_payload, project_id) = if requires_project {
+            let mut payload = payload.ok_or_else(|| "local API operation requires a project context".to_owned())?;
+            let project_id = take_project_id(&mut payload)?;
+            let request_payload = if operation.method == "GET" {
+                None
+            } else {
+                Some(payload)
+            };
+            (request_payload, Some(project_id))
+        } else {
+            (payload, None)
+        };
+        let headers = project_id
+            .as_deref()
+            .map(|value| (PROJECT_HEADER, value))
+            .into_iter()
+            .collect::<Vec<_>>();
+        send_local_api_request_with_headers(
             &session_secret,
             &probe_secret,
             operation.method,
             operation.path,
-            payload.as_ref(),
-            None,
+            request_payload.as_ref(),
+            &headers,
         )
     }
 
     pub async fn delete_data_with_native_confirmation(
         &self,
         app: AppHandle,
+        payload: Value,
     ) -> Result<Value, String> {
+        let mut request_payload = payload;
+        let project_id = take_project_id(&mut request_payload)?;
         if !request_native_delete_confirmation(app).await? {
             return Err("local data deletion was cancelled".to_owned());
         }
         let runtime = self.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            runtime.delete_data_after_native_confirmation()
+            runtime.delete_data_after_native_confirmation(project_id, request_payload)
         })
         .await
         .map_err(|_| "local data deletion did not complete".to_owned())?
     }
 
-    fn delete_data_after_native_confirmation(&self) -> Result<Value, String> {
+    fn delete_data_after_native_confirmation(
+        &self,
+        project_id: String,
+        request_payload: Value,
+    ) -> Result<Value, String> {
         let (session_secret, probe_secret) = self.verified_runtime_secrets()?;
-        let challenge_response = send_local_api_request(
+        let challenge_response = send_local_api_request_with_headers(
             &session_secret,
             &probe_secret,
             "POST",
             "/data/delete/challenge",
             Some(&json!({})),
-            None,
+            &[(PROJECT_HEADER, &project_id)],
         )?;
         let challenge = challenge_response
             .get("challenge")
@@ -488,13 +514,13 @@ impl RuntimeState {
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
             })
             .ok_or_else(|| "local API delete challenge is invalid".to_owned())?;
-        let response = send_local_api_request(
+        let response = send_local_api_request_with_headers(
             &session_secret,
             &probe_secret,
             "POST",
             "/data/delete",
-            Some(&json!({})),
-            Some((DELETE_CHALLENGE_HEADER, challenge)),
+            Some(&request_payload),
+            &[(PROJECT_HEADER, &project_id), (DELETE_CHALLENGE_HEADER, challenge)],
         )?;
         if response.get("deleted").and_then(Value::as_bool) != Some(true) {
             return Err("local data deletion was not confirmed by the runtime".to_owned());
@@ -663,11 +689,11 @@ impl RuntimeState {
     pub async fn save_export_with_dialog(
         &self,
         app: AppHandle,
-        format: String,
+        payload: Value,
     ) -> Result<Value, String> {
         let runtime = self.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            runtime.save_export_with_dialog_blocking(app, format)
+            runtime.save_export_with_dialog_blocking(app, payload)
         })
         .await
         .map_err(|_| "export save did not complete".to_owned())?
@@ -676,8 +702,23 @@ impl RuntimeState {
     fn save_export_with_dialog_blocking(
         &self,
         app: AppHandle,
-        format: String,
+        payload: Value,
     ) -> Result<Value, String> {
+        let mut request_payload = payload
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "export requires a project context".to_owned())?;
+        let project_id = request_payload
+            .remove("project_id")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|value| is_canonical_project_id(value))
+            .ok_or_else(|| "export requires a valid project context".to_owned())?;
+        let format = request_payload
+            .get("format")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "export format is required".to_owned())?
+            .to_owned();
         let (extension, suggested_name) = export_file_details(&format)?;
         let selection = app
             .dialog()
@@ -713,15 +754,19 @@ impl RuntimeState {
         }
         let (session_secret, probe_secret) = self.verified_runtime_secrets()?;
         let staging_path = self.create_export_staging_path(extension)?;
-        let response = send_file_transfer_request(
+        request_payload.insert("format".to_owned(), Value::String(format));
+        request_payload.insert(
+            "path".to_owned(),
+            Value::String(staging_path.to_string_lossy().into_owned()),
+        );
+        request_payload.insert("overwrite_confirmed".to_owned(), Value::Bool(false));
+        let response = send_file_transfer_request_with_headers(
             &session_secret,
             &probe_secret,
             "POST",
             "/export/save",
-            Some(
-                &json!({"format": format, "path": staging_path.to_string_lossy(), "overwrite_confirmed": false}),
-            ),
-            None,
+            Some(&Value::Object(request_payload)),
+            &[(PROJECT_HEADER, &project_id)],
         );
         let mut response = match response {
             Ok(response) => response,
@@ -796,6 +841,11 @@ impl RuntimeState {
     ) -> Result<Value, String> {
         validate_staged_import_file(scope)?;
         let mut payload = payload.as_object().cloned().unwrap_or_default();
+        let project_id = payload
+            .remove("project_id")
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|value| is_canonical_project_id(value))
+            .ok_or_else(|| "import requires a valid project context".to_owned())?;
         payload.insert("format".to_owned(), Value::String(scope.format.clone()));
         payload.insert(
             "path".to_owned(),
@@ -811,13 +861,13 @@ impl RuntimeState {
             route
         };
         let (session_secret, probe_secret) = self.verified_runtime_secrets()?;
-        send_file_transfer_request(
+        send_file_transfer_request_with_headers(
             &session_secret,
             &probe_secret,
             "POST",
             target,
             Some(&Value::Object(payload)),
-            None,
+            &[(PROJECT_HEADER, &project_id)],
         )
     }
 
@@ -1674,6 +1724,36 @@ fn resolve_api_operation(name: &str) -> Option<ApiOperation<'_>> {
             path: "/health",
             requires_payload: false,
         },
+        "projects" => ApiOperation {
+            name,
+            method: "GET",
+            path: "/projects",
+            requires_payload: false,
+        },
+        "project_create" => ApiOperation {
+            name,
+            method: "POST",
+            path: "/projects",
+            requires_payload: true,
+        },
+        "project_select" => ApiOperation {
+            name,
+            method: "POST",
+            path: "/projects/select",
+            requires_payload: true,
+        },
+        "project_rename" => ApiOperation {
+            name,
+            method: "POST",
+            path: "/projects/rename",
+            requires_payload: true,
+        },
+        "project_delete" => ApiOperation {
+            name,
+            method: "POST",
+            path: "/projects/delete",
+            requires_payload: true,
+        },
         "diagnostics" => ApiOperation {
             name,
             method: "GET",
@@ -1847,65 +1927,96 @@ fn resolve_api_operation(name: &str) -> Option<ApiOperation<'_>> {
     Some(operation)
 }
 
-fn send_local_api_request(
+fn operation_requires_project(name: &str) -> bool {
+    !matches!(
+        name,
+        "health" | "projects" | "project_create" | "project_select" | "project_rename" | "project_delete"
+    )
+}
+
+fn take_project_id(payload: &mut Value) -> Result<String, String> {
+    let project_id = payload
+        .as_object_mut()
+        .and_then(|object| object.remove("project_id"))
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| "local API operation requires a project context".to_owned())?;
+    if !is_canonical_project_id(&project_id) {
+        return Err("local API project context is invalid".to_owned());
+    }
+    Ok(project_id)
+}
+
+fn is_canonical_project_id(value: &str) -> bool {
+    value.len() == 36
+        && value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| match index {
+                8 | 13 | 18 | 23 => byte == b'-',
+                _ => byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase(),
+            })
+}
+
+fn send_local_api_request_with_headers(
     session_secret: &str,
     probe_secret: &str,
     method: &str,
     path: &str,
     payload: Option<&Value>,
-    extra_header: Option<(&str, &str)>,
+    extra_headers: &[(&str, &str)],
 ) -> Result<Value, String> {
-    send_local_api_request_with_timeout(
+    send_local_api_request_with_timeout_and_headers(
         session_secret,
         probe_secret,
         method,
         path,
         payload,
-        extra_header,
+        extra_headers,
         API_PROXY_TIMEOUT,
     )
 }
 
-fn send_file_transfer_request(
+fn send_file_transfer_request_with_headers(
     session_secret: &str,
     probe_secret: &str,
     method: &str,
     path: &str,
     payload: Option<&Value>,
-    extra_header: Option<(&str, &str)>,
+    extra_headers: &[(&str, &str)],
 ) -> Result<Value, String> {
-    send_local_api_request_with_timeout(
+    send_local_api_request_with_timeout_and_headers(
         session_secret,
         probe_secret,
         method,
         path,
         payload,
-        extra_header,
+        extra_headers,
         FILE_TRANSFER_TIMEOUT,
     )
 }
 
-fn send_local_api_request_with_timeout(
+fn send_local_api_request_with_timeout_and_headers(
     session_secret: &str,
     probe_secret: &str,
     method: &str,
     path: &str,
     payload: Option<&Value>,
-    extra_header: Option<(&str, &str)>,
+    extra_headers: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<Value, String> {
-    send_local_api_request_at_with_timeout(
+    send_local_api_request_at_with_timeout_and_headers(
         session_secret,
         probe_secret,
         endpoint(),
         method,
         path,
         payload,
-        extra_header,
+        extra_headers,
         timeout,
     )
 }
 
+#[cfg(test)]
 fn send_local_api_request_at(
     session_secret: &str,
     probe_secret: &str,
@@ -1927,6 +2038,7 @@ fn send_local_api_request_at(
     )
 }
 
+#[cfg(test)]
 fn send_local_api_request_at_with_timeout(
     session_secret: &str,
     probe_secret: &str,
@@ -1935,6 +2047,29 @@ fn send_local_api_request_at_with_timeout(
     path: &str,
     payload: Option<&Value>,
     extra_header: Option<(&str, &str)>,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let headers = extra_header.into_iter().collect::<Vec<_>>();
+    send_local_api_request_at_with_timeout_and_headers(
+        session_secret,
+        probe_secret,
+        address,
+        method,
+        path,
+        payload,
+        &headers,
+        timeout,
+    )
+}
+
+fn send_local_api_request_at_with_timeout_and_headers(
+    session_secret: &str,
+    probe_secret: &str,
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    payload: Option<&Value>,
+    extra_headers: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<Value, String> {
     let deadline = Instant::now() + timeout;
@@ -1960,7 +2095,7 @@ fn send_local_api_request_at_with_timeout(
             body.len()
         ));
     }
-    if let Some((name, value)) = extra_header {
+    for (name, value) in extra_headers {
         request.push_str(name);
         request.push_str(": ");
         request.push_str(value);
@@ -2183,6 +2318,25 @@ mod tests {
         assert!(event_split.requires_payload);
         assert!(resolve_api_operation("/data/delete").is_none());
         assert!(resolve_api_operation("unknown_operation").is_none());
+    }
+
+    #[test]
+    fn project_scoped_operations_extract_only_a_canonical_project_id() {
+        let project_id = "b01eecad-1e18-5e88-bf34-8e8e8358cfcb";
+        let mut payload = json!({
+            "project_id": project_id,
+            "expected_revision": 4,
+        });
+
+        assert!(operation_requires_project("events_page"));
+        assert!(!operation_requires_project("projects"));
+        assert!(!operation_requires_project("project_create"));
+        assert_eq!(take_project_id(&mut payload).expect("project context"), project_id);
+        assert_eq!(payload, json!({"expected_revision": 4}));
+        assert!(take_project_id(&mut json!({
+            "project_id": "B01EECAD-1E18-5E88-BF34-8E8E8358CFCB"
+        }))
+        .is_err());
     }
 
     #[test]

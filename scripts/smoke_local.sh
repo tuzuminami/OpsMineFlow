@@ -48,6 +48,7 @@ import urllib.request
 port = sys.argv[1]
 base_dir = sys.argv[2]
 base = f"http://127.0.0.1:{port}"
+project_headers: dict[str, str] = {}
 
 
 def request(
@@ -56,13 +57,14 @@ def request(
     headers: dict[str, str] | None = None,
 ) -> dict[str, object] | list[object]:
     if payload is None:
-        with urllib.request.urlopen(base + path, timeout=2) as response:
+        req = urllib.request.Request(base + path, headers={**project_headers, **(headers or {})}, method="GET")
+        with urllib.request.urlopen(req, timeout=2) as response:
             return json.loads(response.read().decode("utf-8"))
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         base + path,
         data=data,
-        headers={"content-type": "application/json", **(headers or {})},
+        headers={"content-type": "application/json", **project_headers, **(headers or {})},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=2) as response:
@@ -80,6 +82,10 @@ for _ in range(40):
         time.sleep(0.25)
 else:
     raise SystemExit(f"API did not become ready: {last_error}")
+
+projects = request("/projects")
+assert isinstance(projects, dict)
+project_headers["X-OpsMineFlow-Project"] = str(projects["active_project_id"])
 
 diagnostics = request("/diagnostics")
 assert isinstance(diagnostics, dict)
@@ -130,8 +136,10 @@ result = request("/import/csv", {"path": "data/sample/sample_events.csv"})
 assert isinstance(result, dict)
 assert result["imported_events"] == 7
 
-events = request("/events")
-assert len(events) == 7
+events_payload = request("/events")
+assert isinstance(events_payload, dict)
+events = events_payload["events"]
+assert isinstance(events, list) and len(events) == 7
 quality = request("/analytics/event-quality")
 assert isinstance(quality, dict)
 assert quality["summary"]["total_events"] == 7
@@ -157,11 +165,13 @@ merged = request(
 )
 excluded = request("/events/exclude", {"event_id": merged["event"]["event_id"]})
 assert excluded["excluded"] is True
-assert len(request("/events")) == 6
+remaining_events = request("/events")
+assert isinstance(remaining_events, dict)
+assert len(remaining_events["events"]) == 6
 
 history = request("/import/history")
-assert isinstance(history, list)
-assert history and history[0]["source"] == "csv"
+assert isinstance(history, dict)
+assert history["imports"] and history["imports"][0]["source"] == "csv"
 
 settings = request("/settings", {"retention_days": 21})
 assert isinstance(settings, dict)
@@ -199,7 +209,8 @@ assert isinstance(deleted, dict)
 assert deleted["deleted"] is True
 
 events = request("/events")
-assert events == []
+assert isinstance(events, dict)
+assert events["events"] == []
 PY
 
 if [[ -d apps/desktop/node_modules ]]; then

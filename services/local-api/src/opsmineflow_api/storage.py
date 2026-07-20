@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import sqlite3
+import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from dataclasses import dataclass, field
@@ -18,7 +20,12 @@ from opsmineflow_mining.analysis import event_sort_key
 from opsmineflow_mining.models import StandardEvent
 from opsmineflow_mining.privacy import extract_domain, looks_confidential, mask_url, mask_window_title
 
-from .migrations import CURRENT_SCHEMA_VERSION, MigrationReport, delete_migration_backups, migrate_database
+from .migrations import (
+    CURRENT_SCHEMA_VERSION,
+    LEGACY_PROJECT_ID,
+    MigrationReport,
+    migrate_database,
+)
 
 
 DEFAULT_SETTINGS: dict[str, object] = {
@@ -30,6 +37,8 @@ DEFAULT_SETTINGS: dict[str, object] = {
     "excluded_apps": [],
     "excluded_domains": [],
 }
+
+MAX_CACHED_PROJECT_VIEWS = 2
 
 AUTOMATION_REVIEW_STATUSES = {"unreviewed", "adopted", "on_hold", "rejected"}
 
@@ -71,6 +80,38 @@ class StorageCommitError(RuntimeError):
         }
 
 
+class ProjectNotFoundError(KeyError):
+    """The caller supplied an opaque project identifier that does not exist."""
+
+
+class ProjectConflictError(ValueError):
+    """A project mutation was based on an older project revision."""
+
+
+@dataclass(frozen=True)
+class Project:
+    """Non-sensitive project catalogue data safe to expose to the desktop UI."""
+
+    project_id: str
+    display_name: str
+    origin: str
+    created_at: str
+    updated_at: str
+    revision: int
+    event_count: int = 0
+
+    def to_api_dict(self) -> dict[str, object]:
+        return {
+            "project_id": self.project_id,
+            "display_name": self.display_name,
+            "origin": self.origin,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "revision": self.revision,
+            "event_count": self.event_count,
+        }
+
+
 @dataclass(frozen=True)
 class StoreSnapshot:
     """One self-consistent local state observed by a reader or mutation."""
@@ -82,6 +123,8 @@ class StoreSnapshot:
     import_history: tuple[Mapping[str, object], ...]
     automation_reviews: Mapping[str, str]
     automation_review_notes: Mapping[str, str]
+    project_id: str
+    project_revision: int
     generation: int
 
 
@@ -104,26 +147,39 @@ class EventStore:
     automation_reviews: dict[str, str] = field(default_factory=dict)
     automation_review_notes: dict[str, str] = field(default_factory=dict)
     db_path: Path | None = None
+    project_id: str = ""
+    expected_revision: int | None = None
     migration_fault_injector: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
     mutation_fault_injector: Callable[[str], None] | None = field(default=None, repr=False, compare=False)
+    _migration_ready: bool = field(default=False, repr=False, compare=False)
+    _parent_migration_report: MigrationReport | None = field(default=None, repr=False, compare=False)
     _migration_report: MigrationReport | None = field(default=None, init=False, repr=False)
     _analysis_cache: dict[object, object] = field(default_factory=dict, init=False, repr=False, compare=False)
     _analysis_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
     _mutation_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
+    _project_view_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
+    _project_views: OrderedDict[str, "EventStore"] = field(default_factory=OrderedDict, init=False, repr=False, compare=False)
     _generation: int = field(default=0, init=False, repr=False, compare=False)
+    _project_revision: int = field(default=0, init=False, repr=False, compare=False)
     _writes_blocked: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        self.project_id = _normalize_project_id(self.project_id or LEGACY_PROJECT_ID)
         if self.db_path is None:
             self.events = _uniquify_event_ids(self._filter_events(list(self.events)))
             return
         self.db_path = Path(self.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.db_path.parent, 0o700)
-        self._migration_report = migrate_database(
-            self.db_path,
-            fault_injector=self.migration_fault_injector,
-        )
+        if self._migration_ready:
+            if self._parent_migration_report is None:
+                raise StorageCommitError("storage_recovery_required")
+            self._migration_report = self._parent_migration_report
+        else:
+            self._migration_report = migrate_database(
+                self.db_path,
+                fault_injector=self.migration_fault_injector,
+            )
         if self.events:
             self.replace(self.events)
         else:
@@ -135,6 +191,242 @@ class EventStore:
         with self._mutation_lock:
             return self._snapshot_locked()
 
+    def for_project(self, project_id: str, *, expected_revision: int | None = None) -> "EventStore":
+        """Open an immutable project context; never use the mutable active pointer for data access."""
+
+        normalized_project_id = _normalize_project_id(project_id)
+        if self.db_path is None:
+            if normalized_project_id != self.project_id:
+                raise ProjectNotFoundError(normalized_project_id)
+            if expected_revision is not None and expected_revision != self._project_revision:
+                raise ProjectConflictError("Project changed. Refresh it before applying another change.")
+            return self
+        if expected_revision is None:
+            # Dashboard reads arrive in parallel. Reuse one project-bound view
+            # so a 100k-event project is deserialized once, not once per
+            # endpoint. The view remains explicit: this cache never consults
+            # or falls back to the workspace active-project preference.
+            with self._project_view_lock:
+                cached = self._project_views.get(normalized_project_id)
+                if cached is not None:
+                    self._project_views.move_to_end(normalized_project_id)
+                    return cached
+                cached = EventStore(
+                    db_path=self.db_path,
+                    project_id=normalized_project_id,
+                    _migration_ready=True,
+                    _parent_migration_report=self._migration_report,
+                )
+                self._project_views[normalized_project_id] = cached
+                while len(self._project_views) > MAX_CACHED_PROJECT_VIEWS:
+                    self._project_views.popitem(last=False)
+                return cached
+        # A revision-bound operation must load and validate the durable state
+        # itself. Drop any read view so the next unversioned dashboard refresh
+        # cannot reuse a stale pre-mutation snapshot.
+        self._invalidate_project_view(normalized_project_id)
+        return EventStore(
+            db_path=self.db_path,
+            project_id=normalized_project_id,
+            expected_revision=expected_revision,
+            _migration_ready=True,
+            _parent_migration_report=self._migration_report,
+        )
+
+    def list_projects(self) -> list[Project]:
+        if self.db_path is None:
+            return [
+                Project(
+                    project_id=self.project_id,
+                    display_name="In-memory project",
+                    origin="memory",
+                    created_at="",
+                    updated_at="",
+                    revision=self._project_revision,
+                    event_count=len(self.events),
+                )
+            ]
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT p.project_id, p.display_name, p.origin, p.created_at, p.updated_at, p.revision,
+                       COUNT(e.event_id) AS event_count
+                FROM projects AS p
+                LEFT JOIN events AS e ON e.project_id = p.project_id
+                GROUP BY p.project_id
+                ORDER BY p.updated_at DESC, p.project_id ASC
+                """
+            ).fetchall()
+        return [_project_from_row(row) for row in rows]
+
+    def active_project_id(self) -> str:
+        if self.db_path is None:
+            return self.project_id
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM workspace_metadata WHERE key = 'active_project_id'"
+            ).fetchone()
+        if row is None:
+            raise StorageCommitError("storage_constraint_failed")
+        return _normalize_project_id(str(row[0]))
+
+    def get_project(self, project_id: str | None = None) -> Project:
+        normalized_project_id = _normalize_project_id(project_id or self.project_id)
+        if self.db_path is None:
+            if normalized_project_id != self.project_id:
+                raise ProjectNotFoundError(normalized_project_id)
+            return self.list_projects()[0]
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT p.project_id, p.display_name, p.origin, p.created_at, p.updated_at, p.revision,
+                       COUNT(e.event_id) AS event_count
+                FROM projects AS p
+                LEFT JOIN events AS e ON e.project_id = p.project_id
+                WHERE p.project_id = ?
+                GROUP BY p.project_id
+                """,
+                (normalized_project_id,),
+            ).fetchone()
+        if row is None:
+            raise ProjectNotFoundError(normalized_project_id)
+        return _project_from_row(row)
+
+    def create_project(self, display_name: str, *, origin: str = "user") -> Project:
+        if self.db_path is None:
+            raise StorageCommitError("storage_constraint_failed")
+        name = _normalize_project_display_name(display_name)
+        normalized_origin = origin.strip() or "user"
+        now = datetime.now(timezone.utc).isoformat()
+        project = Project(
+            project_id=str(uuid.uuid4()),
+            display_name=name,
+            origin=normalized_origin,
+            created_at=now,
+            updated_at=now,
+            revision=0,
+            event_count=0,
+        )
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                _assert_project_name_available(connection, name)
+                connection.execute(
+                    """
+                    INSERT INTO projects(project_id, display_name, origin, created_at, updated_at, revision)
+                    VALUES(?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project.project_id,
+                        project.display_name,
+                        project.origin,
+                        project.created_at,
+                        project.updated_at,
+                        project.revision,
+                    ),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        return project
+
+    def select_project(self, project_id: str) -> Project:
+        normalized_project_id = _normalize_project_id(project_id)
+        if self.db_path is None:
+            return self.get_project(normalized_project_id)
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                project = _project_for_id(connection, normalized_project_id)
+                connection.execute(
+                    """
+                    INSERT INTO workspace_metadata(key, value) VALUES('active_project_id', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (normalized_project_id,),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        return project
+
+    def rename_project(self, project_id: str, display_name: str, *, expected_revision: int | None = None) -> Project:
+        normalized_project_id = _normalize_project_id(project_id)
+        name = _normalize_project_display_name(display_name)
+        if self.db_path is None:
+            if normalized_project_id != self.project_id:
+                raise ProjectNotFoundError(normalized_project_id)
+            return self.get_project()
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                project = _project_for_id(connection, normalized_project_id)
+                _assert_requested_project_revision(project, expected_revision)
+                _assert_project_name_available(connection, name, excluding_project_id=normalized_project_id)
+                updated_at = datetime.now(timezone.utc).isoformat()
+                updated_revision = project.revision + 1
+                connection.execute(
+                    "UPDATE projects SET display_name = ?, updated_at = ?, revision = ? WHERE project_id = ?",
+                    (name, updated_at, updated_revision, normalized_project_id),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        self._invalidate_project_view(normalized_project_id)
+        return self.get_project(normalized_project_id)
+
+    def delete_project(self, project_id: str, *, expected_revision: int | None = None) -> str:
+        """Delete one project and only its scoped rows; keep at least one project available."""
+
+        normalized_project_id = _normalize_project_id(project_id)
+        if self.db_path is None:
+            raise StorageCommitError("storage_constraint_failed")
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                project = _project_for_id(connection, normalized_project_id)
+                _assert_requested_project_revision(project, expected_revision)
+                if project.event_count > 0:
+                    raise ValueError("Clear the project's data before deleting the project.")
+                remaining = connection.execute(
+                    "SELECT project_id FROM projects WHERE project_id != ? ORDER BY updated_at DESC, project_id ASC LIMIT 1",
+                    (normalized_project_id,),
+                ).fetchone()
+                if remaining is None:
+                    raise ValueError("Create another project before deleting the last project.")
+                replacement_project_id = str(remaining[0])
+                active_project_id = connection.execute(
+                    "SELECT value FROM workspace_metadata WHERE key = 'active_project_id'"
+                ).fetchone()
+                if active_project_id is not None and str(active_project_id[0]) == normalized_project_id:
+                    connection.execute(
+                        "UPDATE workspace_metadata SET value = ? WHERE key = 'active_project_id'",
+                        (replacement_project_id,),
+                    )
+                for table_name in (
+                    "manual_labels",
+                    "automation_reviews",
+                    "settings",
+                    "metadata",
+                    "import_history",
+                    "events",
+                ):
+                    connection.execute(f"DELETE FROM {table_name} WHERE project_id = ?", (normalized_project_id,))
+                connection.execute("DELETE FROM projects WHERE project_id = ?", (normalized_project_id,))
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+        self._invalidate_project_view(normalized_project_id)
+        return replacement_project_id
+
     def _snapshot_locked(self) -> StoreSnapshot:
         return StoreSnapshot(
             events=tuple(self.events),
@@ -144,6 +436,8 @@ class EventStore:
             import_history=tuple(MappingProxyType(dict(item)) for item in self.import_history),
             automation_reviews=MappingProxyType(dict(self.automation_reviews)),
             automation_review_notes=MappingProxyType(dict(self.automation_review_notes)),
+            project_id=self.project_id,
+            project_revision=self._project_revision,
             generation=self._generation,
         )
 
@@ -179,6 +473,8 @@ class EventStore:
             automation_review_notes=MappingProxyType(
                 dict(current.automation_review_notes if automation_review_notes is None else automation_review_notes)
             ),
+            project_id=current.project_id,
+            project_revision=current.project_revision + 1,
             generation=current.generation + 1,
         )
 
@@ -199,6 +495,7 @@ class EventStore:
                 connection = self._connect()
                 connection.execute("BEGIN IMMEDIATE")
                 transaction_started = True
+                self._assert_expected_project_revision(connection, candidate)
                 persisted = self._write_candidate(connection, candidate)
                 if self.mutation_fault_injector is not None:
                     self.mutation_fault_injector("before_commit")
@@ -221,7 +518,7 @@ class EventStore:
             if failure is not None:
                 if committed or (transaction_started and not rollback_confirmed):
                     self._reconcile_after_uncertain_commit(failure)
-                if isinstance(failure, StorageCommitError):
+                if isinstance(failure, (StorageCommitError, ProjectNotFoundError, ProjectConflictError)):
                     raise failure
                 raise StorageCommitError(_storage_error_code(failure)) from failure
             if persisted is None:
@@ -241,6 +538,19 @@ class EventStore:
             # must never leak a driver/path error to the UI.
             return False
         return False
+
+    def _assert_expected_project_revision(self, connection: sqlite3.Connection, candidate: StoreSnapshot) -> None:
+        row = connection.execute(
+            "SELECT revision FROM projects WHERE project_id = ?",
+            (candidate.project_id,),
+        ).fetchone()
+        if row is None:
+            raise ProjectNotFoundError(candidate.project_id)
+        durable_revision = int(row[0])
+        if self.expected_revision is not None and durable_revision != self.expected_revision:
+            raise ProjectConflictError("Project changed. Refresh it before applying another change.")
+        if durable_revision != candidate.project_revision - 1:
+            raise ProjectConflictError("Project changed. Refresh it before applying another change.")
 
     def _reconcile_after_uncertain_commit(self, error: Exception) -> None:
         """Converge memory with durable SQLite state after an uncertain response."""
@@ -266,31 +576,39 @@ class EventStore:
     def _write_candidate(self, connection: sqlite3.Connection, candidate: StoreSnapshot) -> StoreSnapshot:
         """Write every coupled table in the caller-owned transaction."""
 
-        connection.execute("DELETE FROM events")
+        project_id = candidate.project_id
+        connection.execute("DELETE FROM events WHERE project_id = ?", (project_id,))
         connection.executemany(
-            "INSERT INTO events(event_id, payload_json) VALUES(?, ?)",
-            [(event.event_id, json.dumps(event.to_dict(), ensure_ascii=False)) for event in candidate.events],
+            "INSERT INTO events(project_id, event_id, payload_json) VALUES(?, ?, ?)",
+            [
+                (project_id, event.event_id, json.dumps(event.to_dict(), ensure_ascii=False))
+                for event in candidate.events
+            ],
         )
-        connection.execute("DELETE FROM manual_labels")
+        connection.execute("DELETE FROM manual_labels WHERE project_id = ?", (project_id,))
         connection.executemany(
-            "INSERT INTO manual_labels(event_id, label) VALUES(?, ?)",
-            sorted(candidate.manual_labels.items()),
+            "INSERT INTO manual_labels(project_id, event_id, label) VALUES(?, ?, ?)",
+            [(project_id, event_id, label) for event_id, label in sorted(candidate.manual_labels.items())],
         )
-        connection.execute("DELETE FROM settings")
+        connection.execute("DELETE FROM settings WHERE project_id = ?", (project_id,))
         connection.executemany(
-            "INSERT INTO settings(key, value_json) VALUES(?, ?)",
-            [(key, json.dumps(value, ensure_ascii=False)) for key, value in sorted(candidate.settings.items())],
+            "INSERT INTO settings(project_id, key, value_json) VALUES(?, ?, ?)",
+            [
+                (project_id, key, json.dumps(value, ensure_ascii=False))
+                for key, value in sorted(candidate.settings.items())
+            ],
         )
-        connection.execute("DELETE FROM metadata")
+        connection.execute("DELETE FROM metadata WHERE project_id = ?", (project_id,))
         connection.executemany(
-            "INSERT INTO metadata(key, value) VALUES(?, ?)",
-            sorted(candidate.metadata.items()),
+            "INSERT INTO metadata(project_id, key, value) VALUES(?, ?, ?)",
+            [(project_id, key, value) for key, value in sorted(candidate.metadata.items())],
         )
-        connection.execute("DELETE FROM automation_reviews")
+        connection.execute("DELETE FROM automation_reviews WHERE project_id = ?", (project_id,))
         connection.executemany(
-            "INSERT INTO automation_reviews(activity, status, note, updated_at) VALUES(?, ?, ?, ?)",
+            "INSERT INTO automation_reviews(project_id, activity, status, note, updated_at) VALUES(?, ?, ?, ?, ?)",
             [
                 (
+                    project_id,
                     activity,
                     status,
                     candidate.automation_review_notes.get(activity, ""),
@@ -299,23 +617,38 @@ class EventStore:
                 for activity, status in sorted(candidate.automation_reviews.items())
             ],
         )
-        connection.execute("DELETE FROM import_history")
+        connection.execute("DELETE FROM import_history WHERE project_id = ?", (project_id,))
         persisted_history: list[dict[str, object]] = []
+        next_history_id = int(
+            connection.execute(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM import_history WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()[0]
+        )
         for item in candidate.import_history:
-            if "id" in item:
-                connection.execute(
-                    "INSERT INTO import_history(id, source, path, event_count, imported_at) VALUES(?, ?, ?, ?, ?)",
-                    (item["id"], item["source"], item["path"], item["event_count"], item["imported_at"]),
-                )
-                persisted_history.append(dict(item))
-            else:
-                cursor = connection.execute(
-                    "INSERT INTO import_history(source, path, event_count, imported_at) VALUES(?, ?, ?, ?)",
-                    (item["source"], item["path"], item["event_count"], item["imported_at"]),
-                )
-                persisted_item = dict(item)
-                persisted_item["id"] = int(cursor.lastrowid)
-                persisted_history.append(persisted_item)
+            persisted_item = dict(item)
+            history_id = int(persisted_item.get("id", next_history_id))
+            next_history_id = max(next_history_id, history_id + 1)
+            connection.execute(
+                "INSERT INTO import_history(project_id, id, source, path, event_count, imported_at) VALUES(?, ?, ?, ?, ?, ?)",
+                (
+                    project_id,
+                    history_id,
+                    persisted_item["source"],
+                    persisted_item["path"],
+                    persisted_item["event_count"],
+                    persisted_item["imported_at"],
+                ),
+            )
+            persisted_item["id"] = history_id
+            persisted_history.append(persisted_item)
+        updated_at = datetime.now(timezone.utc).isoformat()
+        result = connection.execute(
+            "UPDATE projects SET revision = ?, updated_at = ? WHERE project_id = ?",
+            (candidate.project_revision, updated_at, project_id),
+        )
+        if result.rowcount != 1:
+            raise ProjectNotFoundError(project_id)
         return replace(
             candidate,
             import_history=tuple(MappingProxyType(dict(item)) for item in persisted_history),
@@ -329,6 +662,7 @@ class EventStore:
         self.import_history = [dict(item) for item in candidate.import_history]
         self.automation_reviews = dict(candidate.automation_reviews)
         self.automation_review_notes = dict(candidate.automation_review_notes)
+        self._project_revision = candidate.project_revision
         self._generation = candidate.generation
         self._invalidate_analysis()
 
@@ -609,6 +943,13 @@ class EventStore:
             return {"merged": True, "event": merged.to_dict()}
 
     def clear(self) -> None:
+        """Clear only this project's database rows.
+
+        Workspace-level migration snapshots are intentionally retained. Their
+        retention and deletion policy belongs to the dedicated backup and
+        lifecycle work rather than a selected-project operation.
+        """
+
         with self._mutation_lock:
             current = self._snapshot_locked()
             self._commit_candidate(
@@ -622,13 +963,6 @@ class EventStore:
                     automation_review_notes={},
                 )
             )
-        if self.db_path is not None:
-            try:
-                delete_migration_backups(self.db_path)
-            except OSError:
-                # The data deletion is committed. A future start/clear retries
-                # backup cleanup without pretending the DB mutation rolled back.
-                pass
 
     def set_automation_review(self, activity: str, status: str, note: str = "") -> dict[str, str]:
         normalized_activity = activity.strip()
@@ -713,6 +1047,8 @@ class EventStore:
         return {
             "storage_mode": "sqlite" if self.db_path else "memory",
             "storage_path": str(self.db_path) if self.db_path else "",
+            "project_id": active_snapshot.project_id,
+            "project_revision": active_snapshot.project_revision,
             "event_count": len(active_snapshot.events),
             "manual_label_count": len(active_snapshot.manual_labels),
             "import_history_count": len(active_snapshot.import_history),
@@ -734,15 +1070,43 @@ class EventStore:
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
+    def _invalidate_project_view(self, project_id: str) -> None:
+        with self._project_view_lock:
+            self._project_views.pop(project_id, None)
+
     def _load(self) -> None:
         with self._connect() as conn:
-            event_rows = conn.execute("SELECT payload_json FROM events ORDER BY rowid").fetchall()
-            label_rows = conn.execute("SELECT event_id, label FROM manual_labels ORDER BY event_id").fetchall()
-            setting_rows = conn.execute("SELECT key, value_json FROM settings ORDER BY key").fetchall()
-            metadata_rows = conn.execute("SELECT key, value FROM metadata ORDER BY key").fetchall()
-            review_rows = conn.execute("SELECT activity, status, note FROM automation_reviews ORDER BY activity").fetchall()
+            project_row = conn.execute(
+                "SELECT revision FROM projects WHERE project_id = ?",
+                (self.project_id,),
+            ).fetchone()
+            if project_row is None:
+                raise ProjectNotFoundError(self.project_id)
+            if self.expected_revision is not None and int(project_row[0]) != self.expected_revision:
+                raise ProjectConflictError("Project changed. Refresh it before applying another change.")
+            event_rows = conn.execute(
+                "SELECT payload_json FROM events WHERE project_id = ? ORDER BY rowid",
+                (self.project_id,),
+            ).fetchall()
+            label_rows = conn.execute(
+                "SELECT event_id, label FROM manual_labels WHERE project_id = ? ORDER BY event_id",
+                (self.project_id,),
+            ).fetchall()
+            setting_rows = conn.execute(
+                "SELECT key, value_json FROM settings WHERE project_id = ? ORDER BY key",
+                (self.project_id,),
+            ).fetchall()
+            metadata_rows = conn.execute(
+                "SELECT key, value FROM metadata WHERE project_id = ? ORDER BY key",
+                (self.project_id,),
+            ).fetchall()
+            review_rows = conn.execute(
+                "SELECT activity, status, note FROM automation_reviews WHERE project_id = ? ORDER BY activity",
+                (self.project_id,),
+            ).fetchall()
             import_rows = conn.execute(
-                "SELECT id, source, path, event_count, imported_at FROM import_history ORDER BY id"
+                "SELECT id, source, path, event_count, imported_at FROM import_history WHERE project_id = ? ORDER BY id",
+                (self.project_id,),
             ).fetchall()
         self.events = sorted((StandardEvent(**json.loads(row[0])) for row in event_rows), key=event_sort_key)
         self.manual_labels = {str(event_id): str(label) for event_id, label in label_rows}
@@ -767,6 +1131,7 @@ class EventStore:
             }
             for row_id, source, path, event_count, imported_at in import_rows
         ]
+        self._project_revision = int(project_row[0])
         self._generation += 1
         self._invalidate_analysis()
 
@@ -908,6 +1273,66 @@ def _storage_error_code(error: Exception) -> str:
     if "constraint" in message:
         return "storage_constraint_failed"
     return "storage_commit_failed"
+
+
+def _normalize_project_id(value: object) -> str:
+    try:
+        return str(uuid.UUID(str(value).strip()))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("Project ID must be a UUID.") from exc
+
+
+def _normalize_project_display_name(value: object) -> str:
+    name = str(value).strip()
+    if not name or len(name) > 120 or any(ord(character) < 32 for character in name):
+        raise ValueError("Project name must be 1-120 printable characters.")
+    return name
+
+
+def _project_from_row(row: tuple[object, ...]) -> Project:
+    return Project(
+        project_id=_normalize_project_id(row[0]),
+        display_name=str(row[1]),
+        origin=str(row[2]),
+        created_at=str(row[3]),
+        updated_at=str(row[4]),
+        revision=int(row[5]),
+        event_count=int(row[6]),
+    )
+
+
+def _project_for_id(connection: sqlite3.Connection, project_id: str) -> Project:
+    row = connection.execute(
+        """
+        SELECT p.project_id, p.display_name, p.origin, p.created_at, p.updated_at, p.revision,
+               COUNT(e.event_id) AS event_count
+        FROM projects AS p
+        LEFT JOIN events AS e ON e.project_id = p.project_id
+        WHERE p.project_id = ?
+        GROUP BY p.project_id
+        """,
+        (project_id,),
+    ).fetchone()
+    if row is None:
+        raise ProjectNotFoundError(project_id)
+    return _project_from_row(row)
+
+
+def _assert_requested_project_revision(project: Project, expected_revision: int | None) -> None:
+    if expected_revision is not None and project.revision != expected_revision:
+        raise ProjectConflictError("Project changed. Refresh it before applying another change.")
+
+
+def _assert_project_name_available(
+    connection: sqlite3.Connection,
+    display_name: str,
+    *,
+    excluding_project_id: str = "",
+) -> None:
+    rows = connection.execute("SELECT project_id, display_name FROM projects").fetchall()
+    target = display_name.casefold()
+    if any(str(name).casefold() == target and str(project_id) != excluding_project_id for project_id, name in rows):
+        raise ValueError("A project with that name already exists.")
 
 
 _STORE: EventStore | None = None

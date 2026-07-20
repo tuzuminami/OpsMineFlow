@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 import sqlite3
@@ -15,9 +16,15 @@ from pathlib import Path
 import fcntl
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 MAX_MIGRATION_BACKUPS = 3
 _MIGRATION_LOCK = threading.RLock()
+# The value is deliberately an opaque, stable UUID rather than a user-facing
+# display name. A v3 migration creates this one project exactly once while it
+# atomically moves the pre-project single dataset into the scoped tables.
+LEGACY_PROJECT_ID = "b01eecad-1e18-5e88-bf34-8e8e8358cfcb"
+LEGACY_PROJECT_DISPLAY_NAME = "Migrated data"
+LEGACY_PROJECT_ORIGIN = "legacy_migration"
 _KNOWN_LEGACY_TABLES = frozenset(
     {
         "events",
@@ -89,6 +96,73 @@ _SCHEMA_SIGNATURES: dict[
 # import paths. The table layouts intentionally remain identical to v1.
 _SCHEMA_SIGNATURES[2] = _SCHEMA_SIGNATURES[1]
 
+_SCHEMA_SIGNATURES[3] = {
+    "schema_migrations": _SCHEMA_SIGNATURES[1]["schema_migrations"],
+    "projects": (
+        (
+            ("project_id", "TEXT", 1, None, 1),
+            ("display_name", "TEXT", 1, None, 0),
+            ("origin", "TEXT", 1, None, 0),
+            ("created_at", "TEXT", 1, None, 0),
+            ("updated_at", "TEXT", 1, None, 0),
+            ("revision", "INTEGER", 1, "0", 0),
+        ),
+    ),
+    "workspace_metadata": (
+        (
+            ("key", "TEXT", 0, None, 1),
+            ("value", "TEXT", 1, None, 0),
+        ),
+    ),
+    "events": (
+        (
+            ("project_id", "TEXT", 1, None, 1),
+            ("event_id", "TEXT", 1, None, 2),
+            ("payload_json", "TEXT", 1, None, 0),
+        ),
+    ),
+    "manual_labels": (
+        (
+            ("project_id", "TEXT", 1, None, 1),
+            ("event_id", "TEXT", 1, None, 2),
+            ("label", "TEXT", 1, None, 0),
+        ),
+    ),
+    "settings": (
+        (
+            ("project_id", "TEXT", 1, None, 1),
+            ("key", "TEXT", 1, None, 2),
+            ("value_json", "TEXT", 1, None, 0),
+        ),
+    ),
+    "metadata": (
+        (
+            ("project_id", "TEXT", 1, None, 1),
+            ("key", "TEXT", 1, None, 2),
+            ("value", "TEXT", 1, None, 0),
+        ),
+    ),
+    "import_history": (
+        (
+            ("project_id", "TEXT", 1, None, 1),
+            ("id", "INTEGER", 1, None, 2),
+            ("source", "TEXT", 1, None, 0),
+            ("path", "TEXT", 1, None, 0),
+            ("event_count", "INTEGER", 1, None, 0),
+            ("imported_at", "TEXT", 1, None, 0),
+        ),
+    ),
+    "automation_reviews": (
+        (
+            ("project_id", "TEXT", 1, None, 1),
+            ("activity", "TEXT", 1, None, 2),
+            ("status", "TEXT", 1, None, 0),
+            ("note", "TEXT", 1, "''", 0),
+            ("updated_at", "TEXT", 1, None, 0),
+        ),
+    ),
+}
+
 
 class MigrationError(RuntimeError):
     """A database cannot be safely opened or migrated."""
@@ -129,6 +203,9 @@ class Migration:
                         "UPDATE import_history SET path = ? WHERE id = ?",
                         (_safe_import_display_name(str(source), str(path)), int(row_id)),
                     )
+                continue
+            if step == "rebuild_as_project_scoped":
+                _rebuild_as_project_scoped(connection)
                 continue
             raise MigrationInvariantError(f"Unknown legacy migration step: {step}")
 
@@ -191,6 +268,10 @@ _MIGRATION_002_STATEMENTS: tuple[str, ...] = ()
 _MIGRATION_002_LEGACY_STEPS = ("redact_import_history_paths",)
 _MIGRATION_002_CHECKSUM = "77ecd83da344c9734128dfa62c8c85fd8c34652d2811d3f4b2d8bb5530dfdb17"
 
+_MIGRATION_003_STATEMENTS: tuple[str, ...] = ()
+_MIGRATION_003_LEGACY_STEPS = ("rebuild_as_project_scoped",)
+_MIGRATION_003_CHECKSUM = "96a37ab2bf12768fb045f3c09b16a74a591e92a4456536aa6da64147b12e77cd"
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version=1,
@@ -206,6 +287,13 @@ MIGRATIONS: tuple[Migration, ...] = (
         statements=_MIGRATION_002_STATEMENTS,
         legacy_steps=_MIGRATION_002_LEGACY_STEPS,
     ),
+    Migration(
+        version=3,
+        name="scope_records_to_projects",
+        checksum=_MIGRATION_003_CHECKSUM,
+        statements=_MIGRATION_003_STATEMENTS,
+        legacy_steps=_MIGRATION_003_LEGACY_STEPS,
+    ),
 )
 
 
@@ -216,6 +304,307 @@ def _safe_import_display_name(source: str, path_value: str) -> str:
         return "ActivityWatch (local)"
     name = Path(path_value).name.strip()
     return name or "Imported file"
+
+
+def _rebuild_as_project_scoped(connection: sqlite3.Connection) -> None:
+    """Move the v2 global dataset into one durable legacy project.
+
+    SQLite cannot add composite primary keys or foreign keys with ``ALTER
+    TABLE``. The v3 migration therefore builds fully constrained replacement
+    tables, verifies a canonical before/after snapshot while still inside the
+    startup transaction, then swaps the tables in one commit.
+    """
+
+    before_snapshot = _legacy_dataset_snapshot(connection)
+    before_hash = _dataset_hash(before_snapshot)
+    before_counts = _dataset_counts(before_snapshot)
+    now = datetime.now(timezone.utc).isoformat()
+
+    connection.execute(
+        """
+        CREATE TABLE projects (
+            project_id TEXT NOT NULL PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            origin TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE workspace_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER workspace_metadata_active_project_insert
+        BEFORE INSERT ON workspace_metadata
+        WHEN NEW.key = 'active_project_id'
+          AND NOT EXISTS (SELECT 1 FROM projects WHERE project_id = NEW.value)
+        BEGIN
+            SELECT RAISE(ABORT, 'active project must exist');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER workspace_metadata_active_project_update
+        BEFORE UPDATE OF key, value ON workspace_metadata
+        WHEN NEW.key = 'active_project_id'
+          AND NOT EXISTS (SELECT 1 FROM projects WHERE project_id = NEW.value)
+        BEGIN
+            SELECT RAISE(ABORT, 'active project must exist');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER projects_active_project_delete
+        BEFORE DELETE ON projects
+        WHEN EXISTS (
+            SELECT 1 FROM workspace_metadata
+            WHERE key = 'active_project_id' AND value = OLD.project_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'active project cannot be deleted');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE events_v3 (
+            project_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, event_id),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE manual_labels_v3 (
+            project_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            PRIMARY KEY (project_id, event_id),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT,
+            FOREIGN KEY (project_id, event_id)
+                REFERENCES events_v3(project_id, event_id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE settings_v3 (
+            project_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            PRIMARY KEY (project_id, key),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE metadata_v3 (
+            project_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (project_id, key),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE import_history_v3 (
+            project_id TEXT NOT NULL,
+            id INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            path TEXT NOT NULL,
+            event_count INTEGER NOT NULL,
+            imported_at TEXT NOT NULL,
+            PRIMARY KEY (project_id, id),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE automation_reviews_v3 (
+            project_id TEXT NOT NULL,
+            activity TEXT NOT NULL,
+            status TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (project_id, activity),
+            FOREIGN KEY (project_id) REFERENCES projects(project_id) ON DELETE RESTRICT
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        INSERT INTO projects(project_id, display_name, origin, created_at, updated_at, revision)
+        VALUES(?, ?, ?, ?, ?, 0)
+        """,
+        (LEGACY_PROJECT_ID, LEGACY_PROJECT_DISPLAY_NAME, LEGACY_PROJECT_ORIGIN, now, now),
+    )
+    connection.execute(
+        "INSERT INTO events_v3(project_id, event_id, payload_json) "
+        "SELECT ?, event_id, payload_json FROM events",
+        (LEGACY_PROJECT_ID,),
+    )
+    connection.execute(
+        "INSERT INTO manual_labels_v3(project_id, event_id, label) "
+        "SELECT ?, event_id, label FROM manual_labels",
+        (LEGACY_PROJECT_ID,),
+    )
+    connection.execute(
+        "INSERT INTO settings_v3(project_id, key, value_json) "
+        "SELECT ?, key, value_json FROM settings",
+        (LEGACY_PROJECT_ID,),
+    )
+    connection.execute(
+        "INSERT INTO metadata_v3(project_id, key, value) "
+        "SELECT ?, key, value FROM metadata",
+        (LEGACY_PROJECT_ID,),
+    )
+    connection.execute(
+        "INSERT INTO import_history_v3(project_id, id, source, path, event_count, imported_at) "
+        "SELECT ?, id, source, path, event_count, imported_at FROM import_history",
+        (LEGACY_PROJECT_ID,),
+    )
+    connection.execute(
+        "INSERT INTO automation_reviews_v3(project_id, activity, status, note, updated_at) "
+        "SELECT ?, activity, status, note, updated_at FROM automation_reviews",
+        (LEGACY_PROJECT_ID,),
+    )
+
+    after_snapshot = _project_scoped_dataset_snapshot(connection, LEGACY_PROJECT_ID, table_suffix="_v3")
+    after_hash = _dataset_hash(after_snapshot)
+    after_counts = _dataset_counts(after_snapshot)
+    if after_hash != before_hash or after_counts != before_counts:
+        raise MigrationError("Project migration verification failed; the legacy dataset was not copied exactly.")
+
+    audit_values = (
+        ("legacy_v2_before_hash", before_hash),
+        ("legacy_v2_before_counts", _canonical_json(before_counts)),
+        ("legacy_v3_after_hash", after_hash),
+        ("legacy_v3_after_counts", _canonical_json(after_counts)),
+        ("active_project_id", LEGACY_PROJECT_ID),
+    )
+    connection.executemany("INSERT INTO workspace_metadata(key, value) VALUES(?, ?)", audit_values)
+
+    # Drop the unscoped tables only after every row has been copied and
+    # verified. The transaction in ``migrate_database`` makes this swap atomic.
+    for table_name in (
+        "manual_labels",
+        "automation_reviews",
+        "settings",
+        "metadata",
+        "import_history",
+        "events",
+    ):
+        connection.execute(f"DROP TABLE {table_name}")
+    for old_name, new_name in (
+        ("events_v3", "events"),
+        ("manual_labels_v3", "manual_labels"),
+        ("settings_v3", "settings"),
+        ("metadata_v3", "metadata"),
+        ("import_history_v3", "import_history"),
+        ("automation_reviews_v3", "automation_reviews"),
+    ):
+        connection.execute(f"ALTER TABLE {old_name} RENAME TO {new_name}")
+
+
+def _legacy_dataset_snapshot(connection: sqlite3.Connection) -> dict[str, list[list[object]]]:
+    return {
+        "events": _fetch_rows(connection, "SELECT event_id, payload_json FROM events ORDER BY event_id"),
+        "manual_labels": _fetch_rows(connection, "SELECT event_id, label FROM manual_labels ORDER BY event_id"),
+        "settings": _fetch_rows(connection, "SELECT key, value_json FROM settings ORDER BY key"),
+        "metadata": _fetch_rows(connection, "SELECT key, value FROM metadata ORDER BY key"),
+        "import_history": _fetch_rows(
+            connection,
+            "SELECT id, source, path, event_count, imported_at FROM import_history ORDER BY id",
+        ),
+        "automation_reviews": _fetch_rows(
+            connection,
+            "SELECT activity, status, note, updated_at FROM automation_reviews ORDER BY activity",
+        ),
+    }
+
+
+def _project_scoped_dataset_snapshot(
+    connection: sqlite3.Connection,
+    project_id: str,
+    *,
+    table_suffix: str = "",
+) -> dict[str, list[list[object]]]:
+    return {
+        "events": _fetch_rows(
+            connection,
+            f"SELECT event_id, payload_json FROM events{table_suffix} WHERE project_id = ? ORDER BY event_id",
+            (project_id,),
+        ),
+        "manual_labels": _fetch_rows(
+            connection,
+            f"SELECT event_id, label FROM manual_labels{table_suffix} WHERE project_id = ? ORDER BY event_id",
+            (project_id,),
+        ),
+        "settings": _fetch_rows(
+            connection,
+            f"SELECT key, value_json FROM settings{table_suffix} WHERE project_id = ? ORDER BY key",
+            (project_id,),
+        ),
+        "metadata": _fetch_rows(
+            connection,
+            f"SELECT key, value FROM metadata{table_suffix} WHERE project_id = ? ORDER BY key",
+            (project_id,),
+        ),
+        "import_history": _fetch_rows(
+            connection,
+            (
+                f"SELECT id, source, path, event_count, imported_at FROM import_history{table_suffix} "
+                "WHERE project_id = ? ORDER BY id"
+            ),
+            (project_id,),
+        ),
+        "automation_reviews": _fetch_rows(
+            connection,
+            (
+                f"SELECT activity, status, note, updated_at FROM automation_reviews{table_suffix} "
+                "WHERE project_id = ? ORDER BY activity"
+            ),
+            (project_id,),
+        ),
+    }
+
+
+def _fetch_rows(
+    connection: sqlite3.Connection,
+    statement: str,
+    parameters: tuple[object, ...] = (),
+) -> list[list[object]]:
+    return [list(row) for row in connection.execute(statement, parameters).fetchall()]
+
+
+def _dataset_counts(snapshot: dict[str, list[list[object]]]) -> dict[str, int]:
+    return {name: len(rows) for name, rows in snapshot.items()}
+
+
+def _dataset_hash(snapshot: dict[str, list[list[object]]]) -> str:
+    return hashlib.sha256(_canonical_json(snapshot).encode("utf-8")).hexdigest()
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 @dataclass(frozen=True)
