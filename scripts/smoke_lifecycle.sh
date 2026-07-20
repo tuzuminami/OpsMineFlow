@@ -83,17 +83,21 @@ import urllib.request
 from pathlib import Path
 
 base = f"http://127.0.0.1:{sys.argv[1]}"
+project_headers = {}
 
 def request(path, payload=None, headers=None):
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         base + path,
         data=data,
-        headers={"Content-Type": "application/json", **(headers or {})},
+        headers={"Content-Type": "application/json", **project_headers, **(headers or {})},
         method="GET" if payload is None else "POST",
     )
     with urllib.request.urlopen(req, timeout=2) as response:
         return json.loads(response.read().decode("utf-8"))
+
+projects = request("/projects")
+project_headers["X-OpsMineFlow-Project"] = projects["active_project_id"]
 
 diagnostics = request("/diagnostics")
 assert diagnostics["runtime_policy"]["local_only"] is True
@@ -136,7 +140,8 @@ assert preview["event_count"] == 7
 result = request("/import/csv", {"path": "data/sample/sample_events.csv"})
 assert result["imported_events"] == 7
 
-events = request("/events")
+events_payload = request("/events")
+events = events_payload["events"]
 assert len(events) == 7
 quality = request("/analytics/event-quality")
 assert quality["summary"]["total_events"] == 7
@@ -162,7 +167,7 @@ merged = request(
 )
 excluded = request("/events/exclude", {"event_id": merged["event"]["event_id"]})
 assert excluded["excluded"] is True
-assert len(request("/events")) == 6
+assert len(request("/events")["events"]) == 6
 
 export_preview = request("/export/preview", {"format": "markdown"})
 assert export_preview["byte_size"] > 0
@@ -172,7 +177,7 @@ delete_challenge = request("/data/delete/challenge", {})
 delete_result = request("/data/delete", {}, {"X-OpsMineFlow-Delete-Challenge": delete_challenge["challenge"]})
 assert delete_result["deleted"] is True
 
-assert request("/events") == []
+assert request("/events")["events"] == []
 PY
 
 SECOND_OUTPUT="$(./scripts/run_local.sh)"

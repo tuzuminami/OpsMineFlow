@@ -5,6 +5,30 @@ export type Health = {
   llm_supported: boolean;
 };
 
+export type Project = {
+  project_id: string;
+  display_name: string;
+  origin: string;
+  revision: number;
+  event_count: number;
+};
+
+export type ProjectsResponse = {
+  projects: Project[];
+  active_project_id: string;
+};
+
+export type ProjectMutationResponse = ProjectsResponse & {
+  project?: Project;
+  deleted_project_id?: string;
+  replacement_project_id?: string;
+};
+
+export type ProjectScope = {
+  projectId: string;
+  expectedRevision?: number;
+};
+
 export type RuntimeStatus = {
   state: "ready" | "unavailable" | "port_collision" | "stopped" | string;
   endpoint: string;

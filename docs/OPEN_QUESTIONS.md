@@ -31,3 +31,4 @@ See [product/COLLECTION_ROADMAP.md](product/COLLECTION_ROADMAP.md) for the full 
 
 - Confirm whether SVG export should use a bundled local renderer or remain deferred while Mermaid and draw.io exports are available.
 - Define the minimum evidence required to promote each collector from technical preview to controlled beta.
+- Define the user-facing preview, confirmation, retention, and deletion receipt for project data versus workspace migration snapshots before the all-data lifecycle work is released (tracked by #52 and #54).

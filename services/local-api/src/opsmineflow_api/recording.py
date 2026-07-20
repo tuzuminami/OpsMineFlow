@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -94,11 +95,12 @@ class RecordingManager:
             "rate_limit_per_minute": INGEST_RATE_LIMIT,
         }
 
-    def status(self) -> dict[str, Any]:
+    def status(self, project_id: str | None = None) -> dict[str, Any]:
         with self._lock:
             self._refresh_process_state()
             availability = self.availability()
-            if self._session is None:
+            wrong_project = project_id is not None and self._session is not None and self._session.get("project_id") != project_id
+            if self._session is None or wrong_project:
                 return {
                     **availability,
                     "active": False,
@@ -114,12 +116,19 @@ class RecordingManager:
                     "current_app": "",
                     "recorded_events": 0,
                     "last_heartbeat_at": "",
-                    "last_error": self._last_error,
+                    "last_error": "" if wrong_project else self._last_error,
                     "capture_scope": "frontmost_app_only",
                 }
             return {**availability, **self._session, "last_error": self._last_error, "capture_scope": "frontmost_app_only"}
 
-    def start(self, case_id: str, activity_label: str, consent: bool) -> dict[str, Any]:
+    def start(
+        self,
+        case_id: str,
+        activity_label: str,
+        consent: bool,
+        *,
+        store: EventStore | None = None,
+    ) -> dict[str, Any]:
         with self._lock:
             self._refresh_process_state()
             if self._session and self._session.get("active"):
@@ -133,6 +142,14 @@ class RecordingManager:
             availability = self.availability()
             if not availability["available"]:
                 raise RuntimeError(str(availability["remediation"]))
+            active_store = store or default_store()
+            # The project may have been deleted after the request resolved its
+            # scoped store but before this lifecycle lock was acquired.
+            project_id = (
+                active_store.get_project().project_id
+                if store is not None
+                else active_store.snapshot().project_id
+            )
 
             session_id = f"rec_{uuid.uuid4().hex}"
             runtime_dir = default_data_dir() / "runtime"
@@ -166,6 +183,7 @@ class RecordingManager:
             self._session = {
                 "active": True,
                 "session_id": session_id,
+                "project_id": project_id,
                 "case_id": normalized_case[:200],
                 "activity_label": normalized_activity[:200],
                 "started_at": _now_iso(),
@@ -178,30 +196,32 @@ class RecordingManager:
                 "recorded_events": 0,
                 "last_heartbeat_at": "",
             }
-            return self.status()
+            return self.status(project_id)
 
-    def pause(self, reason: str = "") -> dict[str, Any]:
+    def pause(self, reason: str = "", *, project_id: str | None = None) -> dict[str, Any]:
         with self._lock:
             self._refresh_process_state()
             if self._session is None or not self._session.get("active"):
                 raise ValueError("No recording session is active.")
+            self._assert_session_project(project_id)
             if self._session.get("paused"):
-                return self.status()
+                return self.status(project_id)
             self._session["paused"] = True
             self._session["paused_at"] = _now_iso()
             self._session["pause_reason"] = reason.strip()[:200] or "manual_pause"
             self._session["current_app"] = ""
-            return self.status()
+            return self.status(project_id)
 
-    def resume(self) -> dict[str, Any]:
+    def resume(self, *, project_id: str | None = None) -> dict[str, Any]:
         with self._lock:
             self._refresh_process_state()
             if self._session is None or not self._session.get("active"):
                 raise ValueError("No recording session is active.")
+            self._assert_session_project(project_id)
             if not self._session.get("paused"):
-                return self.status()
+                return self.status(project_id)
             self._close_pause_interval()
-            return self.status()
+            return self.status(project_id)
 
     def heartbeat(self, token: str, session_id: str, current_app: str) -> dict[str, Any]:
         with self._lock:
@@ -226,7 +246,7 @@ class RecordingManager:
                 self._session["last_heartbeat_at"] = _now_iso()
                 return {"accepted": True, "appended": 0, "paused": True, "event_id": ""}
             event = native_event_from_payload(payload, self._session)
-            active_store = store or default_store()
+            active_store = self._session_store(store)
             appended = active_store.append([event])
             # Storage may reject a write. Do not consume a sequence or rate
             # budget until its durable outcome is known, so a retry can replay.
@@ -241,6 +261,7 @@ class RecordingManager:
             self._refresh_process_state()
             if self._session is None or not self._session.get("active"):
                 return self.status()
+            self._assert_session_project(store.snapshot().project_id if store is not None else None)
             process = self._process
             if self._stop_file is not None:
                 self._stop_file.touch(exist_ok=True)
@@ -263,7 +284,7 @@ class RecordingManager:
             recorded_events = int(self._session.get("recorded_events", 0))
             if record_import and recorded_events > 0:
                 try:
-                    (store or default_store()).record_import(
+                    self._session_store(store).record_import(
                         "native_recording",
                         str(self._session["case_id"]),
                         recorded_events,
@@ -275,7 +296,25 @@ class RecordingManager:
             self._session["active"] = False
             self._session["current_app"] = ""
             self._cleanup_process()
-            return self.status()
+            return self.status(str(self._session.get("project_id") or ""))
+
+    def ensure_project_deletable(self, project_id: str) -> None:
+        """A project cannot disappear while its native collector still owns a session."""
+
+        with self._lock:
+            self._refresh_process_state()
+            if self._session is not None and self._session.get("active") and self._session.get("project_id") == project_id:
+                raise ValueError("Stop the active recording before deleting its project.")
+
+    @contextmanager
+    def project_deletion_guard(self, project_id: str):
+        """Serialize project deletion with recording start for that project."""
+
+        with self._lock:
+            self._refresh_process_state()
+            if self._session is not None and self._session.get("active") and self._session.get("project_id") == project_id:
+                raise ValueError("Stop the active recording before deleting its project.")
+            yield
 
     def shutdown(self) -> None:
         try:
@@ -293,6 +332,30 @@ class RecordingManager:
         if self._token_issued_at and time.monotonic() - self._token_issued_at > TOKEN_TTL_SECONDS:
             self._last_error = "Recording session token expired."
             raise PermissionError("Recording session token expired.")
+
+    def _assert_session_project(self, project_id: str | None) -> None:
+        if (
+            project_id is not None
+            and self._session is not None
+            and self._session.get("project_id")
+            and self._session.get("project_id") != project_id
+        ):
+            raise ValueError("Recording session belongs to a different project.")
+
+    def _session_store(self, store: EventStore | None) -> EventStore:
+        if self._session is None:
+            raise ValueError("No recording session is active.")
+        project_id = str(self._session.get("project_id") or "")
+        workspace = store or default_store()
+        if not project_id:
+            # Legacy in-memory tests and interrupted pre-v1 sessions lack a
+            # binding. Adopt the caller's immutable store once, then preserve
+            # that value for all subsequent ingest/stop retries.
+            project_id = workspace.snapshot().project_id
+            self._session["project_id"] = project_id
+        if workspace.snapshot().project_id == project_id:
+            return workspace
+        return workspace.for_project(project_id)
 
     def _check_rate_limit(self) -> float:
         now = time.monotonic()

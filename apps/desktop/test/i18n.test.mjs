@@ -59,7 +59,7 @@ test("beginner workflow labels are explicit in both languages", () => {
 
 test("the packaged WebUI uses the allowlisted Tauri proxy instead of a direct local API session", () => {
   assert.match(apiSource, /invoke<T>\("local_api_operation"/);
-  assert.match(apiSource, /invoke<\{ deleted: boolean \}>\("delete_local_data"\)/);
+  assert.match(apiSource, /invoke<\{ deleted: boolean \}>\("delete_local_data", \{ payload: withProjectScope/);
   assert.match(apiSource, /import\.meta\.env\.DEV/);
   assert.match(apiSource, /isApprovedDevelopmentApiBase/);
   assert.match(apiSource, /url\.hostname === "127\.0\.0\.1"/);
@@ -69,17 +69,19 @@ test("the packaged WebUI uses the allowlisted Tauri proxy instead of a direct lo
 });
 
 test("large event lists use bounded pages and offer a user-triggered next page", () => {
-  assert.match(apiSource, /postJson<EventPage>\("events_page", \{ offset, limit \}\)/);
+  assert.match(apiSource, /postJson<EventPage>\("events_page", \{ offset, limit \}, projectScope\)/);
   assert.match(apiSource, /if \(isTauri\(\)\) throw new Error\("Packaged exports must use the native save dialog/);
   assert.match(appSource, /async function loadMoreEvents\(\)/);
-  assert.match(appSource, /loadEventPage\(data\.events\.length\)/);
+  assert.match(appSource, /loadEventPage\(data\.events\.length, 500, currentProjectScope\(\)\)/);
   assert.match(appSource, /t\("events\.loadMore"/);
 });
 
 test("recording polling stays lightweight and dashboard refreshes are single-flight", () => {
-  assert.match(apiSource, /export async function getRecordingStatus\(\)/);
+  assert.match(apiSource, /export async function getRecordingStatus\(projectScope: ProjectScope\)/);
   assert.match(appSource, /const refreshInFlight = useRef<Promise<void> \| null>\(null\)/);
-  assert.match(appSource, /Promise\.all\(\[getNativeRuntimeStatus\(\), getRecordingStatus\(\)\]\)/);
+  assert.match(appSource, /Promise\.all\(\[getNativeRuntimeStatus\(\), getRecordingStatus\(projectScope\)\]\)/);
+  assert.match(appSource, /const projectsAfterClear = await loadProjects\(\)/);
+  assert.match(appSource, /expectedRevision: refreshedProject\.revision/);
   assert.doesNotMatch(appSource, /setInterval\(\(\) => void refresh\(true\), 2000\)/);
 });
 

@@ -25,6 +25,7 @@ from .auth import (
     DELETE_CHALLENGE_HEADER,
     DeleteChallengeStore,
     LocalApiPolicy,
+    PROJECT_HEADER,
     RUNTIME_PROBE_CHALLENGE_HEADER,
     RequestRejected,
     consume_runtime_credentials,
@@ -69,7 +70,14 @@ from .activitywatch import import_activitywatch_local
 from .child_process import sanitized_subprocess_environment
 from .llm_handoff import build_handoff_bundle
 from .recording import recording_manager
-from .storage import EventStore, StorageCommitError, StoreSnapshot, default_store
+from .storage import (
+    EventStore,
+    ProjectConflictError,
+    ProjectNotFoundError,
+    StorageCommitError,
+    StoreSnapshot,
+    default_store,
+)
 
 try:
     from fastapi import FastAPI, Header, HTTPException, Request
@@ -86,14 +94,18 @@ except ModuleNotFoundError:
     BaseModel = object  # type: ignore[assignment]
 
 
-class PathImportRequest(BaseModel):  # type: ignore[misc, valid-type]
+class ProjectMutationRequest(BaseModel):  # type: ignore[misc, valid-type]
+    expected_revision: int | None = None
+
+
+class PathImportRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     path: str
     mapping: dict[str, str] | None = None
     date_format: str = ""
     timezone: str = "UTC"
 
 
-class ImportPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
+class ImportPreviewRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     format: str
     path: str
     mapping: dict[str, str] | None = None
@@ -101,61 +113,61 @@ class ImportPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
     timezone: str = "UTC"
 
 
-class LabelRequest(BaseModel):  # type: ignore[misc, valid-type]
+class LabelRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     event_id: str
     label: str
 
 
-class EventActivityUpdateRequest(BaseModel):  # type: ignore[misc, valid-type]
+class EventActivityUpdateRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     event_id: str
     activity: str
 
 
-class EventExcludeRequest(BaseModel):  # type: ignore[misc, valid-type]
+class EventExcludeRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     event_id: str
 
 
-class EventQualityReviewRequest(BaseModel):  # type: ignore[misc, valid-type]
+class EventQualityReviewRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     event_id: str
     status: str = "approved"
 
 
-class EventCaseCorrelationUpdateRequest(BaseModel):  # type: ignore[misc, valid-type]
+class EventCaseCorrelationUpdateRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     event_id: str
     case_id: str
     reason: str
 
 
-class EventSplitRequest(BaseModel):  # type: ignore[misc, valid-type]
+class EventSplitRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     event_id: str
     split_after_seconds: float
     first_activity: str = ""
     second_activity: str = ""
 
 
-class EventMergeRequest(BaseModel):  # type: ignore[misc, valid-type]
+class EventMergeRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     first_event_id: str
     second_event_id: str
     activity: str = ""
 
 
-class EventPageRequest(BaseModel):  # type: ignore[misc, valid-type]
+class EventPageRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     offset: int = 0
     limit: int = DEFAULT_EVENT_PAGE_SIZE
 
 
-class ActivityWatchImportRequest(BaseModel):  # type: ignore[misc, valid-type]
+class ActivityWatchImportRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     enabled: bool = False
     base_url: str = "http://127.0.0.1:5600"
     mode: str = "replace"
 
 
-class ActivityWatchPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
+class ActivityWatchPreviewRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     enabled: bool = False
     base_url: str = "http://127.0.0.1:5600"
 
 
-class SettingsRequest(BaseModel):  # type: ignore[misc, valid-type]
+class SettingsRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     mask_url_paths: bool | None = None
     mask_window_titles: bool | None = None
     retention_days: int | None = None
@@ -165,23 +177,23 @@ class SettingsRequest(BaseModel):  # type: ignore[misc, valid-type]
     excluded_domains: list[str] | None = None
 
 
-class AutomationReviewRequest(BaseModel):  # type: ignore[misc, valid-type]
+class AutomationReviewRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     activity: str
     status: str
     note: str = ""
 
 
-class ExportPreviewRequest(BaseModel):  # type: ignore[misc, valid-type]
+class ExportPreviewRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     format: str
 
 
-class ExportSaveRequest(BaseModel):  # type: ignore[misc, valid-type]
+class ExportSaveRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     format: str
     path: str
     overwrite_confirmed: bool = False
 
 
-class RecordingStartRequest(BaseModel):  # type: ignore[misc, valid-type]
+class RecordingStartRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
     case_id: str
     activity_label: str
     consent: bool = False
@@ -206,6 +218,23 @@ class RecordingHeartbeatRequest(BaseModel):  # type: ignore[misc, valid-type]
     current_app: str = ""
 
 
+class ProjectCreateRequest(BaseModel):  # type: ignore[misc, valid-type]
+    display_name: str
+
+
+class ProjectSelectRequest(BaseModel):  # type: ignore[misc, valid-type]
+    project_id: str
+
+
+class ProjectRenameRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
+    project_id: str
+    display_name: str
+
+
+class ProjectDeleteRequest(ProjectMutationRequest):  # type: ignore[misc, valid-type]
+    project_id: str
+
+
 def allowed_webui_origins() -> list[str]:
     webui_port = int(os.environ.get("OPSMINEFLOW_WEBUI_PORT", "5173"))
     return [
@@ -226,6 +255,37 @@ def local_api_policy() -> LocalApiPolicy:
 
 LOCAL_API_POLICY = local_api_policy()
 DELETE_CHALLENGES = DeleteChallengeStore()
+
+
+def project_store(project_id: str, *, expected_revision: int | None = None) -> EventStore:
+    """Resolve an explicit, opaque project context for one local API operation."""
+
+    if not project_id.strip():
+        raise _bad_request("Project context is required.")
+    try:
+        return default_store().for_project(project_id, expected_revision=expected_revision)
+    except ProjectNotFoundError as exc:
+        raise _not_found("Project was not found.") from exc
+    except ProjectConflictError as exc:
+        raise _conflict(str(exc)) from exc
+    except ValueError as exc:
+        raise _bad_request(str(exc)) from exc
+
+
+def project_response(store: EventStore, payload: Mapping[str, object] | None = None) -> dict[str, object]:
+    response = dict(payload or {})
+    snapshot = store.snapshot()
+    response["project_id"] = snapshot.project_id
+    response["project_revision"] = snapshot.project_revision
+    return response
+
+
+def projects_response() -> dict[str, object]:
+    workspace = default_store()
+    return {
+        "projects": [project.to_api_dict() for project in workspace.list_projects()],
+        "active_project_id": workspace.active_project_id(),
+    }
 
 
 def _analysis_for_store(store: EventStore, snapshot: StoreSnapshot | None = None):
@@ -1346,7 +1406,7 @@ def create_diagnostics(store: EventStore | None = None) -> dict[str, Any]:
             "status": _activitywatch_status(activitywatch_enabled),
             "remediation": "Enable ActivityWatch import only when the user explicitly wants localhost ActivityWatch data.",
         },
-        "recording": recording_manager.status(),
+        "recording": recording_manager.status(store_snapshot.project_id),
         "privacy_evidence": privacy_capture_evidence(),
         "guardrails": {
             "license_policy": {
@@ -1482,7 +1542,7 @@ if FastAPI is not None:
         allow_origins=allowed_webui_origins(),
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["content-type", DELETE_CHALLENGE_HEADER],
+        allow_headers=["content-type", DELETE_CHALLENGE_HEADER, PROJECT_HEADER],
     )
 
     @app.middleware("http")
@@ -1503,6 +1563,16 @@ if FastAPI is not None:
     async def storage_commit_error(_request: Request, exc: StorageCommitError):
         assert JSONResponse is not None
         return JSONResponse({"error": exc.to_api_dict()}, status_code=503)
+
+    @app.exception_handler(ProjectConflictError)
+    async def project_conflict_error(_request: Request, exc: ProjectConflictError):
+        assert JSONResponse is not None
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.exception_handler(ProjectNotFoundError)
+    async def project_not_found_error(_request: Request, _exc: ProjectNotFoundError):
+        assert JSONResponse is not None
+        return JSONResponse({"error": "Project was not found."}, status_code=404)
 else:
     app = None
 
@@ -1517,6 +1587,12 @@ def _bad_request(message: str) -> Exception:
     if FastAPI is not None:
         return HTTPException(status_code=400, detail=message)
     return ValueError(message)
+
+
+def _conflict(message: str) -> Exception:
+    if FastAPI is not None:
+        return HTTPException(status_code=409, detail=message)
+    return ProjectConflictError(message)
 
 
 def _forbidden(message: str) -> Exception:
@@ -1535,48 +1611,122 @@ if app is not None:
     def runtime_health(request: Request) -> dict[str, Any]:
         return create_runtime_health(request.headers.get(RUNTIME_PROBE_CHALLENGE_HEADER, ""))
 
+    @app.get("/projects")
+    def projects() -> dict[str, object]:
+        return projects_response()
+
+    @app.post("/projects")
+    def create_project_endpoint(request: ProjectCreateRequest) -> dict[str, object]:
+        project = default_store().create_project(request.display_name)
+        return {**projects_response(), "project": project.to_api_dict()}
+
+    @app.post("/projects/select")
+    def select_project_endpoint(request: ProjectSelectRequest) -> dict[str, object]:
+        project = default_store().select_project(request.project_id)
+        return {**projects_response(), "project": project.to_api_dict()}
+
+    @app.post("/projects/rename")
+    def rename_project_endpoint(request: ProjectRenameRequest) -> dict[str, object]:
+        try:
+            project = default_store().rename_project(
+                request.project_id,
+                request.display_name,
+                expected_revision=request.expected_revision,
+            )
+        except ProjectConflictError as exc:
+            raise _conflict(str(exc))
+        except ProjectNotFoundError:
+            raise _not_found("Project was not found.")
+        except ValueError as exc:
+            raise _bad_request(str(exc))
+        return {**projects_response(), "project": project.to_api_dict()}
+
+    @app.post("/projects/delete")
+    def delete_project_endpoint(request: ProjectDeleteRequest) -> dict[str, object]:
+        try:
+            with recording_manager.project_deletion_guard(request.project_id):
+                replacement_project_id = default_store().delete_project(
+                    request.project_id,
+                    expected_revision=request.expected_revision,
+                )
+        except ProjectConflictError as exc:
+            raise _conflict(str(exc))
+        except ProjectNotFoundError:
+            raise _not_found("Project was not found.")
+        except ValueError as exc:
+            raise _bad_request(str(exc))
+        return {**projects_response(), "deleted_project_id": request.project_id, "replacement_project_id": replacement_project_id}
+
     @app.get("/diagnostics")
-    def diagnostics() -> dict[str, Any]:
-        return create_diagnostics()
+    def diagnostics(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, create_diagnostics(store))
 
     @app.post("/diagnostics/checks")
-    def diagnostics_checks() -> dict[str, Any]:
-        return run_diagnostic_checks()
+    def diagnostics_checks(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, run_diagnostic_checks())
 
     @app.get("/settings")
-    def settings() -> dict[str, object]:
-        return default_store().get_settings()
+    def settings(x_opsmineflow_project: str = Header(default="")) -> dict[str, object]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, store.get_settings())
 
     @app.get("/import/history")
-    def import_history() -> list[dict[str, object]]:
-        return default_store().list_import_history()
+    def import_history(x_opsmineflow_project: str = Header(default="")) -> dict[str, object]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, {"imports": store.list_import_history()})
 
     @app.get("/recording/status")
-    def recording_status() -> dict[str, Any]:
-        return recording_manager.status()
+    def recording_status(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, recording_manager.status(store.project_id))
 
     @app.post("/recording/start")
-    def recording_start(request: RecordingStartRequest) -> dict[str, Any]:
+    def recording_start(
+        request: RecordingStartRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return recording_manager.start(request.case_id, request.activity_label, request.consent)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(
+                store,
+                recording_manager.start(request.case_id, request.activity_label, request.consent, store=store),
+            )
         except (ValueError, RuntimeError) as exc:
             raise _bad_request(str(exc))
 
     @app.post("/recording/stop")
-    def recording_stop() -> dict[str, Any]:
-        return recording_manager.stop(default_store())
+    def recording_stop(
+        request: ProjectMutationRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
+        # Ingested recording events advance the project revision. Stopping the
+        # session must resolve the current revision after validating the
+        # immutable project context, otherwise a start-time revision traps the
+        # user in an un-stoppable active session.
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, recording_manager.stop(store))
 
     @app.post("/recording/pause")
-    def recording_pause(request: RecordingPauseRequest) -> dict[str, Any]:
+    def recording_pause(
+        request: RecordingPauseRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return recording_manager.pause(request.reason)
+            store = project_store(x_opsmineflow_project)
+            return project_response(store, recording_manager.pause(request.reason, project_id=store.project_id))
         except ValueError as exc:
             raise _bad_request(str(exc))
 
     @app.post("/recording/resume")
-    def recording_resume() -> dict[str, Any]:
+    def recording_resume(
+        request: ProjectMutationRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return recording_manager.resume()
+            store = project_store(x_opsmineflow_project)
+            return project_response(store, recording_manager.resume(project_id=store.project_id))
         except ValueError as exc:
             raise _bad_request(str(exc))
 
@@ -1603,224 +1753,342 @@ if app is not None:
             raise _forbidden(str(exc))
 
     @app.post("/import/preview")
-    def import_preview(request: ImportPreviewRequest) -> dict[str, Any]:
+    def import_preview(
+        request: ImportPreviewRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return create_import_preview(
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, create_import_preview(
                 request.format,
                 request.path,
                 request.mapping,
                 request.date_format,
                 request.timezone,
-            )
+            ))
         except FileNotFoundError as exc:
             raise _not_found(str(exc))
         except ValueError as exc:
             raise _bad_request(str(exc))
 
     @app.post("/import/activitywatch-preview")
-    def preview_activitywatch(request: ActivityWatchPreviewRequest) -> dict[str, Any]:
+    def preview_activitywatch(
+        request: ActivityWatchPreviewRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return create_activitywatch_preview(request.enabled, request.base_url)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, create_activitywatch_preview(request.enabled, request.base_url, store))
         except ValueError as exc:
             raise _bad_request(str(exc))
 
     @app.post("/settings")
-    def update_settings(request: SettingsRequest) -> dict[str, object]:
-        return default_store().update_settings(request.model_dump(exclude_none=True))
+    def update_settings(
+        request: SettingsRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, object]:
+        store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+        updates = request.model_dump(exclude_none=True)
+        updates.pop("expected_revision", None)
+        return project_response(store, store.update_settings(updates))
 
     @app.post("/import/csv")
-    def import_csv(request: PathImportRequest) -> dict[str, Any]:
+    def import_csv(
+        request: PathImportRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return import_path_into_store(
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, import_path_into_store(
                 "csv",
                 request.path,
                 mapping=request.mapping,
                 date_format=request.date_format,
                 timezone_name=request.timezone,
-            )
+                store=store,
+            ))
         except FileNotFoundError as exc:
             raise _not_found(str(exc))
 
     @app.post("/import/json")
-    def import_json(request: PathImportRequest) -> dict[str, Any]:
+    def import_json(
+        request: PathImportRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return import_path_into_store("json", request.path)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, import_path_into_store("json", request.path, store=store))
         except FileNotFoundError as exc:
             raise _not_found(str(exc))
 
     @app.post("/import/activitywatch-local")
-    def import_activitywatch(request: ActivityWatchImportRequest) -> dict[str, Any]:
+    def import_activitywatch(
+        request: ActivityWatchImportRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return import_activitywatch_into_store(request.enabled, request.base_url, request.mode)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(
+                store,
+                import_activitywatch_into_store(request.enabled, request.base_url, request.mode, store=store),
+            )
         except ValueError as exc:
             raise _bad_request(str(exc))
 
     @app.get("/events")
-    def events() -> list[dict[str, Any]]:
-        return create_event_page(0, MAX_EVENT_PAGE_SIZE)["events"]
+    def events(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, {"events": create_event_page(0, MAX_EVENT_PAGE_SIZE, store)["events"]})
 
     @app.post("/events/page")
-    def event_page(request: EventPageRequest) -> dict[str, Any]:
+    def event_page(
+        request: EventPageRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return create_event_page(request.offset, request.limit)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, create_event_page(request.offset, request.limit, store))
         except ValueError as exc:
             raise _bad_request(str(exc))
 
     @app.post("/events/label")
-    def label_event(request: LabelRequest) -> dict[str, Any]:
+    def label_event(
+        request: LabelRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            default_store().set_label(request.event_id, request.label)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            store.set_label(request.event_id, request.label)
         except KeyError:
             raise _not_found("Event was not found")
-        return {"event_id": request.event_id, "label": request.label}
+        return project_response(store, {"event_id": request.event_id, "label": request.label})
 
     @app.post("/events/activity")
-    def update_event_activity(request: EventActivityUpdateRequest) -> dict[str, Any]:
+    def update_event_activity(
+        request: EventActivityUpdateRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return {"event": default_store().update_event_activity(request.event_id, request.activity)}
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, {"event": store.update_event_activity(request.event_id, request.activity)})
         except KeyError:
             raise _not_found("Event was not found")
+        except ProjectConflictError as exc:
+            raise _conflict(str(exc))
         except ValueError as exc:
             raise _bad_request(str(exc))
 
     @app.post("/events/exclude")
-    def exclude_event(request: EventExcludeRequest) -> dict[str, Any]:
+    def exclude_event(
+        request: EventExcludeRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return default_store().exclude_event(request.event_id)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, store.exclude_event(request.event_id))
         except KeyError:
             raise _not_found("Event was not found")
+        except ProjectConflictError as exc:
+            raise _conflict(str(exc))
 
     @app.post("/events/quality-review")
-    def review_event_quality(request: EventQualityReviewRequest) -> dict[str, Any]:
+    def review_event_quality(
+        request: EventQualityReviewRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return default_store().set_event_quality_review(request.event_id, request.status)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, store.set_event_quality_review(request.event_id, request.status))
         except KeyError:
             raise _not_found("Event was not found")
+        except ProjectConflictError as exc:
+            raise _conflict(str(exc))
         except ValueError as exc:
             raise _bad_request(str(exc))
 
     @app.post("/events/case-correlation")
-    def update_event_case_correlation(request: EventCaseCorrelationUpdateRequest) -> dict[str, Any]:
+    def update_event_case_correlation(
+        request: EventCaseCorrelationUpdateRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            event = default_store().update_event_case_correlation(request.event_id, request.case_id, request.reason)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            event = store.update_event_case_correlation(request.event_id, request.case_id, request.reason)
         except KeyError:
             raise _not_found("Event was not found")
+        except ProjectConflictError as exc:
+            raise _conflict(str(exc))
         except ValueError as exc:
             raise _bad_request(str(exc))
-        return {"event": event_to_api_dict(event, default_store().get_settings())}
+        return project_response(store, {"event": event_to_api_dict(event, store.get_settings())})
 
     @app.post("/events/split")
-    def split_event(request: EventSplitRequest) -> dict[str, Any]:
+    def split_event(
+        request: EventSplitRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return default_store().split_event(
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, store.split_event(
                 request.event_id,
                 request.split_after_seconds,
                 request.first_activity,
                 request.second_activity,
-            )
+            ))
         except KeyError:
             raise _not_found("Event was not found")
+        except ProjectConflictError as exc:
+            raise _conflict(str(exc))
         except ValueError as exc:
             raise _bad_request(str(exc))
 
     @app.post("/events/merge")
-    def merge_events(request: EventMergeRequest) -> dict[str, Any]:
+    def merge_events(
+        request: EventMergeRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return default_store().merge_adjacent_events(
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, store.merge_adjacent_events(
                 request.first_event_id,
                 request.second_event_id,
                 request.activity,
-            )
+            ))
         except KeyError:
             raise _not_found("Event was not found")
+        except ProjectConflictError as exc:
+            raise _conflict(str(exc))
         except ValueError as exc:
             raise _bad_request(str(exc))
 
     @app.post("/data/delete")
-    def delete_data(x_opsmineflow_delete_challenge: str = Header(default="")) -> dict[str, Any]:
+    def delete_data(
+        request: ProjectMutationRequest,
+        x_opsmineflow_delete_challenge: str = Header(default=""),
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         if not DELETE_CHALLENGES.consume(x_opsmineflow_delete_challenge):
             raise _forbidden("delete challenge is invalid or expired")
-        recording_manager.stop(default_store(), record_import=False)
-        default_store().clear()
-        return {"deleted": True}
+        store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+        if recording_manager.status(store.project_id).get("active"):
+            recording_manager.stop(store, record_import=False)
+        store.clear()
+        return project_response(store, {"deleted": True})
 
     @app.post("/data/delete/challenge")
     def delete_challenge() -> dict[str, str]:
         return {"challenge": DELETE_CHALLENGES.issue()}
 
     @app.get("/analytics/summary")
-    def analytics_summary() -> dict[str, Any]:
-        return create_summary()
+    def analytics_summary(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, create_summary(store))
 
     @app.get("/analytics/app-switching")
-    def analytics_app_switching() -> dict[str, Any]:
-        return create_app_switching()
+    def analytics_app_switching(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, create_app_switching(store))
 
     @app.get("/analytics/automation-candidates")
-    def analytics_automation_candidates() -> dict[str, Any]:
-        return create_automation_candidates()
+    def analytics_automation_candidates(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, create_automation_candidates(store))
 
     @app.get("/analytics/event-quality")
-    def analytics_event_quality() -> dict[str, Any]:
-        return create_event_quality_report()
+    def analytics_event_quality(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, create_event_quality_report(store))
 
     @app.post("/automation/review")
-    def automation_review(request: AutomationReviewRequest) -> dict[str, str]:
+    def automation_review(
+        request: AutomationReviewRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return default_store().set_automation_review(request.activity, request.status, request.note)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(store, store.set_automation_review(request.activity, request.status, request.note))
+        except ProjectConflictError as exc:
+            raise _conflict(str(exc))
         except ValueError as exc:
             raise _bad_request(str(exc))
 
     @app.get("/analytics/process-map")
-    def analytics_process_map() -> dict[str, Any]:
-        return create_process_map()
+    def analytics_process_map(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, create_process_map(store))
 
     @app.get("/reports/markdown")
-    def report_markdown() -> dict[str, str]:
-        return {"markdown": create_markdown_report()}
+    def report_markdown(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, {"markdown": create_markdown_report(store)})
 
     @app.post("/export/mermaid")
-    def export_mermaid_endpoint() -> dict[str, str]:
-        return {"mermaid": str(create_export_artifact("mermaid")["content"])}
+    def export_mermaid_endpoint(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, {"mermaid": str(create_export_artifact("mermaid", store)["content"])})
 
     @app.post("/export/drawio")
-    def export_drawio_endpoint() -> dict[str, str]:
-        return {"drawio": str(create_export_artifact("drawio")["content"])}
+    def export_drawio_endpoint(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, {"drawio": str(create_export_artifact("drawio", store)["content"])})
 
     @app.post("/export/svg")
-    def export_svg_endpoint() -> dict[str, str]:
-        return {"status": "planned", "message": "SVG export will use a local renderer."}
+    def export_svg_endpoint(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, {"status": "planned", "message": "SVG export will use a local renderer."})
 
     @app.post("/export/csv")
-    def export_csv_endpoint() -> dict[str, Any]:
-        artifact = create_export_artifact("csv")
+    def export_csv_endpoint(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        artifact = create_export_artifact("csv", store)
         content = artifact["content"]
         if not isinstance(content, bytes):
             raise RuntimeError("CSV export must be a ZIP bundle.")
-        return {
-            "filename": artifact["filename"],
-            "zip_base64": base64.b64encode(content).decode("ascii"),
-        }
+        return project_response(
+            store,
+            {"filename": artifact["filename"], "zip_base64": base64.b64encode(content).decode("ascii")},
+        )
 
     @app.post("/export/json")
-    def export_json_endpoint() -> dict[str, Any]:
-        return {"json": str(create_export_artifact("json")["content"])}
+    def export_json_endpoint(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, {"json": str(create_export_artifact("json", store)["content"])})
 
     @app.post("/export/llm-handoff")
-    def export_llm_handoff_endpoint() -> dict[str, str]:
-        return export_llm_handoff_payload()
+    def export_llm_handoff_endpoint(x_opsmineflow_project: str = Header(default="")) -> dict[str, Any]:
+        store = project_store(x_opsmineflow_project)
+        return project_response(store, export_llm_handoff_payload(store))
 
     @app.post("/export/preview")
-    def export_preview_endpoint(request: ExportPreviewRequest) -> dict[str, Any]:
+    def export_preview_endpoint(
+        request: ExportPreviewRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            artifact = create_export_artifact(request.format)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            artifact = create_export_artifact(request.format, store)
         except ValueError as exc:
             raise _bad_request(str(exc))
-        return {key: artifact[key] for key in ("format", "filename", "byte_size", "preview", "confidential_count", "warning")}
+        return project_response(
+            store,
+            {key: artifact[key] for key in ("format", "filename", "byte_size", "preview", "confidential_count", "warning")},
+        )
 
     @app.post("/export/save")
-    def export_save_endpoint(request: ExportSaveRequest) -> dict[str, Any]:
+    def export_save_endpoint(
+        request: ExportSaveRequest,
+        x_opsmineflow_project: str = Header(default=""),
+    ) -> dict[str, Any]:
         try:
-            return save_export_artifact(request.format, request.path, overwrite_confirmed=request.overwrite_confirmed)
+            store = project_store(x_opsmineflow_project, expected_revision=request.expected_revision)
+            return project_response(
+                store,
+                save_export_artifact(
+                    request.format,
+                    request.path,
+                    overwrite_confirmed=request.overwrite_confirmed,
+                    store=store,
+                ),
+            )
         except ValueError as exc:
             raise _bad_request(str(exc))

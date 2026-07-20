@@ -34,8 +34,9 @@ async fn local_api_operation(
 async fn delete_local_data(
     state: tauri::State<'_, runtime::RuntimeState>,
     app: tauri::AppHandle,
+    payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    state.delete_data_with_native_confirmation(app).await
+    state.delete_data_with_native_confirmation(app, payload).await
 }
 
 #[tauri::command]
@@ -69,9 +70,9 @@ async fn import_selected_file(
 async fn save_export_with_dialog(
     state: tauri::State<'_, runtime::RuntimeState>,
     app: tauri::AppHandle,
-    format: String,
+    payload: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    state.save_export_with_dialog(app, format).await
+    state.save_export_with_dialog(app, payload).await
 }
 
 fn main() {

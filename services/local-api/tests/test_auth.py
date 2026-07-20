@@ -7,11 +7,12 @@ import json
 import threading
 import unittest
 from http.server import ThreadingHTTPServer
+from types import SimpleNamespace
 from unittest.mock import patch
 
 api_app_module = importlib.import_module("opsmineflow_api.app")
 fastapi_app = api_app_module.app
-from opsmineflow_api.auth import API_SESSION_HEADER, DeleteChallengeStore, LocalApiPolicy, RequestRejected
+from opsmineflow_api.auth import API_SESSION_HEADER, PROJECT_HEADER, DeleteChallengeStore, LocalApiPolicy, RequestRejected
 from opsmineflow_api.server import LocalApiHandler
 from opsmineflow_api.server import _start_parent_watchdog
 from opsmineflow_api.storage import StorageCommitError
@@ -138,6 +139,14 @@ class HandwrittenServerPolicyTests(unittest.TestCase):
         self.assertEqual(status, 401)
         self.assertEqual(payload["error"], "local API authorization failed")
 
+    def test_project_scoped_route_rejects_a_missing_project_header_before_reading_data(self) -> None:
+        headers = {API_SESSION_HEADER: "b" * 64}
+        with patch("opsmineflow_api.server.create_event_page", side_effect=AssertionError("must not read another project")):
+            status, payload = self._request("GET", "/events", headers=headers)
+
+        self.assertEqual(status, 400)
+        self.assertEqual(payload, {"error": "Project context is required."})
+
     def test_public_health_is_minimal_and_does_not_create_snapshot(self) -> None:
         with patch("opsmineflow_api.server.create_api_snapshot", side_effect=AssertionError("must not analyze")):
             status, payload = self._request("GET", "/health")
@@ -146,12 +155,20 @@ class HandwrittenServerPolicyTests(unittest.TestCase):
         self.assertEqual(payload, {"status": "ok", "bind": "127.0.0.1", "local_only": True, "llm_supported": False})
 
     def test_delete_challenge_is_required_and_single_use_on_the_http_boundary(self) -> None:
-        session_headers = {API_SESSION_HEADER: "b" * 64, "Content-Type": "application/json"}
+        project_id = "b01eecad-1e18-5e88-bf34-8e8e8358cfcb"
+        session_headers = {
+            API_SESSION_HEADER: "b" * 64,
+            "Content-Type": "application/json",
+            PROJECT_HEADER: project_id,
+        }
         with (
             patch("opsmineflow_api.server.DELETE_CHALLENGES", DeleteChallengeStore()),
             patch("opsmineflow_api.server.default_store") as default_store,
             patch("opsmineflow_api.server.recording_manager.stop") as stop_recording,
+            patch("opsmineflow_api.server.recording_manager.status", return_value={"active": True}),
         ):
+            scoped_store = default_store.return_value.for_project.return_value
+            scoped_store.snapshot.return_value = SimpleNamespace(project_id=project_id, project_revision=3)
             status, issued = self._request("POST", "/data/delete/challenge", {}, session_headers)
             self.assertEqual(status, 200)
             challenge = str(issued["challenge"])
@@ -163,7 +180,7 @@ class HandwrittenServerPolicyTests(unittest.TestCase):
                 {**session_headers, "X-OpsMineFlow-Delete-Challenge": challenge},
             )
             self.assertEqual(status, 200)
-            self.assertEqual(deleted, {"deleted": True})
+            self.assertEqual(deleted, {"deleted": True, "project_id": project_id, "project_revision": 3})
 
             status, rejected = self._request(
                 "POST",
@@ -174,13 +191,49 @@ class HandwrittenServerPolicyTests(unittest.TestCase):
 
         self.assertEqual(status, 403)
         self.assertEqual(rejected["error"], "delete challenge is invalid or expired")
-        stop_recording.assert_called_once_with(default_store.return_value, record_import=False)
-        default_store.return_value.clear.assert_called_once()
+        default_store.return_value.for_project.assert_called_with(project_id, expected_revision=None)
+        stop_recording.assert_called_once_with(scoped_store, record_import=False)
+        scoped_store.clear.assert_called_once()
+
+    def test_delete_of_another_project_does_not_stop_an_unrelated_recording(self) -> None:
+        project_id = "b01eecad-1e18-5e88-bf34-8e8e8358cfcb"
+        session_headers = {
+            API_SESSION_HEADER: "b" * 64,
+            "Content-Type": "application/json",
+            PROJECT_HEADER: project_id,
+        }
+        with (
+            patch("opsmineflow_api.server.DELETE_CHALLENGES", DeleteChallengeStore()),
+            patch("opsmineflow_api.server.default_store") as default_store,
+            patch("opsmineflow_api.server.recording_manager.stop") as stop_recording,
+            patch("opsmineflow_api.server.recording_manager.status", return_value={"active": False}),
+        ):
+            default_store.return_value.for_project.return_value.snapshot.return_value = SimpleNamespace(
+                project_id=project_id,
+                project_revision=8,
+            )
+            status, issued = self._request("POST", "/data/delete/challenge", {}, session_headers)
+            self.assertEqual(status, 200)
+            status, deleted = self._request(
+                "POST",
+                "/data/delete",
+                {},
+                {**session_headers, "X-OpsMineFlow-Delete-Challenge": str(issued["challenge"])},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted, {"deleted": True, "project_id": project_id, "project_revision": 8})
+        stop_recording.assert_not_called()
+        default_store.return_value.for_project.return_value.clear.assert_called_once()
 
     def test_storage_commit_failure_has_a_stable_handwritten_http_contract(self) -> None:
-        headers = {API_SESSION_HEADER: "b" * 64, "Content-Type": "application/json"}
+        headers = {
+            API_SESSION_HEADER: "b" * 64,
+            "Content-Type": "application/json",
+            PROJECT_HEADER: "b01eecad-1e18-5e88-bf34-8e8e8358cfcb",
+        }
         with patch("opsmineflow_api.server.default_store") as default_store:
-            default_store.return_value.set_label.side_effect = StorageCommitError("storage_busy")
+            default_store.return_value.for_project.return_value.set_label.side_effect = StorageCommitError("storage_busy")
             status, payload = self._request(
                 "POST",
                 "/events/label",

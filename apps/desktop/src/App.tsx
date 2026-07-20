@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   approveEventQuality,
+  createProject,
+  deleteProject,
   deleteLocalData,
   excludeEvent,
   exportArtifact,
@@ -12,17 +14,20 @@ import {
   isManagedDesktop,
   loadDashboardData,
   loadEventPage,
+  loadProjects,
   mergeEvents,
   pauseRecording,
   previewActivityWatchLocal,
   previewImport,
   previewExport,
   repairNativeRuntimeState,
+  renameProject,
   resumeRecording,
   runDiagnosticChecks,
   saveAutomationReview,
   saveExport,
   saveSettings,
+  selectProject,
   splitEvent,
   startRecording,
   stopRecording,
@@ -49,6 +54,8 @@ import type {
   ImportHistoryEntry,
   ImportPreview,
   ProcessMap,
+  Project,
+  ProjectScope,
   RecordingStatus,
   RuntimeStatus,
   Summary
@@ -70,6 +77,8 @@ type DashboardData = {
   candidates: AutomationCandidate[];
   appSwitching: AppSwitching;
   markdown: string;
+  projectId: string;
+  projectRevision: number;
 };
 
 type AppActions = {
@@ -196,10 +205,18 @@ export function App() {
   const [actionMessage, setActionMessage] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
+  const selectedProject = projects.find((project) => project.project_id === selectedProjectId) || null;
 
-  function refresh(silent = false) {
+  function currentProjectScope(): ProjectScope {
+    if (!selectedProject) throw new Error(t("project.selectionRequired"));
+    return { projectId: selectedProject.project_id, expectedRevision: selectedProject.revision };
+  }
+
+  function refresh(silent = false, requestedProjectId = "") {
     if (refreshInFlight.current) return refreshInFlight.current;
     const task = (async () => {
       if (!silent) setLoading(true);
@@ -210,7 +227,17 @@ export function App() {
         if (runtime && runtime.state !== "ready") {
           throw new Error(runtimeRecoveryMessage(runtime, t));
         }
-        setData(await loadDashboardData());
+        const projectResponse = await loadProjects();
+        const requestedProject = projectResponse.projects.find((project) => project.project_id === requestedProjectId);
+        const rememberedProject = projectResponse.projects.find((project) => project.project_id === selectedProjectId);
+        const activeProject = projectResponse.projects.find((project) => project.project_id === projectResponse.active_project_id);
+        const nextProject = requestedProject || rememberedProject || activeProject || projectResponse.projects[0];
+        if (!nextProject) throw new Error(t("project.noneAvailable"));
+        if (nextProject.project_id !== selectedProjectId) setData(null);
+        setProjects(projectResponse.projects);
+        setSelectedProjectId(nextProject.project_id);
+        const dashboard = await loadDashboardData(nextProject.project_id);
+        setData({ ...dashboard, projectId: nextProject.project_id, projectRevision: nextProject.revision });
       } catch (err) {
         setError(err instanceof Error ? err.message : t("message.apiUnavailable", { error: "" }));
       } finally {
@@ -243,6 +270,93 @@ export function App() {
     }
   }
 
+  async function switchProject(projectId: string) {
+    if (!projectId || projectId === selectedProjectId) return;
+    if (data?.recording.active) {
+      setActionMessage(t("project.recordingLocked"));
+      return;
+    }
+    setWorking(true);
+    setError("");
+    setActionMessage("");
+    try {
+      await selectProject(projectId);
+      await refresh(false, projectId);
+      setActionMessage(t("project.switched"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("message.actionFailed"));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function createAndSelectProject(displayName: string) {
+    setWorking(true);
+    setError("");
+    setActionMessage("");
+    try {
+      const result = await createProject(displayName);
+      const project = result.project;
+      if (!project) throw new Error(t("project.createFailed"));
+      await selectProject(project.project_id);
+      await refresh(false, project.project_id);
+      setActionMessage(t("project.created"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("message.actionFailed"));
+      throw err;
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function renameCurrentProject(displayName: string) {
+    const project = selectedProject;
+    if (!project) return;
+    setWorking(true);
+    setError("");
+    setActionMessage("");
+    try {
+      await renameProject(project.project_id, displayName, project.revision);
+      await refresh();
+      setActionMessage(t("project.renamed"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("message.actionFailed"));
+      throw err;
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function deleteCurrentProject() {
+    const project = selectedProject;
+    if (!project) return;
+    if (data?.recording.active) {
+      setActionMessage(t("project.recordingLocked"));
+      return;
+    }
+    if (project.event_count > 0) {
+      setActionMessage(t("project.deleteOnlyEmpty"));
+      return;
+    }
+    setWorking(true);
+    setError("");
+    setActionMessage("");
+    try {
+      const result = await deleteProject(project.project_id, project.revision);
+      const nextProjectId = result.active_project_id || result.projects[0]?.project_id || "";
+      setData(null);
+      setProjects(result.projects);
+      setSelectedProjectId(nextProjectId);
+      await refresh(false, nextProjectId);
+      setActionMessage(t("project.deleted"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("message.actionFailed"));
+      throw err;
+    } finally {
+      setWorking(false);
+    }
+  }
+
   useEffect(() => {
     void refresh();
   }, []);
@@ -261,9 +375,10 @@ export function App() {
   }, [data?.recording.active, t]);
 
   useEffect(() => {
-    if (!data?.recording.active) return;
+    if (!data?.recording.active || !selectedProject) return;
+    const projectScope: ProjectScope = { projectId: selectedProject.project_id };
     const refreshRecordingStatus = () => {
-      void Promise.all([getNativeRuntimeStatus(), getRecordingStatus()])
+      void Promise.all([getNativeRuntimeStatus(), getRecordingStatus(projectScope)])
         .then(([runtime, recording]) => {
           setRuntimeStatus(runtime);
           if (runtime && runtime.state !== "ready") {
@@ -276,7 +391,7 @@ export function App() {
     };
     const timer = window.setInterval(refreshRecordingStatus, 2000);
     return () => window.clearInterval(timer);
-  }, [data?.recording.active, t]);
+  }, [data?.recording.active, selectedProject?.project_id, t]);
 
   async function runAction(task: () => Promise<string>) {
     setWorking(true);
@@ -298,7 +413,7 @@ export function App() {
     setWorking(true);
     setError("");
     try {
-      const page = await loadEventPage(data.events.length);
+      const page = await loadEventPage(data.events.length, 500, currentProjectScope());
       setData((current) => {
         if (!current) return current;
         const known = new Set(current.events.map((event) => event.event_id));
@@ -323,7 +438,7 @@ export function App() {
       setError("");
       setActionMessage("");
       try {
-        return await previewImport(format, path, mapping, dateFormat, timezone);
+        return await previewImport(format, path, currentProjectScope(), mapping, dateFormat, timezone);
       } catch (err) {
         setError(err instanceof Error ? err.message : t("message.previewFailed"));
         throw err;
@@ -333,7 +448,7 @@ export function App() {
     },
     importEvents: (format, path, mapping, dateFormat, timezone) =>
       runAction(async () => {
-        const result = await importEvents(format, path, mapping, dateFormat, timezone);
+        const result = await importEvents(format, path, currentProjectScope(), mapping, dateFormat, timezone);
         return t("message.imported", { count: result.imported_events, source: result.source || format });
       }),
     previewActivityWatch: async (enabled) => {
@@ -341,7 +456,7 @@ export function App() {
       setError("");
       setActionMessage("");
       try {
-        return await previewActivityWatchLocal(enabled);
+        return await previewActivityWatchLocal(enabled, currentProjectScope());
       } catch (err) {
         setError(err instanceof Error ? err.message : t("message.previewFailed"));
         throw err;
@@ -351,7 +466,7 @@ export function App() {
     },
     importActivityWatch: (enabled, mode) =>
       runAction(async () => {
-        const result = await importActivityWatchLocal(enabled, mode);
+        const result = await importActivityWatchLocal(enabled, mode, currentProjectScope());
         return t("message.activityImported", { count: result.imported_events, skipped: result.skipped_duplicates || 0 });
       }),
     previewExport: async (format) => {
@@ -359,7 +474,7 @@ export function App() {
       setError("");
       setActionMessage("");
       try {
-        return await previewExport(format);
+        return await previewExport(format, currentProjectScope());
       } catch (err) {
         setError(err instanceof Error ? err.message : t("message.exportPreviewFailed"));
         throw err;
@@ -373,10 +488,10 @@ export function App() {
           return t("message.exportCancelled");
         }
         if (isManagedDesktop()) {
-          const result = await saveExport(format, "");
+          const result = await saveExport(format, "", currentProjectScope());
           return t("message.savedExport", { format: result.format, path: result.filename });
         }
-        const filename = downloadExport(format, await exportArtifact(format));
+        const filename = downloadExport(format, await exportArtifact(format, currentProjectScope()));
         return t("message.downloaded", { filename });
       }),
     saveExport: (format, path) =>
@@ -384,47 +499,47 @@ export function App() {
         if (!window.confirm(t("message.exportReview"))) {
           return t("message.exportCancelled");
         }
-        const result = await saveExport(format, path);
+        const result = await saveExport(format, path, currentProjectScope());
         return t("message.savedExport", { format: result.format, path: result.filename });
       }),
     saveSettings: (settings) =>
       runAction(async () => {
-        await saveSettings(settings);
+        await saveSettings(settings, currentProjectScope());
         return t("message.settingsSaved");
       }),
     saveAutomationReview: (activity, status, note = "") =>
       runAction(async () => {
-        const result = await saveAutomationReview(activity, status, note);
+        const result = await saveAutomationReview(activity, status, note, currentProjectScope());
         return t("message.reviewSaved", { activity: result.activity });
       }),
     updateEventActivity: (eventId, activity) =>
       runAction(async () => {
-        await updateEventActivity(eventId, activity);
+        await updateEventActivity(eventId, activity, currentProjectScope());
         return t("message.timelineActivityUpdated");
       }),
     updateEventCaseCorrelation: (eventId, caseId, reason) =>
       runAction(async () => {
-        await updateEventCaseCorrelation(eventId, caseId, reason);
+        await updateEventCaseCorrelation(eventId, caseId, reason, currentProjectScope());
         return t("message.caseCorrelationUpdated");
       }),
     excludeEvent: (eventId) =>
       runAction(async () => {
-        await excludeEvent(eventId);
+        await excludeEvent(eventId, currentProjectScope());
         return t("message.timelineEventExcluded");
       }),
     approveEventQuality: (eventId) =>
       runAction(async () => {
-        await approveEventQuality(eventId);
+        await approveEventQuality(eventId, currentProjectScope());
         return t("message.qualityApproved");
       }),
     splitEvent: (eventId, splitAfterSeconds, firstActivity = "", secondActivity = "") =>
       runAction(async () => {
-        await splitEvent(eventId, splitAfterSeconds, firstActivity, secondActivity);
+        await splitEvent(eventId, splitAfterSeconds, firstActivity, secondActivity, currentProjectScope());
         return t("message.timelineEventSplit");
       }),
     mergeEvents: (firstEventId, secondEventId, activity = "") =>
       runAction(async () => {
-        await mergeEvents(firstEventId, secondEventId, activity);
+        await mergeEvents(firstEventId, secondEventId, activity, currentProjectScope());
         return t("message.timelineEventsMerged");
       }),
     runDiagnosticChecks: async () => {
@@ -432,7 +547,7 @@ export function App() {
       setError("");
       setActionMessage("");
       try {
-        const result = await runDiagnosticChecks();
+        const result = await runDiagnosticChecks(currentProjectScope());
         setActionMessage(t("message.diagnosticsFinished"));
         return result;
       } catch (err) {
@@ -444,28 +559,35 @@ export function App() {
     },
     deleteData: () =>
       runAction(async () => {
-        await deleteLocalData();
+        await deleteLocalData(currentProjectScope());
         return t("message.dataDeleted");
       }),
     startRecording: (caseId, activityLabel, clearSample) =>
       runAction(async () => {
-        if (clearSample) await deleteLocalData();
-        await startRecording(caseId, activityLabel);
+        let projectScope = currentProjectScope();
+        if (clearSample) {
+          await deleteLocalData(projectScope);
+          const projectsAfterClear = await loadProjects();
+          const refreshedProject = projectsAfterClear.projects.find((project) => project.project_id === projectScope.projectId);
+          if (!refreshedProject) throw new Error(t("project.selectionRequired"));
+          projectScope = { projectId: refreshedProject.project_id, expectedRevision: refreshedProject.revision };
+        }
+        await startRecording(caseId, activityLabel, projectScope);
         return t("message.recordingStarted");
       }),
     stopRecording: () =>
       runAction(async () => {
-        const result = await stopRecording();
+        const result = await stopRecording(currentProjectScope());
         return t("message.recordingStopped", { count: result.recorded_events });
       }),
     pauseRecording: (reason) =>
       runAction(async () => {
-        await pauseRecording(reason);
+        await pauseRecording(reason, currentProjectScope());
         return t("message.recordingPaused");
       }),
     resumeRecording: () =>
       runAction(async () => {
-        await resumeRecording();
+        await resumeRecording(currentProjectScope());
         return t("message.recordingResumed");
       })
   };
@@ -492,6 +614,16 @@ export function App() {
               English
             </button>
           </div>
+          <ProjectSwitcher
+            projects={projects}
+            selectedProject={selectedProject}
+            recordingActive={Boolean(data?.recording.active)}
+            disabled={working || loading}
+            onSelect={switchProject}
+            onCreate={createAndSelectProject}
+            onRename={renameCurrentProject}
+            onDelete={deleteCurrentProject}
+          />
           <StatusPill label={t("status.network")} value={data?.health.local_only ? t("status.localOnly") : t("status.checking")} tone="good" />
           <StatusPill label={t("status.llm")} value={data?.health.llm_supported ? t("status.enabled") : t("status.notSupported")} tone="neutral" />
           <button className="refresh-button" title={t("action.refreshHelp")} onClick={() => void refresh()} disabled={loading}>
@@ -544,6 +676,148 @@ export function App() {
 
       {data ? <View tab={activeTab} data={data} actions={actions} working={working || loading} onStart={openCollection} onNavigate={setActiveTab} /> : null}
     </main>
+  );
+}
+
+function ProjectSwitcher({
+  projects,
+  selectedProject,
+  recordingActive,
+  disabled,
+  onSelect,
+  onCreate,
+  onRename,
+  onDelete
+}: {
+  projects: Project[];
+  selectedProject: Project | null;
+  recordingActive: boolean;
+  disabled: boolean;
+  onSelect: (projectId: string) => Promise<void>;
+  onCreate: (displayName: string) => Promise<void>;
+  onRename: (displayName: string) => Promise<void>;
+  onDelete: () => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [editor, setEditor] = useState<"create" | "rename" | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const selectRef = useRef<HTMLSelectElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const projectActionsLocked = disabled || recordingActive;
+
+  useEffect(() => {
+    if (!editor) return;
+    inputRef.current?.focus();
+  }, [editor]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const element = event.target as HTMLElement | null;
+      const editingText = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement;
+      if (event.key === "Escape" && editor) {
+        event.preventDefault();
+        setEditor(null);
+        return;
+      }
+      if (editingText || projectActionsLocked) return;
+      if (event.altKey && event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        selectRef.current?.focus();
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setDraftName("");
+        setEditor("create");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [editor, projectActionsLocked]);
+
+  const openEditor = (nextEditor: "create" | "rename") => {
+    if (projectActionsLocked) return;
+    setDraftName(nextEditor === "rename" ? selectedProject?.display_name || "" : "");
+    setEditor(nextEditor);
+  };
+
+  const submit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const displayName = draftName.trim();
+    if (!displayName) return;
+    const task = editor === "rename" ? onRename(displayName) : onCreate(displayName);
+    void task.then(() => {
+      setDraftName("");
+      setEditor(null);
+    }).catch(() => undefined);
+  };
+
+  const projectOptionLabel = (project: Project) => {
+    const count = t("project.eventCount", { count: project.event_count });
+    return project.origin === "legacy_migration" ? `${project.display_name} · ${t("project.legacy")} · ${count}` : `${project.display_name} · ${count}`;
+  };
+
+  return (
+    <section className="project-switcher" aria-label={t("project.title")}>
+      <div className="project-switcher-heading">
+        <span>{t("project.current")}</span>
+        <b>{selectedProject?.display_name || t("project.loading")}</b>
+      </div>
+      <div className="project-switcher-controls">
+        <select
+          ref={selectRef}
+          value={selectedProject?.project_id || ""}
+          onChange={(event) => void onSelect(event.target.value)}
+          disabled={disabled || recordingActive || projects.length === 0}
+          aria-label={t("project.select")}
+          aria-keyshortcuts="Alt+P"
+        >
+          {projects.length === 0 ? <option value="">{t("project.loading")}</option> : null}
+          {projects.map((project) => (
+            <option key={project.project_id} value={project.project_id}>
+              {projectOptionLabel(project)}
+            </option>
+          ))}
+        </select>
+        <button type="button" onClick={() => openEditor("create")} disabled={projectActionsLocked} aria-keyshortcuts="Meta+Shift+N Control+Shift+N">
+          {t("project.create")}
+        </button>
+        <button type="button" onClick={() => openEditor("rename")} disabled={projectActionsLocked || !selectedProject}>
+          {t("project.rename")}
+        </button>
+        <button
+          type="button"
+          className="project-delete-button"
+          onClick={() => {
+            if (window.confirm(t("confirm.deleteProject", { name: selectedProject?.display_name || "" }))) void onDelete().catch(() => undefined);
+          }}
+          disabled={projectActionsLocked || !selectedProject || selectedProject.event_count > 0}
+          title={selectedProject && selectedProject.event_count > 0 ? t("project.deleteOnlyEmpty") : undefined}
+        >
+          {t("project.delete")}
+        </button>
+      </div>
+      {editor ? (
+        <form className="project-editor" onSubmit={submit}>
+          <label>
+            <span>{editor === "create" ? t("project.createName") : t("project.renameName")}</span>
+            <input
+              ref={inputRef}
+              value={draftName}
+              onChange={(event) => setDraftName(event.target.value)}
+              placeholder={t("project.namePlaceholder")}
+              disabled={disabled}
+              maxLength={120}
+            />
+          </label>
+          <button type="submit" disabled={disabled || !draftName.trim()}>{editor === "create" ? t("project.create") : t("project.rename")}</button>
+          <button type="button" onClick={() => setEditor(null)} disabled={disabled}>{t("action.cancel")}</button>
+        </form>
+      ) : null}
+      <p className={recordingActive ? "project-switcher-help is-locked" : "project-switcher-help"}>
+        {recordingActive ? t("project.recordingLocked") : t("project.keyboardHelp")}
+      </p>
+    </section>
   );
 }
 

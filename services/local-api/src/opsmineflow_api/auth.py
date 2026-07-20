@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 API_SESSION_HEADER = "X-OpsMineFlow-Api-Session"
 DELETE_CHALLENGE_HEADER = "X-OpsMineFlow-Delete-Challenge"
+PROJECT_HEADER = "X-OpsMineFlow-Project"
 RUNTIME_PROBE_CHALLENGE_HEADER = "X-OpsMineFlow-Runtime-Probe-Challenge"
 MAX_REQUEST_BODY_BYTES = 1_048_576
 DELETE_CHALLENGE_TTL_SECONDS = 60
@@ -24,6 +25,7 @@ RECORDING_AGENT_ROUTES = {
 }
 PROTECTED_ROUTES = {
     ("GET", "/diagnostics"),
+    ("GET", "/projects"),
     ("GET", "/settings"),
     ("GET", "/import/history"),
     ("GET", "/recording/status"),
@@ -35,6 +37,10 @@ PROTECTED_ROUTES = {
     ("GET", "/analytics/process-map"),
     ("GET", "/reports/markdown"),
     ("POST", "/diagnostics/checks"),
+    ("POST", "/projects"),
+    ("POST", "/projects/select"),
+    ("POST", "/projects/rename"),
+    ("POST", "/projects/delete"),
     ("POST", "/recording/start"),
     ("POST", "/recording/stop"),
     ("POST", "/recording/pause"),
@@ -74,6 +80,7 @@ SINGLE_VALUE_HEADERS = (
     "Content-Type",
     API_SESSION_HEADER,
     DELETE_CHALLENGE_HEADER,
+    PROJECT_HEADER,
     RUNTIME_PROBE_CHALLENGE_HEADER,
     "Access-Control-Request-Method",
     "Access-Control-Request-Headers",
@@ -169,7 +176,9 @@ class LocalApiPolicy:
             for value in headers.get("Access-Control-Request-Headers", "").split(",")
             if value.strip()
         }
-        if not requested_headers.issubset({"content-type", DELETE_CHALLENGE_HEADER.lower()}):
+        if not requested_headers.issubset(
+            {"content-type", DELETE_CHALLENGE_HEADER.lower(), PROJECT_HEADER.lower()}
+        ):
             raise RequestRejected(400, "local API header is not allowed")
 
     def _authorize_metadata(
