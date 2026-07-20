@@ -891,6 +891,17 @@ function HomeView({
           <Setting label={t("diagnostics.api")} value={`${localizeStatus(data.diagnostics.api.status, t)} ${data.diagnostics.api.bind}:${data.diagnostics.api.port}`} />
           <Setting label={t("diagnostics.webui")} value={`${localizeStatus(data.diagnostics.webui.status, t)} ${data.diagnostics.webui.expected_url}`} />
           <Setting label={t("diagnostics.storage")} value={`${data.diagnostics.storage.storage_mode} ${data.diagnostics.storage.storage_path || ""}`} />
+          <Setting
+            label={t("diagnostics.schema")}
+            value={`${data.diagnostics.storage.schema_version}/${data.diagnostics.storage.schema_target_version} / ${localizeStatus(data.diagnostics.storage.migration_status, t)}`}
+          />
+          <Setting label={t("diagnostics.integrity")} value={localizeStatus(data.diagnostics.storage.integrity_status, t)} />
+          <Setting label={t("diagnostics.wal")} value={localizeStatus(data.diagnostics.storage.wal_status, t)} />
+          <Setting
+            label={t("diagnostics.migrationBackup")}
+            value={data.diagnostics.storage.migration_backup_created ? t("status.created") : t("status.notCreated")}
+          />
+          <Setting label={t("diagnostics.backupCleanup")} value={localizeStatus(data.diagnostics.storage.backup_cleanup_status, t)} />
           <Setting label={t("diagnostics.events")} value={data.diagnostics.storage.event_count.toString()} />
           <Setting label={t("diagnostics.reviews")} value={data.diagnostics.storage.automation_review_count.toString()} />
           <Setting
@@ -2296,6 +2307,10 @@ function localizeStatus(status: string, t: Translate): string {
     ok: "status.ready",
     ready: "status.ready",
     passed: "status.passed",
+    current: "status.current",
+    migrated: "status.migrated",
+    warning: "status.warning",
+    not_applicable: "status.notApplicable",
     available: "status.available",
     free: "status.available",
     enabled: "status.enabled",

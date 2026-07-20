@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Callable
 from dataclasses import replace
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,8 @@ from pathlib import Path
 from opsmineflow_mining import load_events_from_csv
 from opsmineflow_mining.models import StandardEvent
 from opsmineflow_mining.privacy import extract_domain, looks_confidential, mask_url, mask_window_title
+
+from .migrations import CURRENT_SCHEMA_VERSION, MigrationReport, delete_migration_backups, migrate_database
 
 
 DEFAULT_SETTINGS: dict[str, object] = {
@@ -44,13 +47,19 @@ class EventStore:
     automation_reviews: dict[str, str] = field(default_factory=dict)
     automation_review_notes: dict[str, str] = field(default_factory=dict)
     db_path: Path | None = None
+    migration_fault_injector: Callable[[int], None] | None = field(default=None, repr=False, compare=False)
+    _migration_report: MigrationReport | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.db_path is None:
             return
         self.db_path = Path(self.db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.db_path.parent, 0o700)
+        self._migration_report = migrate_database(
+            self.db_path,
+            fault_injector=self.migration_fault_injector,
+        )
         if self.events:
             self.replace(self.events)
         else:
@@ -246,6 +255,7 @@ class EventStore:
             conn.execute("DELETE FROM automation_reviews")
             conn.execute("DELETE FROM import_history")
             conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)", ("initialized", "true"))
+        delete_migration_backups(self.db_path)
         self.import_history = []
         self.metadata["initialized"] = "true"
 
@@ -368,6 +378,7 @@ class EventStore:
         self.metadata["initialized"] = "true"
 
     def diagnostics(self) -> dict[str, object]:
+        migration = self._migration_report
         return {
             "storage_mode": "sqlite" if self.db_path else "memory",
             "storage_path": str(self.db_path) if self.db_path else "",
@@ -375,71 +386,22 @@ class EventStore:
             "manual_label_count": len(self.manual_labels),
             "import_history_count": len(self.import_history),
             "automation_review_count": len(self.automation_reviews),
+            "schema_version": migration.schema_version if migration else 0,
+            "schema_target_version": CURRENT_SCHEMA_VERSION if self.db_path else 0,
+            "migration_status": migration.status if migration else "not_applicable",
+            "migration_backup_created": bool(migration and migration.backup_name),
+            "integrity_status": migration.integrity_status if migration else "not_applicable",
+            "wal_status": migration.wal_status if migration else "not_applicable",
+            "backup_cleanup_status": migration.backup_cleanup_status if migration else "not_applicable",
         }
 
     def _connect(self) -> sqlite3.Connection:
         if self.db_path is None:
             raise RuntimeError("Persistent storage is not configured.")
-        return sqlite3.connect(self.db_path)
-
-    def _init_db(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS events (
-                    event_id TEXT PRIMARY KEY,
-                    payload_json TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS manual_labels (
-                    event_id TEXT PRIMARY KEY,
-                    label TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value_json TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS import_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source TEXT NOT NULL,
-                    path TEXT NOT NULL,
-                    event_count INTEGER NOT NULL,
-                    imported_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS automation_reviews (
-                    activity TEXT PRIMARY KEY,
-                    status TEXT NOT NULL,
-                    note TEXT NOT NULL DEFAULT '',
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(automation_reviews)").fetchall()}
-            if "note" not in columns:
-                conn.execute("ALTER TABLE automation_reviews ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+        connection = sqlite3.connect(self.db_path, timeout=5)
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
 
     def _load(self) -> None:
         with self._connect() as conn:

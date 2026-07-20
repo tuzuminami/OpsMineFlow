@@ -102,6 +102,12 @@ The default SQLite database is stored under the user's macOS application data di
 
 Exports are written only to the local path chosen by the user.
 
+### Database Upgrades and Recovery
+
+At startup, OpsMineFlow checks the local SQLite schema before loading records. When an upgrade is needed, it creates a private pre-upgrade snapshot under the local data directory's `backups/` folder and runs the ordered migration transaction. The three newest migration snapshots are retained. Diagnostics reports the schema version, migration status, integrity status, and whether a backup was created; it never exposes the backup path in the UI.
+
+If startup reports that the database is from a newer app version, unknown, or failed to migrate, stop using that database. Do not delete or overwrite it. Preserve the database and its `backups/` folder, then open the snapshot only with a compatible OpsMineFlow build or follow the support/recovery procedure documented for that release. **Delete Data** removes both active analysis records and migration snapshots, but it cannot erase operating-system or Time Machine backups.
+
 ## Problem Resolution
 
 Use [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for startup, port, dependency, recording, import, ActivityWatch, export, and packaging problems.
@@ -116,6 +122,8 @@ Run all checks:
 ./scripts/check_licenses.sh
 ./scripts/check_no_external_network.sh
 ```
+
+`./scripts/lint.sh` runs `./scripts/check_migrations.sh`. The migration registry check rejects gaps and checksum changes to applied migrations, so schema changes must be introduced as a new migration.
 
 Start development servers:
 
