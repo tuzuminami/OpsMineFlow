@@ -8,8 +8,7 @@ import sqlite3
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import replace
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
@@ -46,6 +45,7 @@ DEFAULT_SETTINGS: dict[str, object] = {
 MAX_CACHED_PROJECT_VIEWS = 2
 
 AUTOMATION_REVIEW_STATUSES = {"unreviewed", "adopted", "on_hold", "rejected"}
+_STANDARD_EVENT_FIELD_NAMES = tuple(field.name for field in fields(StandardEvent))
 
 
 class StorageCommitError(RuntimeError):
@@ -1292,13 +1292,25 @@ def _minimize_events(
     minimized: list[StandardEvent] = []
     for event in events:
         payload = redact_event_payload(
-            event.to_dict(),
+            _declared_event_payload(event),
             pseudonym_key=pseudonym_key,
             project_id=project_id,
             trusted_references=trusted_references,
         )
         minimized.append(StandardEvent(**payload))
     return minimized
+
+
+def _declared_event_payload(event: StandardEvent) -> dict[str, object]:
+    """Copy only declared event fields for the v4 persistence boundary.
+
+    StandardEvent currently contains scalar values. Avoiding ``asdict()`` here
+    removes a recursive deep-copy from large imports while preserving the
+    exact field set consumed by ``redact_event_payload``. Dynamic/transient
+    attributes are deliberately excluded before the privacy boundary runs.
+    """
+
+    return {field_name: getattr(event, field_name) for field_name in _STANDARD_EVENT_FIELD_NAMES}
 
 
 def _event_references(events: list[StandardEvent] | tuple[StandardEvent, ...]) -> frozenset[str]:
@@ -1565,10 +1577,22 @@ def _uniquify_event_ids(
     storage time.
     """
 
+    # Imports normally arrive with already-pseudonymized, unique IDs.  Avoid
+    # building collision groups and serializing every full event merely to
+    # prove that common case.  The fallback preserves the canonical ordering
+    # and deterministic collision handling when an ID is repeated or reserved.
+    used = set(reserved_ids or set())
+    unique_ids: set[str] = set()
+    for event in events:
+        if event.event_id in used or event.event_id in unique_ids:
+            break
+        unique_ids.add(event.event_id)
+    else:
+        return sorted(events, key=event_sort_key)
+
     grouped: dict[str, list[StandardEvent]] = {}
     for event in events:
         grouped.setdefault(event.event_id, []).append(event)
-    used = set(reserved_ids or set())
     result: list[StandardEvent] = []
     for original_id in sorted(grouped):
         group = sorted(grouped[original_id], key=_event_identity_sort_key)

@@ -37,12 +37,51 @@ from opsmineflow_api.auth import LocalApiPolicy
 from opsmineflow_api.llm_handoff import public_json_schemas, validate_handoff_json
 from opsmineflow_api.recording import RecordingManager, _recording_agent_environment, native_event_from_payload
 from opsmineflow_api.server import LocalApiHandler
-from opsmineflow_api.storage import EventStore, StorageCommitError
+from opsmineflow_api.storage import (
+    EventStore,
+    StorageCommitError,
+    _declared_event_payload,
+    _event_identity_sort_key,
+    _uniquify_event_ids,
+)
 from opsmineflow_mining import load_events_from_csv, load_events_from_json
-from opsmineflow_mining.analysis import prepare_analysis
+from opsmineflow_mining.analysis import event_sort_key, prepare_analysis
 
 
 class ApiLogicTests(unittest.TestCase):
+    def test_minimization_payload_uses_only_declared_event_fields(self) -> None:
+        fixture = load_events_from_csv("data/sample/sample_events.csv")[0]
+        expected = fixture.to_dict()
+        object.__setattr__(fixture, "transient_secret", "must-not-reach-persistence")
+
+        self.assertEqual(_declared_event_payload(fixture), expected)
+
+    def test_unique_event_ids_skip_collision_canonicalization(self) -> None:
+        events = list(reversed(load_events_from_csv("data/sample/sample_events.csv")[:3]))
+
+        with patch(
+            "opsmineflow_api.storage._event_identity_sort_key",
+            side_effect=AssertionError("unique imports do not need collision canonicalization"),
+        ):
+            actual = _uniquify_event_ids(events)
+
+        self.assertEqual(actual, sorted(events, key=event_sort_key))
+
+    def test_reserved_or_duplicate_event_ids_use_collision_canonicalization(self) -> None:
+        event = load_events_from_csv("data/sample/sample_events.csv")[0]
+        duplicate = replace(event, created_at="2026-07-20T00:00:00+00:00")
+
+        for events, reserved_ids in (([event], {event.event_id}), ([event, duplicate], set())):
+            with self.subTest(reserved_ids=reserved_ids, event_count=len(events)):
+                with patch(
+                    "opsmineflow_api.storage._event_identity_sort_key",
+                    wraps=_event_identity_sort_key,
+                ) as collision_sort_key:
+                    actual = _uniquify_event_ids(events, reserved_ids=reserved_ids)
+
+                self.assertEqual(len({item.event_id for item in actual}), len(events))
+                self.assertGreaterEqual(collision_sort_key.call_count, len(events))
+
     def test_every_storage_mutation_keeps_memory_database_and_analysis_at_the_old_snapshot_on_commit_failure(self) -> None:
         source_events = load_events_from_csv("data/sample/sample_events.csv")
 
@@ -962,6 +1001,7 @@ class ApiLogicTests(unittest.TestCase):
             metadata_json=json.dumps({"memo": "PRIVATE_METADATA_VALUE"}),
             confidential_flag=False,
         )
+        object.__setattr__(raw_event, "transient_secret", "PRIVATE_TRANSIENT_SECRET")
         sentinels = (
             "PRIVATE_CASE_IDENTIFIER",
             "PRIVATE_EVENT_IDENTIFIER",
@@ -980,6 +1020,7 @@ class ApiLogicTests(unittest.TestCase):
             "PRIVATE_IMPORT_FILENAME",
             "PRIVATE_CORRECTION_REASON",
             "PRIVATE_CORRECTED_CASE",
+            "PRIVATE_TRANSIENT_SECRET",
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:
