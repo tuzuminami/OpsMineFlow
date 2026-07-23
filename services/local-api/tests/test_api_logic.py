@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import hashlib
 from io import BytesIO
 import json
 import sqlite3
@@ -42,6 +43,8 @@ from opsmineflow_api.storage import (
     StorageCommitError,
     _declared_event_payload,
     _event_identity_sort_key,
+    _canonical_event_fingerprint,
+    _minimize_events,
     _uniquify_event_ids,
 )
 from opsmineflow_mining import load_events_from_csv, load_events_from_json
@@ -81,6 +84,34 @@ class ApiLogicTests(unittest.TestCase):
 
                 self.assertEqual(len({item.event_id for item in actual}), len(events))
                 self.assertGreaterEqual(collision_sort_key.call_count, len(events))
+
+    def test_import_fingerprint_preserves_legacy_payload_and_excludes_dynamic_attributes(self) -> None:
+        fixture = load_events_from_csv("data/sample/sample_events.csv")[0]
+        legacy_payload = fixture.to_dict()
+        legacy_payload.pop("created_at")
+        legacy_payload.pop("event_id")
+        expected = hashlib.sha256(
+            json.dumps(legacy_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+        self.assertEqual(_canonical_event_fingerprint(fixture), expected)
+        object.__setattr__(fixture, "transient_secret", "must-not-affect-import-deduplication")
+        self.assertEqual(_canonical_event_fingerprint(fixture), expected)
+
+    def test_unique_replacement_minimizes_once_but_duplicate_ids_are_reminimized(self) -> None:
+        event = load_events_from_csv("data/sample/sample_events.csv")[0]
+        duplicate = replace(event, created_at="2026-07-20T00:00:00+00:00")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = EventStore(db_path=Path(temp_dir) / "opsmineflow.sqlite3")
+            with patch("opsmineflow_api.storage._minimize_events", wraps=_minimize_events) as minimize:
+                store.replace([event])
+            self.assertEqual(minimize.call_count, 1)
+
+            with patch("opsmineflow_api.storage._minimize_events", wraps=_minimize_events) as minimize:
+                store.replace([event, duplicate])
+            self.assertEqual(minimize.call_count, 2)
+            self.assertTrue(all(item.event_id.startswith("evt_v1_") for item in store.events))
 
     def test_every_storage_mutation_keeps_memory_database_and_analysis_at_the_old_snapshot_on_commit_failure(self) -> None:
         source_events = load_events_from_csv("data/sample/sample_events.csv")

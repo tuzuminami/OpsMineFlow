@@ -46,6 +46,9 @@ MAX_CACHED_PROJECT_VIEWS = 2
 
 AUTOMATION_REVIEW_STATUSES = {"unreviewed", "adopted", "on_hold", "rejected"}
 _STANDARD_EVENT_FIELD_NAMES = tuple(field.name for field in fields(StandardEvent))
+_IMPORT_FINGERPRINT_FIELD_NAMES = tuple(
+    field_name for field_name in _STANDARD_EVENT_FIELD_NAMES if field_name not in {"created_at", "event_id"}
+)
 
 
 class StorageCommitError(RuntimeError):
@@ -465,6 +468,7 @@ class EventStore:
         current: StoreSnapshot,
         *,
         events: list[StandardEvent] | tuple[StandardEvent, ...] | None = None,
+        events_are_privacy_minimized: bool = False,
         trusted_references: frozenset[str] = frozenset(),
         manual_labels: dict[str, str] | None = None,
         settings: dict[str, object] | None = None,
@@ -473,17 +477,21 @@ class EventStore:
         automation_reviews: dict[str, str] | None = None,
         automation_review_notes: dict[str, str] | None = None,
     ) -> StoreSnapshot:
-        candidate_events = tuple(
-            sorted(
-                _minimize_events(
-                    list(current.events if events is None else events),
-                    pseudonym_key=self._pseudonym_key,
-                    project_id=self.project_id,
-                    trusted_references=_event_references(current.events) | trusted_references,
-                ),
-                key=event_sort_key,
+        event_list = list(current.events if events is None else events)
+        if events_are_privacy_minimized:
+            candidate_events = tuple(sorted(event_list, key=event_sort_key))
+        else:
+            candidate_events = tuple(
+                sorted(
+                    _minimize_events(
+                        event_list,
+                        pseudonym_key=self._pseudonym_key,
+                        project_id=self.project_id,
+                        trusted_references=_event_references(current.events) | trusted_references,
+                    ),
+                    key=event_sort_key,
+                )
             )
-        )
         candidate_labels = {
             self._event_reference(event_id): label
             for event_id, label in (current.manual_labels if manual_labels is None else manual_labels).items()
@@ -621,7 +629,7 @@ class EventStore:
         connection.executemany(
             "INSERT INTO events(project_id, event_id, payload_json) VALUES(?, ?, ?)",
             [
-                (project_id, event.event_id, json.dumps(event.to_dict(), ensure_ascii=False))
+                (project_id, event.event_id, json.dumps(_declared_event_payload(event), ensure_ascii=False))
                 for event in candidate.events
             ],
         )
@@ -733,6 +741,7 @@ class EventStore:
                 self._candidate(
                     current,
                     events=candidate_events,
+                    events_are_privacy_minimized=_events_are_privacy_minimized(candidate_events),
                     trusted_references=_event_references(candidate_events),
                     manual_labels={},
                     metadata=metadata,
@@ -777,10 +786,12 @@ class EventStore:
             if import_source:
                 metadata["last_import_fingerprint"] = import_key
                 history.append(_import_history_item(import_source, import_path, len(new_events)))
+            candidate_events = [*current.events, *new_events]
             self._commit_candidate(
                 self._candidate(
                     current,
-                    events=[*current.events, *new_events],
+                    events=candidate_events,
+                    events_are_privacy_minimized=_events_are_privacy_minimized(candidate_events),
                     trusted_references=_event_references(new_events),
                     metadata=metadata,
                     import_history=history,
@@ -1326,6 +1337,23 @@ def _event_references(events: list[StandardEvent] | tuple[StandardEvent, ...]) -
     return frozenset(references)
 
 
+def _events_are_privacy_minimized(events: list[StandardEvent] | tuple[StandardEvent, ...]) -> bool:
+    """Recognize the immediate safe-minimization path used by large imports.
+
+    ``_uniquify_event_ids`` may synthesize a non-v1 ID for a collision.  In
+    that case the caller must re-run the privacy boundary so the derived ID is
+    HMAC-pseudonymized before persistence.  Only fully opaque event, case,
+    and source references may skip that otherwise redundant pass.
+    """
+
+    return all(
+        is_opaque_reference(event.event_id, "evt")
+        and is_opaque_reference(event.case_id, "case")
+        and is_opaque_reference(event.source_event_id, "source")
+        for event in events
+    )
+
+
 def _copy_settings(settings: Mapping[str, object]) -> dict[str, object]:
     copied: dict[str, object] = {}
     for key, value in settings.items():
@@ -1405,9 +1433,10 @@ def _same_import_dataset(
 def _canonical_event_fingerprint(event: StandardEvent) -> str:
     """Hash imported source content, excluding local import bookkeeping."""
 
-    payload = event.to_dict()
-    payload.pop("created_at", None)
-    payload.pop("event_id", None)
+    payload = {
+        field_name: getattr(event, field_name)
+        for field_name in _IMPORT_FINGERPRINT_FIELD_NAMES
+    }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
