@@ -12,7 +12,7 @@ import hashlib
 import json
 import math
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timedelta, timezone
 from statistics import mean
 from typing import Iterable
@@ -24,6 +24,9 @@ ANALYSIS_ALGORITHM_VERSION = "1.0.0"
 DEFAULT_SESSION_GAP_MINUTES = 30
 _CASE_ORIGINS = {"observed", "manual", "inferred", "unassigned"}
 _CONFIDENCE_LEVELS = {"high", "medium", "low"}
+_EVENT_FINGERPRINT_FIELDS = tuple(
+    field.name for field in fields(StandardEvent) if field.name not in {"event_id", "created_at"}
+)
 
 
 @dataclass(frozen=True)
@@ -298,9 +301,13 @@ def _event_fingerprint(event: StandardEvent) -> str:
     # Event IDs and import timestamps are local bookkeeping, not source-event
     # content. They must not turn a re-imported identical source record into a
     # conflict.
-    payload_object = event.to_dict()
-    payload_object.pop("event_id", None)
-    payload_object.pop("created_at", None)
+    # ``to_dict()`` uses dataclasses.asdict(), which recursively deep-copies
+    # every scalar field. On a large local dataset that copy dominates summary
+    # preparation even though the serialized fingerprint payload is identical.
+    # Project only declared StandardEvent fields so a future transient/cache
+    # attribute cannot change the receipt, then take a shallow copy. Raw event
+    # data stays internal to analysis and is never a response or export DTO.
+    payload_object = {field_name: getattr(event, field_name) for field_name in _EVENT_FINGERPRINT_FIELDS}
     payload = json.dumps(payload_object, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

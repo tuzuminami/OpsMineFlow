@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import unittest
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from opsmineflow_mining import MiningConfig, StandardEvent, prepare_analysis, sessionize_events
+from opsmineflow_mining.analysis import _event_fingerprint
 from opsmineflow_mining.pipeline import analyze_variants, build_directly_follows_graph, calculate_duration_metrics
 
 
@@ -67,6 +69,19 @@ def event(
 
 
 class AnalysisPreparationTests(unittest.TestCase):
+    def test_event_fingerprint_preserves_the_legacy_canonical_payload(self) -> None:
+        fixture = event("evt-fingerprint", "A", "2026-01-01T00:00:00+00:00", "2026-01-01T00:01:00+00:00")
+        legacy_payload = fixture.to_dict()
+        legacy_payload.pop("event_id")
+        legacy_payload.pop("created_at")
+        expected = hashlib.sha256(
+            json.dumps(legacy_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+        self.assertEqual(_event_fingerprint(fixture), expected)
+        object.__setattr__(fixture, "transient_secret", "must-not-affect-analysis-receipts")
+        self.assertEqual(_event_fingerprint(fixture), expected)
+
     def test_session_gap_boundary_and_mixed_offsets_are_deterministic(self) -> None:
         events = [
             event("evt-a", "A", "2026-01-01T09:00:00+09:00", "2026-01-01T09:01:00+09:00"),
