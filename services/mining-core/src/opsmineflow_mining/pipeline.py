@@ -43,7 +43,6 @@ class DurationMetrics:
     period_end: str
     app_usage_seconds: dict[str, float]
     label_usage_seconds: dict[str, float]
-    user_usage_seconds: dict[str, float]
     average_event_duration_seconds: float
 
 
@@ -98,12 +97,10 @@ def calculate_duration_metrics(events: Iterable[StandardEvent] | PreparedAnalysi
     labels = assign_activity_labels(event_list)
     app_usage: dict[str, float] = defaultdict(float)
     label_usage: dict[str, float] = defaultdict(float)
-    user_usage: dict[str, float] = defaultdict(float)
     for event in event_list:
         duration = 0 if event.idle_flag else event.duration_seconds
         app_usage[event.app_name or "Unknown"] += duration
         label_usage[labels[event.event_id]] += duration
-        user_usage[event.user_hash] += duration
     durations = [event.duration_seconds for event in event_list]
     return DurationMetrics(
         total_events=len(event_list),
@@ -116,7 +113,6 @@ def calculate_duration_metrics(events: Iterable[StandardEvent] | PreparedAnalysi
         else "",
         app_usage_seconds=dict(sorted(app_usage.items(), key=lambda item: (-item[1], item[0]))),
         label_usage_seconds=dict(sorted(label_usage.items(), key=lambda item: (-item[1], item[0]))),
-        user_usage_seconds=dict(sorted(user_usage.items(), key=lambda item: (-item[1], item[0]))),
         average_event_duration_seconds=mean(durations) if durations else 0.0,
     )
 

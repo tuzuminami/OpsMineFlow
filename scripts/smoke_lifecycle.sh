@@ -104,9 +104,9 @@ assert diagnostics["runtime_policy"]["local_only"] is True
 assert diagnostics["privacy_evidence"]["status"] == "passed"
 assert all(item["status"] == "not_collected" for item in diagnostics["privacy_evidence"]["items"])
 assert diagnostics["recording"]["capture_scope"] == "frontmost_app_only"
-assert "token_ttl_seconds" in diagnostics["recording"]
+assert "token_ttl_seconds" not in diagnostics["recording"]
 assert diagnostics["recording"]["paused"] is False
-assert diagnostics["recording"]["pause_intervals"] == []
+assert "pause_intervals" not in diagnostics["recording"]
 
 with tempfile.TemporaryDirectory() as temp_dir:
     mapped_path = Path(temp_dir) / "mapped-client.csv"
@@ -171,7 +171,7 @@ assert len(request("/events")["events"]) == 6
 
 export_preview = request("/export/preview", {"format": "markdown"})
 assert export_preview["byte_size"] > 0
-assert "Review masked fields" in export_preview["warning"]
+assert "Review activity labels" in export_preview["warning"]
 
 delete_challenge = request("/data/delete/challenge", {})
 delete_result = request("/data/delete", {}, {"X-OpsMineFlow-Delete-Challenge": delete_challenge["challenge"]})

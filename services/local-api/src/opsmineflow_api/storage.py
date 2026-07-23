@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import replace
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
@@ -24,7 +24,11 @@ from .migrations import (
     CURRENT_SCHEMA_VERSION,
     LEGACY_PROJECT_ID,
     MigrationReport,
+    is_opaque_reference,
+    load_verified_pseudonym_key,
     migrate_database,
+    opaque_reference,
+    redact_event_payload,
 )
 
 
@@ -41,6 +45,10 @@ DEFAULT_SETTINGS: dict[str, object] = {
 MAX_CACHED_PROJECT_VIEWS = 2
 
 AUTOMATION_REVIEW_STATUSES = {"unreviewed", "adopted", "on_hold", "rejected"}
+_STANDARD_EVENT_FIELD_NAMES = tuple(field.name for field in fields(StandardEvent))
+_IMPORT_FINGERPRINT_FIELD_NAMES = tuple(
+    field_name for field_name in _STANDARD_EVENT_FIELD_NAMES if field_name not in {"created_at", "event_id"}
+)
 
 
 class StorageCommitError(RuntimeError):
@@ -153,6 +161,7 @@ class EventStore:
     mutation_fault_injector: Callable[[str], None] | None = field(default=None, repr=False, compare=False)
     _migration_ready: bool = field(default=False, repr=False, compare=False)
     _parent_migration_report: MigrationReport | None = field(default=None, repr=False, compare=False)
+    _parent_pseudonym_key: bytes | None = field(default=None, repr=False, compare=False)
     _migration_report: MigrationReport | None = field(default=None, init=False, repr=False)
     _analysis_cache: dict[object, object] = field(default_factory=dict, init=False, repr=False, compare=False)
     _analysis_lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
@@ -162,24 +171,35 @@ class EventStore:
     _generation: int = field(default=0, init=False, repr=False, compare=False)
     _project_revision: int = field(default=0, init=False, repr=False, compare=False)
     _writes_blocked: bool = field(default=False, init=False, repr=False, compare=False)
+    _pseudonym_key: bytes = field(default_factory=lambda: secrets.token_bytes(32), init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.project_id = _normalize_project_id(self.project_id or LEGACY_PROJECT_ID)
         if self.db_path is None:
-            self.events = _uniquify_event_ids(self._filter_events(list(self.events)))
+            self.events = _uniquify_event_ids(
+                self._filter_events(
+                    _minimize_events(
+                        list(self.events),
+                        pseudonym_key=self._pseudonym_key,
+                        project_id=self.project_id,
+                    )
+                )
+            )
             return
         self.db_path = Path(self.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.db_path.parent, 0o700)
         if self._migration_ready:
-            if self._parent_migration_report is None:
+            if self._parent_migration_report is None or self._parent_pseudonym_key is None:
                 raise StorageCommitError("storage_recovery_required")
             self._migration_report = self._parent_migration_report
+            self._pseudonym_key = self._parent_pseudonym_key
         else:
             self._migration_report = migrate_database(
                 self.db_path,
                 fault_injector=self.migration_fault_injector,
             )
+            self._pseudonym_key = load_verified_pseudonym_key(self.db_path)
         if self.events:
             self.replace(self.events)
         else:
@@ -216,6 +236,7 @@ class EventStore:
                     project_id=normalized_project_id,
                     _migration_ready=True,
                     _parent_migration_report=self._migration_report,
+                    _parent_pseudonym_key=self._pseudonym_key,
                 )
                 self._project_views[normalized_project_id] = cached
                 while len(self._project_views) > MAX_CACHED_PROJECT_VIEWS:
@@ -231,6 +252,7 @@ class EventStore:
             expected_revision=expected_revision,
             _migration_ready=True,
             _parent_migration_report=self._migration_report,
+            _parent_pseudonym_key=self._pseudonym_key,
         )
 
     def list_projects(self) -> list[Project]:
@@ -446,6 +468,8 @@ class EventStore:
         current: StoreSnapshot,
         *,
         events: list[StandardEvent] | tuple[StandardEvent, ...] | None = None,
+        events_are_privacy_minimized: bool = False,
+        trusted_references: frozenset[str] = frozenset(),
         manual_labels: dict[str, str] | None = None,
         settings: dict[str, object] | None = None,
         metadata: dict[str, str] | None = None,
@@ -453,8 +477,31 @@ class EventStore:
         automation_reviews: dict[str, str] | None = None,
         automation_review_notes: dict[str, str] | None = None,
     ) -> StoreSnapshot:
-        candidate_events = tuple(sorted(current.events if events is None else events, key=event_sort_key))
-        candidate_labels = dict(current.manual_labels if manual_labels is None else manual_labels)
+        event_list = list(current.events if events is None else events)
+        if events_are_privacy_minimized:
+            candidate_events = tuple(sorted(event_list, key=event_sort_key))
+        else:
+            candidate_events = tuple(
+                sorted(
+                    _minimize_events(
+                        event_list,
+                        pseudonym_key=self._pseudonym_key,
+                        project_id=self.project_id,
+                        trusted_references=_event_references(current.events) | trusted_references,
+                    ),
+                    key=event_sort_key,
+                )
+            )
+        candidate_labels = {
+            self._event_reference(event_id): label
+            for event_id, label in (current.manual_labels if manual_labels is None else manual_labels).items()
+        }
+        candidate_reviews = dict(current.automation_reviews if automation_reviews is None else automation_reviews)
+        candidate_review_notes = {
+            activity: note
+            for activity, note in (current.automation_review_notes if automation_review_notes is None else automation_review_notes).items()
+            if activity in candidate_reviews and note.strip()
+        }
         live_event_ids = {event.event_id for event in candidate_events}
         return StoreSnapshot(
             events=candidate_events,
@@ -464,15 +511,16 @@ class EventStore:
             settings=MappingProxyType(_copy_settings(current.settings if settings is None else settings)),
             metadata=MappingProxyType(dict(current.metadata if metadata is None else metadata)),
             import_history=tuple(
-                MappingProxyType(dict(item))
+                MappingProxyType(
+                    {
+                        **dict(item),
+                        "path": _safe_import_display_name(str(item.get("source") or ""), str(item.get("path") or "")),
+                    }
+                )
                 for item in (current.import_history if import_history is None else import_history)
             ),
-            automation_reviews=MappingProxyType(
-                dict(current.automation_reviews if automation_reviews is None else automation_reviews)
-            ),
-            automation_review_notes=MappingProxyType(
-                dict(current.automation_review_notes if automation_review_notes is None else automation_review_notes)
-            ),
+            automation_reviews=MappingProxyType(candidate_reviews),
+            automation_review_notes=MappingProxyType(candidate_review_notes),
             project_id=current.project_id,
             project_revision=current.project_revision + 1,
             generation=current.generation + 1,
@@ -581,7 +629,7 @@ class EventStore:
         connection.executemany(
             "INSERT INTO events(project_id, event_id, payload_json) VALUES(?, ?, ?)",
             [
-                (project_id, event.event_id, json.dumps(event.to_dict(), ensure_ascii=False))
+                (project_id, event.event_id, json.dumps(_declared_event_payload(event), ensure_ascii=False))
                 for event in candidate.events
             ],
         )
@@ -669,7 +717,14 @@ class EventStore:
     def replace(self, events: list[StandardEvent], import_source: str = "", import_path: str = "") -> None:
         with self._mutation_lock:
             current = self._snapshot_locked()
-            candidate_events = _uniquify_event_ids(_filter_events_for_settings(list(events), current.settings))
+            candidate_events = _uniquify_event_ids(
+                _filter_events_for_settings(
+                    _minimize_events(
+                        list(events), pseudonym_key=self._pseudonym_key, project_id=self.project_id
+                    ),
+                    current.settings,
+                )
+            )
             metadata = dict(current.metadata)
             metadata["initialized"] = "true"
             history = [dict(item) for item in current.import_history]
@@ -686,6 +741,8 @@ class EventStore:
                 self._candidate(
                     current,
                     events=candidate_events,
+                    events_are_privacy_minimized=_events_are_privacy_minimized(candidate_events),
+                    trusted_references=_event_references(candidate_events),
                     manual_labels={},
                     metadata=metadata,
                     import_history=history,
@@ -702,7 +759,10 @@ class EventStore:
         with self._mutation_lock:
             current = self._snapshot_locked()
             existing_ids = {event.event_id for event in current.events}
-            filtered_events = _filter_events_for_settings(list(events), current.settings)
+            filtered_events = _filter_events_for_settings(
+                _minimize_events(list(events), pseudonym_key=self._pseudonym_key, project_id=self.project_id),
+                current.settings,
+            )
             candidates = [
                 event
                 for event in filtered_events
@@ -726,10 +786,13 @@ class EventStore:
             if import_source:
                 metadata["last_import_fingerprint"] = import_key
                 history.append(_import_history_item(import_source, import_path, len(new_events)))
+            candidate_events = [*current.events, *new_events]
             self._commit_candidate(
                 self._candidate(
                     current,
-                    events=[*current.events, *new_events],
+                    events=candidate_events,
+                    events_are_privacy_minimized=_events_are_privacy_minimized(candidate_events),
+                    trusted_references=_event_references(new_events),
                     metadata=metadata,
                     import_history=history,
                 )
@@ -737,6 +800,7 @@ class EventStore:
             return len(new_events)
 
     def set_label(self, event_id: str, label: str) -> None:
+        event_id = self._event_reference(event_id)
         with self._mutation_lock:
             current = self._snapshot_locked()
             if not any(event.event_id == event_id for event in current.events):
@@ -746,6 +810,7 @@ class EventStore:
             self._commit_candidate(self._candidate(current, manual_labels=labels))
 
     def update_event_activity(self, event_id: str, activity: str) -> dict[str, object]:
+        event_id = self._event_reference(event_id)
         normalized_activity = activity.strip()
         if not normalized_activity:
             raise ValueError("Activity label is required.")
@@ -763,9 +828,10 @@ class EventStore:
             events = list(current.events)
             events[index] = updated
             self._commit_candidate(self._candidate(current, events=events, metadata=_initialized_metadata(current)))
-            return updated.to_dict()
+            return self.events[_find_event_index(tuple(self.events), event_id)].to_dict()
 
     def exclude_event(self, event_id: str) -> dict[str, object]:
+        event_id = self._event_reference(event_id)
         with self._mutation_lock:
             current = self._snapshot_locked()
             index = _find_event_index(current.events, event_id)
@@ -783,6 +849,7 @@ class EventStore:
             return {"excluded": True, "event_id": removed.event_id}
 
     def set_event_quality_review(self, event_id: str, status: str) -> dict[str, object]:
+        event_id = self._event_reference(event_id)
         normalized_status = status.strip().casefold() or "approved"
         if normalized_status not in {"approved", "unreviewed"}:
             raise ValueError("Quality review status must be approved or unreviewed.")
@@ -810,6 +877,7 @@ class EventStore:
         from a source-observed ID, so its provenance remains manual.
         """
 
+        event_id = self._event_reference(event_id)
         normalized_case_id = case_id.strip()
         if not normalized_case_id:
             raise ValueError("Case identifier is required.")
@@ -833,7 +901,7 @@ class EventStore:
             events = list(current.events)
             events[index] = updated
             self._commit_candidate(self._candidate(current, events=events, metadata=_initialized_metadata(current)))
-            return updated.to_dict()
+            return self.events[_find_event_index(tuple(self.events), event_id)].to_dict()
 
     def split_event(
         self,
@@ -842,6 +910,7 @@ class EventStore:
         first_activity: str = "",
         second_activity: str = "",
     ) -> dict[str, object]:
+        event_id = self._event_reference(event_id)
         with self._mutation_lock:
             current = self._snapshot_locked()
             index = _find_event_index(current.events, event_id)
@@ -888,9 +957,17 @@ class EventStore:
                     metadata=_initialized_metadata(current),
                 )
             )
-            return {"split": True, "events": [first.to_dict(), second.to_dict()]}
+            return {
+                "split": True,
+                "events": [
+                    self.events[_find_event_index(tuple(self.events), self._event_reference(first.event_id))].to_dict(),
+                    self.events[_find_event_index(tuple(self.events), self._event_reference(second.event_id))].to_dict(),
+                ],
+            }
 
     def merge_adjacent_events(self, first_event_id: str, second_event_id: str, activity: str = "") -> dict[str, object]:
+        first_event_id = self._event_reference(first_event_id)
+        second_event_id = self._event_reference(second_event_id)
         with self._mutation_lock:
             current = self._snapshot_locked()
             first_index = _find_event_index(current.events, first_event_id)
@@ -940,12 +1017,17 @@ class EventStore:
             self._commit_candidate(
                 self._candidate(current, events=events, manual_labels=labels, metadata=_initialized_metadata(current))
             )
-            return {"merged": True, "event": merged.to_dict()}
+            return {
+                "merged": True,
+                "event": self.events[
+                    _find_event_index(tuple(self.events), self._event_reference(merged.event_id))
+                ].to_dict(),
+            }
 
     def clear(self) -> None:
         """Clear only this project's database rows.
 
-        Workspace-level migration snapshots are intentionally retained. Their
+        Future encrypted recovery artifacts remain workspace-level data. Their
         retention and deletion policy belongs to the dedicated backup and
         lifecycle work rather than a selected-project operation.
         """
@@ -967,7 +1049,11 @@ class EventStore:
     def set_automation_review(self, activity: str, status: str, note: str = "") -> dict[str, str]:
         normalized_activity = activity.strip()
         normalized_status = status.strip().casefold()
-        normalized_note = note.strip()
+        del note
+        # Review notes are freeform and can contain customer or operator data.
+        # Keep only the structured review status at rest; #44 can later add a
+        # constrained rule/comment model if a product need remains.
+        normalized_note = ""
         if not normalized_activity:
             raise ValueError("Automation activity is required.")
         if normalized_status not in AUTOMATION_REVIEW_STATUSES:
@@ -1046,8 +1132,8 @@ class EventStore:
         active_snapshot = snapshot or self.snapshot()
         return {
             "storage_mode": "sqlite" if self.db_path else "memory",
-            "storage_path": str(self.db_path) if self.db_path else "",
-            "project_id": active_snapshot.project_id,
+            "storage_path": "",
+            "project_id": _diagnostic_project_reference(active_snapshot.project_id),
             "project_revision": active_snapshot.project_revision,
             "event_count": len(active_snapshot.events),
             "manual_label_count": len(active_snapshot.manual_labels),
@@ -1061,6 +1147,17 @@ class EventStore:
             "wal_status": migration.wal_status if migration else "not_applicable",
             "backup_cleanup_status": migration.backup_cleanup_status if migration else "not_applicable",
         }
+
+    def _event_reference(self, value: object) -> str:
+        event_id = str(value or "").strip()
+        if any(event.event_id == event_id for event in self.events):
+            return event_id
+        return opaque_reference(self._pseudonym_key, self.project_id, "evt", event_id)
+
+    def event_reference_for_input(self, value: object) -> str:
+        """Resolve a parser-bound or already-safe event ID for local comparisons."""
+
+        return self._event_reference(value)
 
     def _connect(self) -> sqlite3.Connection:
         if self.db_path is None:
@@ -1108,7 +1205,16 @@ class EventStore:
                 "SELECT id, source, path, event_count, imported_at FROM import_history WHERE project_id = ? ORDER BY id",
                 (self.project_id,),
             ).fetchall()
-        self.events = sorted((StandardEvent(**json.loads(row[0])) for row in event_rows), key=event_sort_key)
+        stored_events = [StandardEvent(**json.loads(row[0])) for row in event_rows]
+        self.events = sorted(
+            _minimize_events(
+                stored_events,
+                pseudonym_key=self._pseudonym_key,
+                project_id=self.project_id,
+                trusted_references=_event_references(stored_events),
+            ),
+            key=event_sort_key,
+        )
         self.manual_labels = {str(event_id): str(label) for event_id, label in label_rows}
         self.settings = _copy_settings(DEFAULT_SETTINGS)
         for key, value_json in setting_rows:
@@ -1166,12 +1272,86 @@ class EventStore:
 
 
 def _safe_import_display_name(source: str, path_value: str) -> str:
-    """Keep import history useful without retaining an absolute local path."""
+    """Keep import history useful without retaining user-controlled filenames."""
 
+    del path_value
     if source.startswith("activitywatch_local"):
         return "ActivityWatch (local)"
-    name = Path(path_value).name.strip()
-    return name or "Imported file"
+    if source.startswith("csv"):
+        return "CSV import"
+    if source.startswith("json"):
+        return "JSON import"
+    if source.startswith("native_"):
+        return "Native recording"
+    return "Imported data"
+
+
+def _diagnostic_project_reference(project_id: str) -> str:
+    digest = hashlib.sha256(f"opsmineflow:project:{project_id}".encode("utf-8")).hexdigest()
+    return f"project_{digest[:16]}"
+
+
+def _minimize_events(
+    events: list[StandardEvent],
+    *,
+    pseudonym_key: bytes,
+    project_id: str,
+    trusted_references: frozenset[str] = frozenset(),
+) -> list[StandardEvent]:
+    """Use the v4 persistence allowlist for every write and in-memory store."""
+
+    minimized: list[StandardEvent] = []
+    for event in events:
+        payload = redact_event_payload(
+            _declared_event_payload(event),
+            pseudonym_key=pseudonym_key,
+            project_id=project_id,
+            trusted_references=trusted_references,
+        )
+        minimized.append(StandardEvent(**payload))
+    return minimized
+
+
+def _declared_event_payload(event: StandardEvent) -> dict[str, object]:
+    """Copy only declared event fields for the v4 persistence boundary.
+
+    StandardEvent currently contains scalar values. Avoiding ``asdict()`` here
+    removes a recursive deep-copy from large imports while preserving the
+    exact field set consumed by ``redact_event_payload``. Dynamic/transient
+    attributes are deliberately excluded before the privacy boundary runs.
+    """
+
+    return {field_name: getattr(event, field_name) for field_name in _STANDARD_EVENT_FIELD_NAMES}
+
+
+def _event_references(events: list[StandardEvent] | tuple[StandardEvent, ...]) -> frozenset[str]:
+    references: set[str] = set()
+    for event in events:
+        for value, kind in (
+            (event.event_id, "evt"),
+            (event.case_id, "case"),
+            (event.source_event_id, "source"),
+        ):
+            if is_opaque_reference(value, kind):
+                references.add(value)
+    return frozenset(references)
+
+
+def _events_are_privacy_minimized(events: list[StandardEvent] | tuple[StandardEvent, ...]) -> bool:
+    """Recognize the immediate safe-minimization path used by large imports.
+
+    ``_uniquify_event_ids`` may synthesize a non-v1 ID for a collision.  In
+    that case the caller must re-run the privacy boundary so the derived ID is
+    HMAC-pseudonymized before persistence.  Only fully opaque event, case,
+    and source references may skip that otherwise redundant pass.
+    """
+
+    return all(
+        is_opaque_reference(event.event_id, "evt")
+        and is_opaque_reference(event.case_id, "case")
+        and is_opaque_reference(event.source_event_id, "source")
+        for event in events
+    )
 
 
 def _copy_settings(settings: Mapping[str, object]) -> dict[str, object]:
@@ -1253,9 +1433,10 @@ def _same_import_dataset(
 def _canonical_event_fingerprint(event: StandardEvent) -> str:
     """Hash imported source content, excluding local import bookkeeping."""
 
-    payload = event.to_dict()
-    payload.pop("created_at", None)
-    payload.pop("event_id", None)
+    payload = {
+        field_name: getattr(event, field_name)
+        for field_name in _IMPORT_FINGERPRINT_FIELD_NAMES
+    }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -1425,10 +1606,22 @@ def _uniquify_event_ids(
     storage time.
     """
 
+    # Imports normally arrive with already-pseudonymized, unique IDs.  Avoid
+    # building collision groups and serializing every full event merely to
+    # prove that common case.  The fallback preserves the canonical ordering
+    # and deterministic collision handling when an ID is repeated or reserved.
+    used = set(reserved_ids or set())
+    unique_ids: set[str] = set()
+    for event in events:
+        if event.event_id in used or event.event_id in unique_ids:
+            break
+        unique_ids.add(event.event_id)
+    else:
+        return sorted(events, key=event_sort_key)
+
     grouped: dict[str, list[StandardEvent]] = {}
     for event in events:
         grouped.setdefault(event.event_id, []).append(event)
-    used = set(reserved_ids or set())
     result: list[StandardEvent] = []
     for original_id in sorted(grouped):
         group = sorted(grouped[original_id], key=_event_identity_sort_key)

@@ -32,6 +32,7 @@ from .app import (
     import_path_into_store,
     project_response,
     projects_response,
+    recording_status_to_api_dict,
     run_diagnostic_checks,
     save_export_artifact,
 )
@@ -87,7 +88,7 @@ class LocalApiHandler(BaseHTTPRequestHandler):
             self._send_json(project_response(store, {"imports": store.list_import_history()}))
             return
         if path == "/recording/status":
-            self._send_json(project_response(store, recording_manager.status(store.project_id)))
+            self._send_json(project_response(store, recording_status_to_api_dict(recording_manager.status(store.project_id))))
             return
         if path == "/events":
             self._send_json(project_response(store, {"events": create_event_page(0, 500, store)["events"]}))
@@ -175,26 +176,37 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     project_response(
                         store,
-                        recording_manager.start(
-                            str(payload.get("case_id") or ""),
-                            str(payload.get("activity_label") or ""),
-                            bool(payload.get("consent")),
-                            store=store,
+                        recording_status_to_api_dict(
+                            recording_manager.start(
+                                str(payload.get("case_id") or ""),
+                                str(payload.get("activity_label") or ""),
+                                bool(payload.get("consent")),
+                                store=store,
+                            )
                         ),
                     )
                 )
                 return
             if path == "/recording/stop":
                 store = self._project_store()
-                self._send_json(project_response(store, recording_manager.stop(store)))
+                self._send_json(project_response(store, recording_status_to_api_dict(recording_manager.stop(store))))
                 return
             if path == "/recording/pause":
                 store = self._project_store()
-                self._send_json(project_response(store, recording_manager.pause(str(payload.get("reason") or ""), project_id=store.project_id)))
+                self._send_json(
+                    project_response(
+                        store,
+                        recording_status_to_api_dict(
+                            recording_manager.pause(str(payload.get("reason") or ""), project_id=store.project_id)
+                        ),
+                    )
+                )
                 return
             if path == "/recording/resume":
                 store = self._project_store()
-                self._send_json(project_response(store, recording_manager.resume(project_id=store.project_id)))
+                self._send_json(
+                    project_response(store, recording_status_to_api_dict(recording_manager.resume(project_id=store.project_id)))
+                )
                 return
             if path == "/recording/events":
                 self._send_json(
@@ -283,7 +295,15 @@ class LocalApiHandler(BaseHTTPRequestHandler):
                 except KeyError:
                     self._send_json({"error": "Event was not found"}, status=404)
                     return
-                self._send_json(project_response(store, {"event_id": payload.get("event_id"), "label": payload.get("label")}))
+                self._send_json(
+                    project_response(
+                        store,
+                        {
+                            "event_id": store.event_reference_for_input(payload.get("event_id")),
+                            "label": payload.get("label"),
+                        },
+                    )
+                )
                 return
             if path == "/events/activity":
                 try:

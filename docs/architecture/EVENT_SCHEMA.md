@@ -28,19 +28,27 @@ Required fields:
 - `metadata_json`
 - `created_at`
 
-`case_id` is either supplied by the source, manually corrected, or marked as
-unassigned/inferred with structured provenance in `metadata_json`:
+The in-memory and persisted v4 event profile is intentionally smaller than the
+compatibility-shaped schema above. `case_id` and `source_event_id` are opaque
+references. `user_alias`, `app_bundle_id`, `window_title`,
+`window_title_masked`, `url`, and `url_masked` are always empty. `domain` may
+contain only a normalized host used for filtering. `metadata_json` has a
+strict allowlist; it cannot retain raw memo, title, URL, alias, or unknown
+source metadata.
+
+`case_id` is represented with opaque provenance as supplied by the source,
+manually corrected, or marked as unassigned/inferred in `metadata_json`:
 
 - `opsmineflow_case_correlation.origin`: `observed`, `manual`, `inferred`, or
   `unassigned`
 - `strategy`, `confidence`, and non-sensitive `evidence`
 
-When a local reviewer corrects a case ID, OpsMineFlow records a bounded
-single-line reason, the preceding case ID, a generic local-reviewer marker,
-and the UTC change time under `opsmineflow_case_correlation_review`. Native
-Mac recording case names are also `manual` evidence rather than source-observed
-evidence. These fields preserve the distinction without claiming that local
-operator input came from an imported source system.
+When a local reviewer corrects a case ID, OpsMineFlow preserves only structured
+manual provenance. The supplied case ID and freeform correction reason are
+tokenized or dropped before persistence and before the API response. A durable
+human-review audit trail needs a separately designed constrained schema; raw
+review notes are not an event metadata channel. Native Mac recording case names
+are also `manual` evidence rather than source-observed evidence.
 
 An absent source case ID is stored as a reviewable singleton. OpsMineFlow never
 uses a filename, domain, title, app transition, or activity label by itself to

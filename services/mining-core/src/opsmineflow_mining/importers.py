@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import re
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .models import StandardEvent
-from .privacy import extract_domain, looks_confidential, mask_url, mask_window_title
+from .privacy import IMPORTED_USER_ALIAS, extract_domain, looks_confidential, mask_url, mask_window_title
 
 CSV_MAPPING_TARGETS = (
     "case_id",
@@ -18,18 +19,14 @@ CSV_MAPPING_TARGETS = (
     "timestamp_start",
     "timestamp_end",
     "duration_seconds",
-    "user",
     "app_name",
     "app_bundle_id",
-    "window_title",
-    "url",
-    "memo",
+    "domain",
     "source_event_id",
     "event_type",
 )
 MAX_EVENT_FIELD_BYTES = 64 * 1024
 MAX_EVENT_METADATA_BYTES = 256 * 1024
-
 CSV_COLUMN_SYNONYMS = {
     "case_id": ("case_id", "case", "case id", "案件", "案件id", "ケース", "ケースid"),
     "activity": ("activity", "activity_raw", "task", "work", "operation", "作業", "業務", "活動", "内容"),
@@ -39,12 +36,24 @@ CSV_COLUMN_SYNONYMS = {
     "user": ("user", "user_alias", "operator", "member", "担当者", "ユーザー", "利用者"),
     "app_name": ("app_name", "app", "application", "アプリ", "アプリ名", "利用アプリ"),
     "app_bundle_id": ("app_bundle_id", "bundle", "bundle_id", "bundle identifier"),
+    "domain": ("domain", "host", "hostname", "url", "uri", "link", "リンク"),
     "window_title": ("window_title", "title", "window", "画面名", "ウィンドウ", "ウィンドウタイトル"),
     "url": ("url", "uri", "link", "リンク"),
     "memo": ("memo", "note", "notes", "description", "メモ", "備考", "説明"),
     "source_event_id": ("source_event_id", "id", "event_id", "イベントid", "ログid"),
     "event_type": ("event_type", "type", "種別"),
 }
+
+# These fields may be present in a customer-supplied CSV, but are never
+# imported.  In particular, do not let a mapped import quietly turn a memo or
+# window title into an activity label.  Users must provide an explicit
+# activity column for process-mining labels.
+SENSITIVE_CSV_MAPPING_TARGETS = frozenset({"user", "window_title", "url", "memo"})
+SENSITIVE_CSV_COLUMN_NAMES = frozenset(
+    "".join(character for character in synonym.casefold() if character.isalnum())
+    for target in SENSITIVE_CSV_MAPPING_TARGETS
+    for synonym in CSV_COLUMN_SYNONYMS[target]
+)
 
 
 def load_events_from_csv(
@@ -113,6 +122,13 @@ def load_events_from_csv_with_mapping(
         for target, column in mapping.items()
         if target in CSV_MAPPING_TARGETS and column in columns
     }
+    # `url` was a public mapping key before #76.  Preserve the caller's
+    # intent as a host-only domain mapping without accepting the raw URL.
+    if "domain" not in cleaned_mapping and mapping.get("url") in columns:
+        cleaned_mapping["domain"] = str(mapping["url"])
+    sensitive_activity_column = cleaned_mapping.get("activity", "")
+    if _normalize_column_name(sensitive_activity_column) in SENSITIVE_CSV_COLUMN_NAMES:
+        raise ValueError("CSV mapping cannot use a memo, title, URL, or alias column as activity.")
     if "activity" not in cleaned_mapping:
         raise ValueError("CSV mapping requires an activity column.")
     if "timestamp_start" not in cleaned_mapping:
@@ -211,32 +227,27 @@ def _event_from_csv_row(row: dict[str, str], index: int, source: str) -> Standar
     end_value = row.get("timestamp_end") or row.get("end") or ""
     end = _parse_datetime(end_value) if end_value else start
     duration = max((end - start).total_seconds(), 0.0)
-    user_alias = row.get("user") or row.get("user_alias") or "unknown"
-    memo = row.get("memo") or ""
-    activity = row.get("activity") or row.get("activity_raw") or memo or "Unlabeled activity"
-    url = row.get("url") or ""
-    explicit_window_title = row.get("window_title") or ""
-    window_title = explicit_window_title or memo or activity
-    window_title_origin = "provided" if explicit_window_title else "memo" if memo else "activity_fallback"
+    activity = row.get("activity") or row.get("activity_raw") or "Unlabeled activity"
     source_event_id = row.get("source_event_id") or str(index)
     source_case_id = row.get("case_id") or ""
-    case_id = source_case_id or _fallback_case_id(url, activity, index)
+    case_id = source_case_id or _fallback_case_id("", activity, index)
     return _build_event(
         source=source,
         source_event_id=source_event_id,
         case_id=case_id,
-        user_alias=user_alias,
+        user_alias=IMPORTED_USER_ALIAS,
         app_name=row.get("app_name") or "",
         app_bundle_id=row.get("app_bundle_id") or "",
-        window_title=window_title,
-        url=url,
+        domain=extract_domain(row.get("url") or row.get("uri") or ""),
+        window_title="",
+        url="",
         activity_raw=activity,
         event_type=row.get("event_type") or "work_activity",
         timestamp_start=start,
         timestamp_end=end,
         duration_seconds=duration,
         idle_flag=_to_bool(row.get("idle_flag")),
-        metadata={"memo": memo, "opsmineflow_window_title_origin": window_title_origin},
+        metadata={},
         case_source_provided=bool(source_case_id),
     )
 
@@ -259,36 +270,26 @@ def _event_from_mapped_csv_row(
     duration = float(duration_value) if duration_value else 0.0
     end = _parse_mapped_datetime(end_value, date_format, timezone_name) if end_value else start + timedelta(seconds=duration)
     duration = max(float(duration_value) if duration_value else (end - start).total_seconds(), 0.0)
-    memo = value("memo")
-    activity = value("activity") or memo or "Unlabeled activity"
-    url = value("url")
-    explicit_window_title = value("window_title")
-    window_title = explicit_window_title or memo or activity
-    window_title_origin = "provided" if explicit_window_title else "memo" if memo else "activity_fallback"
+    activity = value("activity") or "Unlabeled activity"
     source_event_id = value("source_event_id") or str(index)
     source_case_id = value("case_id")
     return _build_event(
         source=source,
         source_event_id=source_event_id,
-        case_id=source_case_id or _fallback_case_id(url, activity, index),
-        user_alias=value("user") or "unknown",
+        case_id=source_case_id or _fallback_case_id("", activity, index),
+        user_alias=IMPORTED_USER_ALIAS,
         app_name=value("app_name"),
         app_bundle_id=value("app_bundle_id"),
-        window_title=window_title,
-        url=url,
+        domain=extract_domain(value("domain")),
+        window_title="",
+        url="",
         activity_raw=activity,
         event_type=value("event_type") or "work_activity",
         timestamp_start=start,
         timestamp_end=end,
         duration_seconds=duration,
         idle_flag=False,
-        metadata={
-            "memo": memo,
-            "opsmineflow_window_title_origin": window_title_origin,
-            "csv_mapping": mapping,
-            "date_format": date_format,
-            "timezone": timezone_name,
-        },
+        metadata={},
         case_source_provided=bool(source_case_id),
     )
 
@@ -300,47 +301,30 @@ def _event_from_generic_json(item: dict[str, Any], index: int, source: str) -> S
     end = _parse_datetime(str(end_raw)) if end_raw else start + timedelta(seconds=duration_value)
     duration = max(float(item.get("duration_seconds") or (end - start).total_seconds()), 0.0)
     data = item.get("data") if isinstance(item.get("data"), dict) else {}
-    url = str(item.get("url") or data.get("url") or "")
     explicit_activity = _optional_json_string(item.get("activity"), "activity")
     explicit_activity_raw = _optional_json_string(item.get("activity_raw"), "activity_raw")
-    data_title = _optional_json_string(data.get("title"), "data.title")
     data_app = _optional_json_string(data.get("app"), "data.app")
     top_level_app = _optional_json_string(item.get("app_name"), "app_name")
     explicit_case_id = _optional_json_string(item.get("case_id"), "case_id").strip()
-    activity = explicit_activity or explicit_activity_raw or data_title or data_app or "Unlabeled activity"
-    allowed_metadata_paths: list[str] = []
-    if explicit_activity:
-        allowed_metadata_paths.append("activity")
-    elif explicit_activity_raw:
-        allowed_metadata_paths.append("activity_raw")
-    elif data_app:
-        allowed_metadata_paths.append("data.app")
-    if top_level_app:
-        allowed_metadata_paths.append("app_name")
-    elif data_app:
-        allowed_metadata_paths.append("data.app")
-    explicit_window_title = _optional_json_string(item.get("window_title"), "window_title") or data_title
-    metadata = {
-        **item,
-        "opsmineflow_handoff_allowed_metadata_paths": sorted(set(allowed_metadata_paths)),
-        "opsmineflow_window_title_origin": "provided" if explicit_window_title else "activity_fallback",
-    }
+    raw_url = _optional_json_string(item.get("url"), "url") or _optional_json_string(data.get("url"), "data.url")
+    activity = explicit_activity or explicit_activity_raw or "Unlabeled activity"
     return _build_event(
         source=source,
         source_event_id=str(item.get("source_event_id") or item.get("id") or index),
-        case_id=explicit_case_id or _fallback_case_id(url, activity, index),
-        user_alias=str(item.get("user") or item.get("user_alias") or "unknown"),
+        case_id=explicit_case_id or _fallback_case_id("", activity, index),
+        user_alias=IMPORTED_USER_ALIAS,
         app_name=top_level_app or data_app,
         app_bundle_id=str(item.get("app_bundle_id") or data.get("app_bundle_id") or ""),
-        window_title=str(explicit_window_title or activity),
-        url=url,
+        domain=extract_domain(raw_url),
+        window_title="",
+        url="",
         activity_raw=activity,
         event_type=str(item.get("event_type") or "work_activity"),
         timestamp_start=start,
         timestamp_end=end,
         duration_seconds=duration,
         idle_flag=bool(item.get("idle_flag") or data.get("status") == "afk"),
-        metadata=metadata,
+        metadata={},
         case_source_provided=bool(explicit_case_id),
     )
 
@@ -348,40 +332,35 @@ def _event_from_generic_json(item: dict[str, Any], index: int, source: str) -> S
 def _events_from_activitywatch_export(payload: dict[str, Any]) -> Iterable[StandardEvent]:
     index = 1
     buckets = payload.get("buckets") or {}
-    for bucket_id, bucket in buckets.items():
-        bucket_type = str(bucket.get("type") or bucket_id)
+    for bucket_index, (_, bucket) in enumerate(buckets.items(), start=1):
+        bucket_type = str(bucket.get("type") or "activitywatch")
         for item in bucket.get("events") or []:
             data = item.get("data") if isinstance(item.get("data"), dict) else {}
             start = _parse_datetime(str(item.get("timestamp") or ""))
             duration = float(item.get("duration") or 0)
             end = start + timedelta(seconds=duration)
-            url = _optional_json_string(data.get("url"), "ActivityWatch data.url")
             data_app = _optional_json_string(data.get("app"), "ActivityWatch data.app")
             data_browser = _optional_json_string(data.get("browser"), "ActivityWatch data.browser")
-            data_title = _optional_json_string(data.get("title"), "ActivityWatch data.title")
             app_name = data_app or data_browser
-            title = data_title or url or app_name or bucket_type
-            allowed_metadata_paths = ["event.data.app"] if data_app else ["event.data.browser"] if data_browser else []
+            activity = app_name or "Unlabeled activity"
+            raw_url = _optional_json_string(data.get("url"), "ActivityWatch data.url")
             yield _build_event(
                 source="activitywatch_export",
-                source_event_id=f"{bucket_id}:{item.get('id') or index}",
-                case_id=_fallback_case_id(url, title, index),
-                user_alias="activitywatch_user",
+                source_event_id=f"{bucket_index}:{index}",
+                case_id=_fallback_case_id("", activity, index),
+                user_alias=IMPORTED_USER_ALIAS,
                 app_name=app_name,
                 app_bundle_id=_optional_json_string(data.get("app_bundle_id"), "ActivityWatch data.app_bundle_id"),
-                window_title=title,
-                url=url,
-                activity_raw=title,
+                domain=extract_domain(raw_url),
+                window_title="",
+                url="",
+                activity_raw=activity,
                 event_type=bucket_type,
                 timestamp_start=start,
                 timestamp_end=end,
                 duration_seconds=duration,
                 idle_flag=data.get("status") == "afk",
-                metadata={
-                    "bucket_id": bucket_id,
-                    "event": item,
-                    "opsmineflow_handoff_allowed_metadata_paths": allowed_metadata_paths,
-                },
+                metadata={},
                 case_source_provided=False,
             )
             index += 1
@@ -395,6 +374,7 @@ def _build_event(
     user_alias: str,
     app_name: str,
     app_bundle_id: str,
+    domain: str = "",
     window_title: str,
     url: str,
     activity_raw: str,
@@ -432,25 +412,29 @@ def _build_event(
     timestamp_start_iso = _to_iso(timestamp_start)
     timestamp_end_iso = _to_iso(timestamp_end)
     created_at = _to_iso(datetime.now(timezone.utc))
-    domain = extract_domain(url)
+    # Parsers keep source values only until EventStore applies its keyed,
+    # project-scoped privacy boundary. Never retain URL authority components
+    # as a "domain" fallback while that hand-off is in progress.
+    safe_domain = extract_domain(domain or url)
     event_id = _stable_id(source, source_event_id, timestamp_start_iso, activity_raw)
+    transient_case_id = case_id or event_id
     normalized = _normalize_activity(activity_raw)
     return StandardEvent(
         event_id=event_id,
         source=source,
         source_event_id=source_event_id,
-        case_id=case_id,
-        session_id=f"{case_id}:session-1",
+        case_id=transient_case_id,
+        session_id=f"{transient_case_id}:session-1",
         user_alias=user_alias,
-        user_hash=_hash_user(user_alias),
+        user_hash="",
         device_id="local-mac",
         app_name=app_name,
-        app_bundle_id=app_bundle_id,
+        app_bundle_id="",
         window_title=window_title,
         window_title_masked=mask_window_title(window_title),
         url=url,
         url_masked=mask_url(url),
-        domain=domain,
+        domain=safe_domain,
         activity_raw=activity_raw,
         activity_normalized=normalized,
         event_type=event_type,
@@ -515,11 +499,6 @@ def _to_iso(value: datetime) -> str:
 
 def _to_bool(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
-
-
-def _hash_user(user_alias: str) -> str:
-    digest = hashlib.sha256(f"opsmineflow:{user_alias}".encode("utf-8")).hexdigest()
-    return f"user_{digest[:16]}"
 
 
 def _stable_id(*parts: str) -> str:

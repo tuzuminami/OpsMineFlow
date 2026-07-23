@@ -39,16 +39,32 @@ class ProjectIsolationTests(unittest.TestCase):
 
             reopened_a = workspace.for_project(project_a.project_id)
             reopened_b = workspace.for_project(project_b.project_id)
-            self.assertEqual([item.event_id for item in reopened_a.snapshot().events], [event.event_id])
-            self.assertEqual([item.event_id for item in reopened_b.snapshot().events], [event.event_id])
-            self.assertEqual(reopened_a.snapshot().manual_labels[event.event_id], "AP review")
-            self.assertEqual(reopened_b.snapshot().manual_labels[event.event_id], "Support review")
+            event_id_a = reopened_a.snapshot().events[0].event_id
+            event_id_b = reopened_b.snapshot().events[0].event_id
+            self.assertTrue(event_id_a.startswith("evt_v1_"))
+            self.assertTrue(event_id_b.startswith("evt_v1_"))
+            self.assertNotEqual(event_id_a, event_id_b)
+            self.assertEqual(reopened_a.snapshot().manual_labels[event_id_a], "AP review")
+            self.assertEqual(reopened_b.snapshot().manual_labels[event_id_b], "Support review")
+            relay_project = workspace.create_project("Relayed data")
+            relay_store = workspace.for_project(relay_project.project_id)
+            relayed_from_a = replace(
+                reopened_a.snapshot().events[0],
+                event_id=event_id_a,
+                case_id=reopened_a.snapshot().events[0].case_id,
+                source_event_id=reopened_a.snapshot().events[0].source_event_id,
+            )
+            relay_store.replace([relayed_from_a], import_source="csv", import_path="relayed.csv")
+            relayed_event = relay_store.snapshot().events[0]
+            self.assertNotEqual(relayed_event.event_id, event_id_a)
+            self.assertNotEqual(relayed_event.case_id, reopened_a.snapshot().events[0].case_id)
+            self.assertNotEqual(relayed_event.source_event_id, reopened_a.snapshot().events[0].source_event_id)
             self.assertEqual(reopened_a.get_settings()["excluded_apps"], ["Private Browser"])
             self.assertEqual(reopened_b.get_settings()["excluded_apps"], [])
             self.assertEqual(reopened_a.snapshot().automation_reviews["Review invoice"], "adopted")
             self.assertEqual(reopened_b.snapshot().automation_reviews["Review invoice"], "rejected")
-            self.assertEqual(reopened_a.list_import_history()[0]["path"], "accounts.csv")
-            self.assertEqual(reopened_b.list_import_history()[0]["path"], "support.csv")
+            self.assertEqual(reopened_a.list_import_history()[0]["path"], "CSV import")
+            self.assertEqual(reopened_b.list_import_history()[0]["path"], "CSV import")
             self.assertEqual(create_process_map(reopened_a)["nodes"][0]["activity"], "AP-only review")
             self.assertEqual(create_process_map(reopened_b)["nodes"][0]["activity"], "Support-only review")
             self.assertIn("AP-only review", str(create_export_artifact("json", reopened_a)["content"]))
@@ -57,9 +73,9 @@ class ProjectIsolationTests(unittest.TestCase):
             reopened_a.clear()
             after_clear_b = workspace.for_project(project_b.project_id)
             self.assertEqual(len(after_clear_b.snapshot().events), 1)
-            self.assertEqual(after_clear_b.snapshot().events[0].activity_normalized, "Support-only review")
-            self.assertEqual(after_clear_b.snapshot().manual_labels[event.event_id], "Support review")
-            self.assertEqual(after_clear_b.list_import_history()[0]["path"], "support.csv")
+            self.assertEqual(after_clear_b.snapshot().events[0].activity_normalized, "support-only review")
+            self.assertEqual(after_clear_b.snapshot().manual_labels[event_id_b], "Support review")
+            self.assertEqual(after_clear_b.list_import_history()[0]["path"], "CSV import")
 
     def test_stale_project_revision_cannot_overwrite_a_newer_project_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -78,7 +94,8 @@ class ProjectIsolationTests(unittest.TestCase):
                 stale.set_label(event.event_id, "stale")
             with self.assertRaises(ProjectConflictError):
                 workspace.for_project(project.project_id, expected_revision=revision)
-            self.assertEqual(workspace.for_project(project.project_id).snapshot().manual_labels[event.event_id], "current")
+            refreshed = workspace.for_project(project.project_id).snapshot()
+            self.assertEqual(refreshed.manual_labels[refreshed.events[0].event_id], "current")
 
     def test_project_scope_reuses_the_initialized_schema_without_running_migrations(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

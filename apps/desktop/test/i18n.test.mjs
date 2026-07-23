@@ -57,6 +57,17 @@ test("beginner workflow labels are explicit in both languages", () => {
   assert.match(appSource, /PrivacyEvidencePanel/);
 });
 
+test("privacy controls cannot turn off the safe data profile", () => {
+  assert.match(appSource, /t\("export\.safeDataProfile"\)/);
+  assert.match(appSource, /t\("settings\.safeDataProfile"\)/);
+  assert.match(appSource, /t\("message\.exportReview"\)/);
+  assert.doesNotMatch(appSource, /settings\.maskUrls|settings\.maskWindows/);
+  assert.doesNotMatch(appSource, /checked=\{settingsDraft\.(mask_url_paths|mask_window_titles)\}/);
+  assert.match(en["export.safeDataProfile"], /raw URL paths.*never shown or exported/);
+  assert.match(en["message.exportReview"], /safe data profile/);
+  assert.match(ja["settings.safeDataProfile"], /常に有効/);
+});
+
 test("the packaged WebUI uses the allowlisted Tauri proxy instead of a direct local API session", () => {
   assert.match(apiSource, /invoke<T>\("local_api_operation"/);
   assert.match(apiSource, /invoke<\{ deleted: boolean \}>\("delete_local_data", \{ payload: withProjectScope/);

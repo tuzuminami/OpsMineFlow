@@ -16,6 +16,8 @@ from opsmineflow_api.migrations import (
     MIGRATIONS,
     MigrationError,
     MigrationInvariantError,
+    PSEUDONYM_KEY_FILENAME,
+    PRIVACY_CLEANUP_METADATA_KEY,
     UnsupportedSchemaError,
     migrate_database,
     validate_migration_registry,
@@ -25,7 +27,7 @@ from opsmineflow_mining import load_events_from_csv
 
 
 class StorageMigrationTests(unittest.TestCase):
-    def test_fresh_database_applies_v3_and_creates_a_durable_empty_legacy_project(self) -> None:
+    def test_fresh_database_applies_v4_and_creates_a_durable_empty_legacy_project(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "opsmineflow.sqlite3"
 
@@ -39,13 +41,15 @@ class StorageMigrationTests(unittest.TestCase):
                 workspace_metadata = dict(connection.execute("SELECT key, value FROM workspace_metadata").fetchall())
                 empty_snapshot = _v3_dataset_snapshot(connection, LEGACY_PROJECT_ID)
                 ledger = connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+            key_mode = stat.S_IMODE((db_path.parent / PSEUDONYM_KEY_FILENAME).stat().st_mode)
 
         self.assertEqual(report.previous_version, 0)
-        self.assertEqual(report.applied_migrations, (1, 2, 3))
+        self.assertEqual(report.applied_migrations, (1, 2, 3, 4))
         self.assertEqual(reopened.status, "current")
         self.assertEqual(project, (LEGACY_PROJECT_ID, "Migrated data", "legacy_migration", 0))
-        self.assertEqual(ledger, [(1,), (2,), (3,)])
+        self.assertEqual(ledger, [(1,), (2,), (3,), (4,)])
         self.assertEqual(workspace_metadata["active_project_id"], LEGACY_PROJECT_ID)
+        self.assertEqual(key_mode, 0o600)
         self.assertEqual(workspace_metadata["legacy_v2_before_hash"], _dataset_hash(empty_snapshot))
         self.assertEqual(workspace_metadata["legacy_v3_after_hash"], _dataset_hash(empty_snapshot))
         self.assertEqual(json.loads(workspace_metadata["legacy_v2_before_counts"]), _dataset_counts(empty_snapshot))
@@ -61,44 +65,112 @@ class StorageMigrationTests(unittest.TestCase):
             diagnostics = store.diagnostics()
             reopened = EventStore(db_path=db_path)
             backup_paths = list((db_path.parent / "backups").glob("*.sqlite3"))
-            backup_mode = stat.S_IMODE(backup_paths[0].stat().st_mode)
-            backup_dir_mode = stat.S_IMODE(backup_paths[0].parent.stat().st_mode)
 
             with sqlite3.connect(db_path) as connection:
                 self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], CURRENT_SCHEMA_VERSION)
                 ledger = connection.execute("SELECT version, name, checksum FROM schema_migrations").fetchall()
                 self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
                 self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
-            with sqlite3.connect(backup_paths[0]) as backup_connection:
-                backup_event_count = backup_connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
-                backup_columns = {
-                    row[1] for row in backup_connection.execute("PRAGMA table_info(automation_reviews)").fetchall()
-                }
 
         self.assertEqual(len(store.events), len(events))
-        self.assertEqual(store.manual_labels[events[0].event_id], "Reviewed")
+        self.assertEqual(store.manual_labels[store.events[0].event_id], "Reviewed")
         self.assertEqual(store.get_settings()["retention_days"], 14)
         self.assertEqual(store.list_import_history()[0]["source"], "legacy_csv")
-        self.assertEqual(store.list_import_history()[0]["path"], "legacy.csv")
+        self.assertEqual(store.list_import_history()[0]["path"], "Imported data")
         self.assertEqual(store.automation_reviews["社内確認"], "adopted")
         self.assertEqual(diagnostics["schema_version"], CURRENT_SCHEMA_VERSION)
         self.assertEqual(diagnostics["migration_status"], "migrated")
-        self.assertTrue(diagnostics["migration_backup_created"])
+        self.assertFalse(diagnostics["migration_backup_created"])
         self.assertNotIn("backup_path", diagnostics)
         self.assertEqual(reopened.diagnostics()["migration_status"], "current")
-        self.assertEqual(len(backup_paths), 1)
-        self.assertEqual(backup_mode, 0o600)
-        self.assertEqual(backup_dir_mode, 0o700)
-        self.assertEqual(backup_event_count, len(events))
-        self.assertNotIn("note", backup_columns)
+        self.assertEqual(backup_paths, [])
         self.assertEqual(
             ledger,
             [
                 (1, "baseline_event_store", MIGRATIONS[0].checksum),
                 (2, "redact_import_history_paths", MIGRATIONS[1].checksum),
                 (3, "scope_records_to_projects", MIGRATIONS[2].checksum),
+                (4, "minimize_persisted_event_payloads", MIGRATIONS[3].checksum),
             ],
         )
+
+    def test_current_v4_database_refuses_a_missing_or_replaced_pseudonym_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            EventStore(db_path=db_path)
+            key_path = db_path.parent / PSEUDONYM_KEY_FILENAME
+            key_path.unlink()
+            with self.assertRaisesRegex(MigrationError, "pseudonym key"):
+                EventStore(db_path=db_path)
+
+            # Restoring an arbitrary 0600 key is not a recovery mechanism:
+            # its verifier must match the database-bound key material.
+            key_path.write_bytes(b"x" * 32)
+            key_path.chmod(0o600)
+            with self.assertRaisesRegex(MigrationError, "does not match"):
+                EventStore(db_path=db_path)
+
+    def test_v4_removes_raw_capture_values_from_current_event_payloads(self) -> None:
+        source_event = load_events_from_csv("data/sample/sample_events.csv")[0]
+        sentinel_values = {
+            "user_alias": "PII_SENTINEL_ALIAS",
+            "user_hash": "PII_SENTINEL_USER_HASH",
+            "window_title": "PII_SENTINEL_TITLE",
+            "url": "SECRET_SENTINEL_URL_PATH",
+        }
+        url_with_userinfo = "https://" + "PRIVATE_URL_USER:PRIVATE_URL_SECRET" + "@127.0.0.1:8443/private-path"
+        raw_event = replace(
+            source_event,
+            event_id="PRIVATE_EVENT_IDENTIFIER",
+            source_event_id="PRIVATE_SOURCE_IDENTIFIER",
+            case_id="PRIVATE_CASE_IDENTIFIER",
+            **sentinel_values,
+            window_title_masked="PII_SENTINEL_TITLE",
+            url_masked="SECRET_SENTINEL_URL_PATH",
+            domain=url_with_userinfo,
+            metadata_json=json.dumps({"unknown": "SECRET_SENTINEL_METADATA"}),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "opsmineflow.sqlite3"
+            migrate_database(db_path)
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("DELETE FROM schema_migrations WHERE version = 4")
+                connection.execute("PRAGMA user_version = 3")
+                connection.execute(
+                    "INSERT INTO events(project_id, event_id, payload_json) VALUES(?, ?, ?)",
+                    (LEGACY_PROJECT_ID, raw_event.event_id, json.dumps(raw_event.to_dict(), ensure_ascii=False)),
+                )
+                connection.execute(
+                    "INSERT INTO import_history(project_id, id, source, path, event_count, imported_at) VALUES(?, ?, ?, ?, ?, ?)",
+                    (LEGACY_PROJECT_ID, 1, "csv", "PII_SENTINEL_FILENAME.csv", 1, "2026-07-20T00:00:00+00:00"),
+                )
+            report = migrate_database(db_path)
+            with sqlite3.connect(db_path) as connection:
+                stored_event_id, payload = connection.execute("SELECT event_id, payload_json FROM events").fetchone()
+                import_path = connection.execute("SELECT path FROM import_history").fetchone()[0]
+            durable_contents = "\n".join(
+                artifact.read_bytes().decode("utf-8", errors="replace")
+                for artifact in db_path.parent.iterdir()
+                if artifact.is_file()
+            )
+
+        self.assertEqual(report.applied_migrations, (4,))
+        self.assertEqual(import_path, "CSV import")
+        self.assertTrue(str(stored_event_id).startswith("evt_v1_"))
+        self.assertIn('"domain":"127.0.0.1"', payload)
+        for sentinel in (
+            *sentinel_values.values(),
+            "PRIVATE_EVENT_IDENTIFIER",
+            "PRIVATE_SOURCE_IDENTIFIER",
+            "PRIVATE_CASE_IDENTIFIER",
+            "PRIVATE_URL_USER",
+            "PRIVATE_URL_SECRET",
+            "8443",
+            "SECRET_SENTINEL_METADATA",
+            "PII_SENTINEL_FILENAME",
+        ):
+            self.assertNotIn(sentinel, payload)
+            self.assertNotIn(sentinel, durable_contents)
 
     def test_all_historical_v01_table_sets_upgrade_to_the_baseline_schema(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
@@ -206,11 +278,11 @@ class StorageMigrationTests(unittest.TestCase):
                 foreign_key_check = connection.execute("PRAGMA foreign_key_check").fetchall()
 
         self.assertEqual(report.previous_version, 2)
-        self.assertEqual(report.schema_version, 3)
-        self.assertEqual(report.applied_migrations, (3,))
+        self.assertEqual(report.schema_version, 4)
+        self.assertEqual(report.applied_migrations, (3, 4))
         self.assertEqual(reopened.status, "current")
         self.assertEqual(project, (LEGACY_PROJECT_ID, "Migrated data", "legacy_migration", 0))
-        self.assertEqual(after, before)
+        self.assertEqual(_dataset_counts(after), _dataset_counts(before))
         self.assertEqual(workspace_metadata["active_project_id"], LEGACY_PROJECT_ID)
         self.assertEqual(workspace_metadata["legacy_v2_before_hash"], workspace_metadata["legacy_v3_after_hash"])
         self.assertEqual(workspace_metadata["legacy_v2_before_hash"], _dataset_hash(before))
@@ -276,13 +348,13 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertEqual(interrupted_ledger, [(1,), (2,)])
         self.assertNotIn("projects", interrupted_tables)
         self.assertEqual(interrupted_events, 1)
-        self.assertEqual(redo.applied_migrations, (3,))
+        self.assertEqual(redo.applied_migrations, (3, 4))
         self.assertEqual(project_count, 1)
         self.assertEqual(active_project, LEGACY_PROJECT_ID)
         self.assertEqual(migrated_events, 1)
         self.assertEqual(foreign_key_check, [])
 
-    def test_wal_legacy_database_snapshot_includes_committed_rows(self) -> None:
+    def test_wal_legacy_database_migrates_committed_rows_without_a_raw_snapshot(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "opsmineflow.sqlite3"
@@ -294,14 +366,12 @@ class StorageMigrationTests(unittest.TestCase):
                     (events[1].event_id, json.dumps(events[1].to_dict(), ensure_ascii=False)),
                 )
             store = EventStore(db_path=db_path)
-            backup_path = next((db_path.parent / "backups").glob("*.sqlite3"))
-            with sqlite3.connect(backup_path) as backup_connection:
-                backup_event_count = backup_connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+            backup_paths = list((db_path.parent / "backups").glob("*.sqlite3"))
 
         self.assertEqual(len(store.events), 2)
-        self.assertEqual(backup_event_count, 2)
+        self.assertEqual(backup_paths, [])
 
-    def test_failed_migration_rolls_back_and_leaves_preupgrade_snapshot(self) -> None:
+    def test_failed_migration_rolls_back_without_creating_a_raw_snapshot(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "opsmineflow.sqlite3"
@@ -324,9 +394,9 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertEqual(version, 0)
         self.assertEqual(event_count, 1)
         self.assertEqual(ledger_exists, 0)
-        self.assertEqual(len(backup_paths), 1)
+        self.assertEqual(backup_paths, [])
 
-    def test_wal_checkpoint_warning_does_not_report_a_committed_migration_as_rolled_back(self) -> None:
+    def test_privacy_migration_fails_closed_when_wal_cleanup_cannot_be_verified(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "opsmineflow.sqlite3"
@@ -335,16 +405,23 @@ class StorageMigrationTests(unittest.TestCase):
                 "opsmineflow_api.migrations._configure_wal",
                 side_effect=sqlite3.OperationalError("intentional WAL checkpoint failure"),
             ):
-                store = EventStore(db_path=db_path)
+                with self.assertRaises(MigrationError):
+                    EventStore(db_path=db_path)
+
+            recovered = EventStore(db_path=db_path)
 
             with sqlite3.connect(db_path) as connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
                 ledger_count = connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
+                cleanup_marker = connection.execute(
+                    "SELECT value FROM workspace_metadata WHERE key = ?",
+                    (PRIVACY_CLEANUP_METADATA_KEY,),
+                ).fetchone()[0]
 
         self.assertEqual(version, CURRENT_SCHEMA_VERSION)
         self.assertEqual(ledger_count, CURRENT_SCHEMA_VERSION)
-        self.assertEqual(store.diagnostics()["migration_status"], "migrated")
-        self.assertEqual(store.diagnostics()["wal_status"], "warning")
+        self.assertEqual(recovered.diagnostics()["migration_status"], "current")
+        self.assertEqual(cleanup_marker, "complete")
 
     def test_backup_cleanup_warning_does_not_hide_a_committed_migration(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
@@ -364,7 +441,7 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertEqual(store.diagnostics()["migration_status"], "migrated")
         self.assertEqual(store.diagnostics()["backup_cleanup_status"], "warning")
 
-    def test_failed_migration_backup_retention_is_bounded(self) -> None:
+    def test_failed_migration_does_not_create_raw_backup_copies(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "opsmineflow.sqlite3"
@@ -378,7 +455,7 @@ class StorageMigrationTests(unittest.TestCase):
                     EventStore(db_path=db_path, migration_fault_injector=fail_after_first_migration)
             backup_paths = list((db_path.parent / "backups").glob("*.sqlite3"))
 
-        self.assertEqual(len(backup_paths), 3)
+        self.assertEqual(backup_paths, [])
 
     def test_project_clear_retains_workspace_migration_snapshots(self) -> None:
         events = load_events_from_csv("data/sample/sample_events.csv")
@@ -386,14 +463,15 @@ class StorageMigrationTests(unittest.TestCase):
             db_path = Path(temp_dir) / "opsmineflow.sqlite3"
             _create_legacy_database(db_path, events[:1])
             store = EventStore(db_path=db_path)
-            self.assertTrue(list((db_path.parent / "backups").glob("*.sqlite3")))
+            backup_dir = db_path.parent / "backups"
+            backup_dir.mkdir(mode=0o700)
             interrupted_snapshot = db_path.parent / "backups" / ".opsmineflow.v0.interrupted.sqlite3.tmp"
             interrupted_snapshot.write_bytes(b"interrupted migration backup")
 
             store.clear()
             backup_paths = list((db_path.parent / "backups").glob("*.sqlite3*"))
 
-        self.assertEqual(len(backup_paths), 2)
+        self.assertEqual(len(backup_paths), 1)
 
     def test_newer_schema_is_rejected_without_mutating_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

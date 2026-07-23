@@ -15,7 +15,8 @@ fastapi_app = api_app_module.app
 from opsmineflow_api.auth import API_SESSION_HEADER, PROJECT_HEADER, DeleteChallengeStore, LocalApiPolicy, RequestRejected
 from opsmineflow_api.server import LocalApiHandler
 from opsmineflow_api.server import _start_parent_watchdog
-from opsmineflow_api.storage import StorageCommitError
+from opsmineflow_api.storage import EventStore, StorageCommitError
+from opsmineflow_mining import load_events_from_csv
 
 
 class LocalApiPolicyTests(unittest.TestCase):
@@ -253,6 +254,26 @@ class HandwrittenServerPolicyTests(unittest.TestCase):
                 }
             },
         )
+
+    def test_label_response_never_echoes_a_parser_bound_event_identifier(self) -> None:
+        source_event = load_events_from_csv("data/sample/sample_events.csv")[0]
+        store = EventStore(events=[source_event])
+        headers = {
+            API_SESSION_HEADER: "b" * 64,
+            "Content-Type": "application/json",
+            PROJECT_HEADER: store.project_id,
+        }
+        with patch("opsmineflow_api.server.default_store", return_value=store):
+            status, payload = self._request(
+                "POST",
+                "/events/label",
+                {"event_id": source_event.event_id, "label": "Reviewed"},
+                headers,
+            )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["event_id"], store.events[0].event_id)
+        self.assertNotEqual(payload["event_id"], source_event.event_id)
 
 
 class ParentWatchdogTests(unittest.TestCase):

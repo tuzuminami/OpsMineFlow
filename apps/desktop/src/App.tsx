@@ -1211,6 +1211,7 @@ function HomeView({
           <h2>{t("export.title")}</h2>
           <span>{exportPreview ? t("export.bytes", { count: exportPreview.byte_size }) : t("export.localOnly")}</span>
         </div>
+        <p>{t("export.safeDataProfile")}</p>
         <div className="inline-fields">
           <select
             value={exportFormat}
@@ -1262,22 +1263,7 @@ function HomeView({
           <h2>{t("settings.title")}</h2>
           <span>{t("settings.days", { count: settingsDraft.retention_days })}</span>
         </div>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={settingsDraft.mask_url_paths}
-            onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_url_paths: event.target.checked })}
-          />
-          <span>{t("settings.maskUrls")}</span>
-        </label>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={settingsDraft.mask_window_titles}
-            onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_window_titles: event.target.checked })}
-          />
-          <span>{t("settings.maskWindows")}</span>
-        </label>
+        <p>{t("settings.safeDataProfile")}</p>
         <label className="number-row">
           <span>{t("settings.retention")}</span>
           <input
@@ -1708,7 +1694,6 @@ function RecordingPanel({ data, actions, working }: { data: DashboardData; actio
       </div>
       <RecordingTimeline events={data.events} actions={actions} working={working} />
       {!status.available ? <div className="api-warning">{status.remediation || t("recording.unavailable")}</div> : null}
-      {status.last_error ? <div className="api-warning">{status.last_error}</div> : null}
     </section>
   );
 }
@@ -1918,15 +1903,12 @@ function findBreakCandidates(events: EventRecord[]): BreakCandidate[] {
 }
 
 function RecordingDiagnosticDetails({ status }: { status: RecordingStatus }) {
-  const { formatDateTime, t } = useI18n();
+  const { t } = useI18n();
   return (
     <div className="recording-diagnostic-card">
-      <Setting label={t("diagnostics.agentVersion")} value={status.agent_version || t("status.unknown")} />
-      <Setting label={t("diagnostics.agentPath")} value={status.agent_path || "-"} />
-      <Setting label={t("diagnostics.agentLog")} value={status.log_path || "-"} />
-      <Setting label={t("diagnostics.heartbeat")} value={status.last_heartbeat_at ? formatDateTime(status.last_heartbeat_at) : t("status.notChecked")} />
+      <Setting label={t("recording.title")} value={status.available ? t("status.available") : t("status.unavailable")} />
       <Setting label={t("diagnostics.captureScope")} value={status.capture_scope} />
-      <Setting label={t("diagnostics.sessionSafety")} value={t("diagnostics.sessionSafetyValue", { minutes: Math.round((status.token_ttl_seconds || 0) / 60), count: status.rate_limit_per_minute || 0 })} />
+      <Setting label={t("recording.eventsRecorded")} value={status.recorded_events.toString()} />
       {status.remediation ? <p>{status.remediation}</p> : null}
     </div>
   );
@@ -2557,22 +2539,7 @@ function SettingsView({ data, actions, working }: { data: DashboardData; actions
           <h2>{t("settings.privacy")}</h2>
           <span>{t("settings.days", { count: settingsDraft.retention_days })}</span>
         </div>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={settingsDraft.mask_url_paths}
-            onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_url_paths: event.target.checked })}
-          />
-          <span>{t("settings.maskUrls")}</span>
-        </label>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={settingsDraft.mask_window_titles}
-            onChange={(event) => setSettingsDraft({ ...settingsDraft, mask_window_titles: event.target.checked })}
-          />
-          <span>{t("settings.maskWindows")}</span>
-        </label>
+        <p>{t("settings.safeDataProfile")}</p>
         <label className="number-row">
           <span>{t("settings.retention")}</span>
           <input

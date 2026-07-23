@@ -99,9 +99,13 @@ Exports are written only to the local path chosen by the user.
 
 ### Database Upgrades and Recovery
 
-At startup, OpsMineFlow checks the local SQLite schema before loading records. When an upgrade is needed, it creates a private pre-upgrade snapshot under the local data directory's `backups/` folder and runs the ordered migration transaction. The three newest migration snapshots are retained. Diagnostics reports the schema version, migration status, integrity status, and whether a backup was created; it never exposes the backup path in the UI.
+At startup, OpsMineFlow checks the local SQLite schema before loading records. A pre-v4 upgrade runs as one transaction, securely compacts the rewritten database, checkpoints WAL, and does not create a plaintext pre-upgrade snapshot. If the final privacy cleanup cannot be verified, startup fails closed. Diagnostics reports schema and integrity status without exposing local paths. Future encrypted backup artifacts have a separate lifecycle.
 
-If startup reports that the database is from a newer app version, unknown, or failed to migrate, stop using that database. Do not delete or overwrite it. Preserve the database and its `backups/` folder, then open the snapshot only with a compatible OpsMineFlow build or follow the support/recovery procedure documented for that release. Clearing a project does not remove workspace-level migration snapshots. It cannot erase operating-system or Time Machine backups.
+If startup reports that the database is from a newer app version, unknown, or failed to migrate, stop using that database. Do not delete or overwrite it. Preserve the database and use a compatible OpsMineFlow build or the support/recovery procedure documented for that release. Clearing a project does not remove future encrypted recovery artifacts. It cannot erase operating-system or Time Machine backups.
+
+If startup reports a missing or mismatched local pseudonym key, do not create a
+replacement key. Restore the matching local key through the approved recovery
+procedure; generating a new one would break the database's stable opaque IDs.
 
 ## Problem Resolution
 
